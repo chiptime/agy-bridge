@@ -17,13 +17,15 @@
       "name": "agy-bridge-opencode",
       "version": "0.1.0",
       "dependencies": {
-        "agy-bridge-engine": "workspace:*",
+        "@ai-sdk/provider": "3.0.8",
+        "@opencode-ai/plugin": "1.18.30",
       },
       "devDependencies": {
         "@ai-sdk/provider": "3.0.8",
         "@opencode-ai/plugin": "1.18.30",
         "@opencode-ai/sdk": "1.18.30",
         "@types/bun": "latest",
+        "agy-bridge-engine": "workspace:*",
         "typescript": "^7.0.2",
       },
       "peerDependencies": {

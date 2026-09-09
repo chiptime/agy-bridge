@@ -121,10 +121,15 @@ export function resolveModel(id: string, user: Record<string, ModelConfig> = {})
  * Promise<Record<string, ModelV2>>`). Keys are BARE model suffixes — the
  * host namespaces them under the provider id — and each value is the full
  * SDK v2 Model descriptor. Transport truth: every model is served by our
- * own custom provider factory (package export "./provider"), NOT a direct
- * HTTP endpoint, so `api.url` stays empty and `api.npm` names this package.
- * Unknown economics/metadata are neutral zeros with an empty release date.
+ * own custom provider factory (this package's "./provider" export), NOT a
+ * direct HTTP endpoint. opencode's loader imports `api.npm` DIRECTLY when
+ * it starts with file:// (registry specs go through Npm.add, which cannot
+ * resolve an unpublished package), so self-reference the bundled provider
+ * entry: <this module's dir>/provider.js. Unknown economics/metadata are
+ * neutral zeros with an empty release date.
  */
+const TRANSPORT_NPM = new URL("provider.js", import.meta.url).href;
+
 export function buildModelRecord(
 	registry: readonly AgyModel[],
 	providerId: string,
@@ -135,7 +140,7 @@ export function buildModelRecord(
 		record[suffix] = {
 			id: suffix,
 			providerID: providerId,
-			api: { id: entry.modelArg ?? suffix, url: "", npm: "agy-bridge-opencode" },
+			api: { id: entry.modelArg ?? suffix, url: "", npm: TRANSPORT_NPM },
 			name: entry.name,
 			capabilities: {
 				temperature: true,

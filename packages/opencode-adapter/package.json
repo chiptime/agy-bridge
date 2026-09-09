@@ -1,34 +1,36 @@
 {
-	"name": "agy-bridge-opencode",
-	"version": "0.1.0",
-	"type": "module",
-	"private": true,
-	"scripts": {
-		"test": "bun test",
-		"typecheck": "tsc --noEmit"
-	},
-	"exports": {
-		".": {
-			"types": "./src/index.ts",
-			"default": "./src/index.ts"
-		},
-		"./provider": {
-			"types": "./src/provider.ts",
-			"default": "./src/provider.ts"
-		}
-	},
-	"dependencies": {
-		"agy-bridge-engine": "workspace:*"
-	},
-	"peerDependencies": {
-		"@opencode-ai/plugin": "1.18.30",
-		"@ai-sdk/provider": "3.0.8"
-	},
-	"devDependencies": {
-		"@ai-sdk/provider": "3.0.8",
-		"@opencode-ai/plugin": "1.18.30",
-		"@opencode-ai/sdk": "1.18.30",
-		"@types/bun": "latest",
-		"typescript": "^7.0.2"
-	}
+  "name": "agy-bridge-opencode",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "bun build src/index.ts src/provider.ts --outdir dist --target bun"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./provider": {
+      "types": "./src/provider.ts",
+      "default": "./dist/provider.js"
+    }
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@opencode-ai/plugin": "1.18.30",
+    "@ai-sdk/provider": "3.0.8"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "3.0.8",
+    "@opencode-ai/plugin": "1.18.30",
+    "@opencode-ai/sdk": "1.18.30",
+    "@types/bun": "latest",
+    "typescript": "^7.0.2",
+    "agy-bridge-engine": "workspace:*"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }

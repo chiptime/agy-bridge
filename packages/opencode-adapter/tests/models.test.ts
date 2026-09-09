@@ -163,6 +163,12 @@ describe("unit: models — host model record for the provider.models hook (Model
 		expect(m.capabilities.attachment).toBe(false);
 		expect(m.capabilities.input.text).toBe(true);
 		expect(m.cost).toEqual({ input: 0, output: 0, cache: { read: 0, write: 0 } });
+		// Transport self-reference: opencode imports api.npm DIRECTLY when it
+		// starts with file:// — the record must point at THIS package's
+		// provider entry so unpublished installs resolve their transport.
+		expect(m.api.url).toBe("");
+		expect(m.api.npm.startsWith("file://")).toBe(true);
+		expect(m.api.npm.endsWith("/provider.js")).toBe(true);
 		expect(m.options).toEqual({});
 		expect(m.headers).toEqual({});
 	});

@@ -63,12 +63,16 @@ describe("smoke(integration): host runtime contract (R3 pinned opencode)", () =>
 });
 
 describe("smoke(integration): package exports map serves both entries (R3.s1)", () => {
-	test('subpaths "." and "./provider" resolve to existing non-.js targets a consumer can import', async () => {
+	test('subpaths "." and "./provider" resolve to existing bundled targets a consumer can import', async () => {
 		const pkg = JSON.parse(readFileSync(`${pkgRoot}package.json`, "utf8"));
 		for (const sub of [".", "./provider"]) {
 			expect(pkg.exports[sub]).toBeDefined();
 			const target = pkg.exports[sub].default as string;
-			expect(target.endsWith(".js")).toBe(false);
+			// Distribution contract: the default targets are the BUNDLED dist
+			// files (engine inlined, host SDKs externalized) so a consumer
+			// outside the workspace needs no workspace:* resolution.
+			expect(target.startsWith("./dist/")).toBe(true);
+			expect(target.endsWith(".js")).toBe(true);
 			expect(existsSync(`${pkgRoot}${target.replace("./", "")}`)).toBe(true);
 		}
 		// Real consumer resolution: self-reference goes through the exports
