@@ -31,7 +31,7 @@ import type { AgyUsage } from "agy-bridge-engine";
 import { runTurn, TurnError, type TurnDeps, type TurnRequest, type TurnResult } from "./turn";
 import type { AgyAdapterConfig } from "./config";
 import type { SessionStore } from "./session-store";
-import { mapMessages, type PromptMessage } from "./messages";
+import { hashesArePrefix, mapMessages, messageHashes, renderSeed, type PromptMessage } from "./messages";
 import { resolveModel } from "./models";
 
 /** Injectable turn runner — tests fake this to pin the mapping in isolation. */
@@ -94,6 +94,15 @@ function toV3Usage(usage: AgyUsage | undefined): LanguageModelV3Usage {
 }
 
 const STOP: LanguageModelV3FinishReason = { unified: "stop", raw: undefined };
+
+/**
+ * v1.1: CLI responses may carry CRLF line endings; the V3 text contract this
+ * adapter emits is LF-only with no trailing whitespace at the very end of
+ * the response. Applied once to the FULL response before the text-delta.
+ */
+export function normalizeResponseText(text: string): string {
+	return text.replace(/\r\n/g, "\n").replace(/\s+$/, "");
+}
 
 /** Known narrating fields first; unknown payloads degrade to compact JSON. */
 function stepSummary(line: string): string {
@@ -214,15 +223,33 @@ export class AgyLanguageModel implements LanguageModelV3 {
 	async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
 		// R5 wiring: the prompt is reduced to the last user turn; the system
 		// text is prepended only when this session has no stored conversation.
+		// v1.1 divergence: opencode re-sends the FULL message array every
+		// turn, so the per-message hashes of the incoming array are compared
+		// against the stored baseline. A stored entry whose hashes are NOT a
+		// prefix of the incoming ones means the visible thread was edited,
+		// reordered, or truncated — this turn becomes a SEEDED prompt (bounded
+		// re-render of the visible thread) for a FRESH agy conversation, and
+		// turn.ts stores the new conversation id + hashes as the baseline.
+		// turn.ts owns the authoritative resume/fresh decision from the same
+		// baseline; this pre-computation only selects prompt building.
 		const { deps, modelArg } = this;
 		const ctx = readSessionContext(options.providerOptions);
 		const sessionId = ctx.sessionId ?? randomUUID();
-		const isNewConversation = (await deps.store.get(sessionId)) === undefined;
 		// Boundary cast (documented in messages.ts): V3 prompt messages are a
 		// closed union without index signatures; mapMessages only reads
 		// role/content/part.type and validates shapes at runtime.
-		const mapping = mapMessages(options.prompt as unknown as PromptMessage[], { isNewConversation });
-		const warnings: SharedV3Warning[] = mapping.warnings.map((w) => ({ type: "other", message: w }));
+		const incoming = options.prompt as unknown as PromptMessage[];
+		const hashes = messageHashes(incoming);
+		const entry = await deps.store.getEntry(sessionId);
+		const diverged =
+			entry !== undefined && entry.hashes !== undefined && !hashesArePrefix(entry.hashes, hashes);
+		const isNewConversation = entry === undefined || diverged;
+		const seedInfo = diverged ? renderSeed(incoming) : undefined;
+		const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
+		const warnings: SharedV3Warning[] = [...(seedInfo?.warnings ?? []), ...mapping.warnings].map((w) => ({
+			type: "other",
+			message: w,
+		}));
 		const run = deps.run ?? runTurn;
 		const stream = new ReadableStream<LanguageModelV3StreamPart>({
 			async start(controller) {
@@ -245,6 +272,8 @@ export class AgyLanguageModel implements LanguageModelV3 {
 						},
 						{
 							prompt: mapping.prompt,
+							hashes,
+							seedPrompt: diverged ? mapping.prompt : undefined,
 							modelArg,
 							sessionId,
 							signal: options.abortSignal,
@@ -265,10 +294,19 @@ export class AgyLanguageModel implements LanguageModelV3 {
 									delta: "(agy timed out mid-turn; resuming the captured conversation once)\n",
 								});
 							},
+							onDiverged: () => {
+								// v1.1: divergence re-seed is invisible downstream except here.
+								openReasoning();
+								controller.enqueue({
+									type: "reasoning-delta",
+									id: REASONING_ID,
+									delta: "⟲ history diverged — new agy conversation seeded\n",
+								});
+							},
 						},
 					);
 					if (reasoningOpen) controller.enqueue({ type: "reasoning-end", id: REASONING_ID });
-					const text = result.run.envelope?.response ?? "";
+					const text = normalizeResponseText(result.run.envelope?.response ?? "");
 					if (text !== "") {
 						controller.enqueue({ type: "text-start", id: TEXT_ID });
 						controller.enqueue({ type: "text-delta", id: TEXT_ID, delta: text });

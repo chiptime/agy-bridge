@@ -43,6 +43,34 @@ scales the window opencode shows.
 - `session`: the turn runs directly in the opencode worktree (requires an
   absolute, existing worktree — config error otherwise).
 
+## History divergence (re-seeding)
+
+agy owns the conversation: each turn forwards only the last user message and
+resumes via the stored conversation id. But opencode re-sends the full message
+array every turn, and if you **edit, delete, or reorder earlier messages** in
+the client, the visible thread no longer matches agy's server-side history —
+agy would answer with stale context silently.
+
+The adapter detects this by keeping a per-session baseline of ordered
+per-message hashes (first 16 hex of sha256 of each forwarded message, in
+`opencode-sessions.json`) and comparing it against the incoming array:
+
+- **Linear continuation** (baseline is a prefix of the incoming hashes) or no
+  baseline yet → resume as usual.
+- **Unknown baseline** (session mapped before this feature shipped) → adopted
+  as-is for one turn (resuming preserves agy's context), then protection is
+  active from the stored hashes onward.
+- **Divergence** (baseline not a prefix — earlier messages changed) → a fresh
+  agy conversation is started and the prompt becomes a bounded re-seed: the
+  last **20** text-bearing messages rendered as `User: …` / `Assistant: …`
+  inside a guarded block, each text truncated to **4000** chars, followed by
+  your actual message. The reasoning panel shows
+  `⟲ history diverged — new agy conversation seeded`. The new conversation id
+  becomes the stored baseline.
+
+Responses are CRLF-normalized ( `\r\n` → `\n` ) and trailing whitespace at the
+very end of a response is stripped before it reaches opencode.
+
 ## Errors you will see
 
 Missing `agy` → "install agy" (fatal). Transient outage → retried once

@@ -6,6 +6,12 @@
  * temp-file + rename so concurrent writers never leave partial JSON.
  * Entries older than 30 days are pruned on load and on bind; a missing or
  * corrupt file is treated as empty and replaced atomically.
+ *
+ * v1.1 divergence baseline: each entry optionally carries `hashes` — the
+ * ordered per-message hashes of the opencode prompt array AS FORWARDED for
+ * that conversation (messages.messageHashes). Entries written before v1.1
+ * have no hashes (unknown baseline): the adapter adopts them as-is for one
+ * turn, then stores a baseline and protection is active.
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -13,8 +19,13 @@ import { randomUUID } from "node:crypto";
 
 export const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
-interface StoredEntry {
+export interface SessionEntry {
 	conversationId: string;
+	/** Divergence baseline: ordered hashes of the forwarded prompt array. Absent on pre-upgrade entries (unknown baseline). */
+	hashes?: string[];
+}
+
+interface StoredEntry extends SessionEntry {
 	updatedAt: string;
 }
 interface StoreFile {
@@ -24,7 +35,9 @@ interface StoreFile {
 
 export interface SessionStore {
 	get(sessionId: string): Promise<string | undefined>;
-	bind(sessionId: string, conversationId: string): Promise<void>;
+	/** Full entry including the v1.1 divergence baseline; undefined when unbound. */
+	getEntry(sessionId: string): Promise<SessionEntry | undefined>;
+	bind(sessionId: string, conversationId: string, hashes?: string[]): Promise<void>;
 	/** Failed resume → drop the mapping so the next turn runs fresh. */
 	rebind(sessionId: string): Promise<void>;
 	/** Drop entries older than 30 days; returns the pruned count. */
@@ -87,11 +100,28 @@ export function openSessionStore(path: string): SessionStore {
 	};
 	return {
 		get: (sessionId) => chain(globalSlot, () => load().sessions[sessionId]?.conversationId),
-		bind: (sessionId, conversationId) =>
+		getEntry: (sessionId) =>
+			chain(globalSlot, () => {
+				const entry = load().sessions[sessionId];
+				if (!entry) return undefined;
+				// Thin defense against a hand-edited file: a non-array or
+				// non-string-element hashes field degrades to unknown baseline.
+				const hashes = Array.isArray(entry.hashes)
+					? entry.hashes.filter((h): h is string => typeof h === "string")
+					: undefined;
+				return hashes === undefined
+					? { conversationId: entry.conversationId }
+					: { conversationId: entry.conversationId, hashes };
+			}),
+		bind: (sessionId, conversationId, hashes) =>
 			chain(keyedSlot(sessionId), () =>
 				chain(globalSlot, () => {
 					const file = load();
-					file.sessions[sessionId] = { conversationId, updatedAt: new Date().toISOString() };
+					file.sessions[sessionId] = {
+						conversationId,
+						updatedAt: new Date().toISOString(),
+						...(hashes !== undefined ? { hashes } : {}),
+					};
 					persist(file);
 				}),
 			),

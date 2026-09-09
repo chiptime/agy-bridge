@@ -429,9 +429,20 @@ function openSessionStore(path) {
   };
   return {
     get: (sessionId) => chain(globalSlot, () => load().sessions[sessionId]?.conversationId),
-    bind: (sessionId, conversationId) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => {
+    getEntry: (sessionId) => chain(globalSlot, () => {
+      const entry = load().sessions[sessionId];
+      if (!entry)
+        return;
+      const hashes = Array.isArray(entry.hashes) ? entry.hashes.filter((h) => typeof h === "string") : undefined;
+      return hashes === undefined ? { conversationId: entry.conversationId } : { conversationId: entry.conversationId, hashes };
+    }),
+    bind: (sessionId, conversationId, hashes) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => {
       const file = load();
-      file.sessions[sessionId] = { conversationId, updatedAt: new Date().toISOString() };
+      file.sessions[sessionId] = {
+        conversationId,
+        updatedAt: new Date().toISOString(),
+        ...hashes !== undefined ? { hashes } : {}
+      };
       persist(file);
     })),
     rebind: (sessionId) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => {
@@ -791,6 +802,92 @@ function defaultRunner(bin, timeoutMs) {
 // src/turn.ts
 import { dirname as dirname2 } from "path";
 
+// src/messages.ts
+import { createHash } from "crypto";
+var SEED_MAX_MESSAGES = 20;
+var SEED_MAX_CHARS = 4000;
+var SEED_HEADER = "--- Previous conversation (context restored after edits in the client) ---";
+var SEED_FOOTER = "--- End of previous conversation ---";
+function isTextPart(p) {
+  return p.type === "text" && typeof p["text"] === "string";
+}
+function messageHashes(messages) {
+  return messages.map((m) => createHash("sha256").update(JSON.stringify(m)).digest("hex").slice(0, 16));
+}
+function hashesArePrefix(stored, incoming) {
+  if (stored.length > incoming.length)
+    return false;
+  return stored.every((h, i) => h === incoming[i]);
+}
+function renderSeed(messages, k = SEED_MAX_MESSAGES) {
+  const warnings = [];
+  const rendered = [];
+  for (const m of messages) {
+    if (m.role !== "user" && m.role !== "assistant")
+      continue;
+    const texts = [];
+    if (typeof m.content === "string") {
+      texts.push(m.content);
+    } else if (Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if (isTextPart(part))
+          texts.push(part.text);
+        else
+          warnings.push(`dropped non-text part (type: ${String(part?.type)}) from a seeded history message`);
+      }
+    }
+    const text = texts.join(`
+`);
+    if (text === "")
+      continue;
+    rendered.push({
+      label: m.role === "user" ? "User" : "Assistant",
+      text: text.length > SEED_MAX_CHARS ? text.slice(0, SEED_MAX_CHARS) : text
+    });
+  }
+  const kept = rendered.slice(-k);
+  if (kept.length === 0)
+    return { seed: "", warnings };
+  const body = kept.map((r) => `${r.label}: ${r.text}`).join(`
+`);
+  return { seed: `${SEED_HEADER}
+${body}
+${SEED_FOOTER}`, warnings };
+}
+function mapMessages(messages, opts) {
+  const warnings = [];
+  const systemText = messages.filter((m) => m.role === "system").map((m) => typeof m.content === "string" ? m.content.trim() : "").filter((s) => s !== "").join(`
+
+`);
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  let userText = "";
+  if (typeof lastUser?.content === "string") {
+    userText = lastUser.content;
+  } else if (Array.isArray(lastUser?.content)) {
+    const texts = [];
+    for (const part of lastUser.content) {
+      if (isTextPart(part)) {
+        texts.push(part.text);
+      } else {
+        warnings.push(`dropped non-text part (type: ${String(part?.type)}) from the last user turn`);
+      }
+    }
+    if (texts.length === 0)
+      warnings.push("last user turn has no text parts");
+    userText = texts.join(`
+`);
+  }
+  const sections = [];
+  if (opts.isNewConversation && systemText !== "")
+    sections.push(systemText);
+  if (opts.seed !== undefined && opts.seed !== "")
+    sections.push(opts.seed);
+  sections.push(userText);
+  return { prompt: sections.join(`
+
+`), warnings };
+}
+
 // src/stream-tap.ts
 import { spawn as spawn3 } from "child_process";
 function createTap(onLine, opts = {}) {
@@ -996,12 +1093,25 @@ async function runTurn(deps, req) {
   if (workdir.scratch)
     pruneScratch(dirname2(workdir.dir));
   const logPath = `${workdir.dir}/run.log`;
-  const resumeId = await deps.store.get(req.sessionId);
-  const attempt = async (resumeConversationId, resumed) => {
+  const entry = await deps.store.getEntry(req.sessionId);
+  let diverged = false;
+  let resumeId;
+  if (entry === undefined) {
+    resumeId = undefined;
+  } else if (entry.hashes === undefined) {
+    resumeId = entry.conversationId;
+  } else if (hashesArePrefix(entry.hashes, req.hashes)) {
+    resumeId = entry.conversationId;
+  } else {
+    diverged = true;
+    req.onDiverged?.();
+  }
+  const prompt = diverged ? req.seedPrompt ?? req.prompt : req.prompt;
+  const attempt = async (resumeConversationId, resumed, turnPrompt) => {
     const tap = createTap(req.onLine, { signal: req.signal, spawnFn: deps.spawnFn });
     const run = await runAgyStream({
       bin: deps.bin,
-      prompt: req.prompt,
+      prompt: turnPrompt,
       workdir: workdir.dir,
       timeoutMs: deps.config.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
       model: req.modelArg,
@@ -1022,14 +1132,15 @@ async function runTurn(deps, req) {
       classification,
       run,
       resumed,
+      diverged,
       logPath,
       conversationId: run.conversationId ?? tap.conversationId
     };
   };
-  let result = await attempt(resumeId, resumeId !== undefined);
+  let result = await attempt(resumeId, resumeId !== undefined, prompt);
   const persistAndThrowAbort = async () => {
     if (result.conversationId)
-      await deps.store.bind(req.sessionId, result.conversationId);
+      await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
     throw abortError();
   };
   if (req.signal?.aborted)
@@ -1037,13 +1148,13 @@ async function runTurn(deps, req) {
   const canResume = result.classification.outcome === "timeout" && !result.resumed && result.conversationId !== undefined;
   if (canResume) {
     req.onResume?.();
-    result = await attempt(result.conversationId, true);
+    result = await attempt(result.conversationId, true, prompt);
     if (req.signal?.aborted)
       await persistAndThrowAbort();
   }
   if (result.classification.outcome === "success") {
     if (result.conversationId)
-      await deps.store.bind(req.sessionId, result.conversationId);
+      await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
     return result;
   }
   if (result.resumed)
@@ -1054,39 +1165,6 @@ async function runTurn(deps, req) {
     resumed: result.resumed,
     detail: result.run.envelope?.error
   }));
-}
-
-// src/messages.ts
-function isTextPart(p) {
-  return p.type === "text" && typeof p["text"] === "string";
-}
-function mapMessages(messages, opts) {
-  const warnings = [];
-  const systemText = messages.filter((m) => m.role === "system").map((m) => typeof m.content === "string" ? m.content.trim() : "").filter((s) => s !== "").join(`
-
-`);
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  let userText = "";
-  if (typeof lastUser?.content === "string") {
-    userText = lastUser.content;
-  } else if (Array.isArray(lastUser?.content)) {
-    const texts = [];
-    for (const part of lastUser.content) {
-      if (isTextPart(part)) {
-        texts.push(part.text);
-      } else {
-        warnings.push(`dropped non-text part (type: ${String(part?.type)}) from the last user turn`);
-      }
-    }
-    if (texts.length === 0)
-      warnings.push("last user turn has no text parts");
-    userText = texts.join(`
-`);
-  }
-  const prompt = opts.isNewConversation && systemText !== "" ? `${systemText}
-
-${userText}` : userText;
-  return { prompt, warnings };
 }
 
 // src/models.ts
@@ -1205,6 +1283,10 @@ function toV3Usage(usage) {
   };
 }
 var STOP = { unified: "stop", raw: undefined };
+function normalizeResponseText(text) {
+  return text.replace(/\r\n/g, `
+`).replace(/\s+$/, "");
+}
 function stepSummary(line) {
   let parsed;
   try {
@@ -1317,9 +1399,17 @@ class AgyLanguageModel {
     const { deps, modelArg } = this;
     const ctx = readSessionContext(options.providerOptions);
     const sessionId = ctx.sessionId ?? randomUUID2();
-    const isNewConversation = await deps.store.get(sessionId) === undefined;
-    const mapping = mapMessages(options.prompt, { isNewConversation });
-    const warnings = mapping.warnings.map((w) => ({ type: "other", message: w }));
+    const incoming = options.prompt;
+    const hashes = messageHashes(incoming);
+    const entry = await deps.store.getEntry(sessionId);
+    const diverged = entry !== undefined && entry.hashes !== undefined && !hashesArePrefix(entry.hashes, hashes);
+    const isNewConversation = entry === undefined || diverged;
+    const seedInfo = diverged ? renderSeed(incoming) : undefined;
+    const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
+    const warnings = [...seedInfo?.warnings ?? [], ...mapping.warnings].map((w) => ({
+      type: "other",
+      message: w
+    }));
     const run = deps.run ?? runTurn;
     const stream = new ReadableStream({
       async start(controller) {
@@ -1340,6 +1430,8 @@ class AgyLanguageModel {
             spawnFn: deps.spawnFn
           }, {
             prompt: mapping.prompt,
+            hashes,
+            seedPrompt: diverged ? mapping.prompt : undefined,
             modelArg,
             sessionId,
             signal: options.abortSignal,
@@ -1357,11 +1449,20 @@ class AgyLanguageModel {
                 delta: `(agy timed out mid-turn; resuming the captured conversation once)
 `
               });
+            },
+            onDiverged: () => {
+              openReasoning();
+              controller.enqueue({
+                type: "reasoning-delta",
+                id: REASONING_ID,
+                delta: `\u27F2 history diverged \u2014 new agy conversation seeded
+`
+              });
             }
           });
           if (reasoningOpen)
             controller.enqueue({ type: "reasoning-end", id: REASONING_ID });
-          const text = result.run.envelope?.response ?? "";
+          const text = normalizeResponseText(result.run.envelope?.response ?? "");
           if (text !== "") {
             controller.enqueue({ type: "text-start", id: TEXT_ID });
             controller.enqueue({ type: "text-delta", id: TEXT_ID, delta: text });

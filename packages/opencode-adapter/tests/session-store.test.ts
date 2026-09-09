@@ -92,3 +92,41 @@ describe("unit: session-store — R7 bind/get/rebind, atomic concurrent writes, 
 		expect(JSON.parse(readFileSync(path, "utf8")).sessions["sess-x"].conversationId).toBe("conv-x");
 	});
 });
+
+describe("unit: session-store — v1.1 divergence baseline (hashes)", () => {
+	test("bind stores the ordered hashes; getEntry returns the full entry; get stays the id sugar", async () => {
+		const { path, store } = await setup();
+		await store.bind("sess-h", "conv-h", ["aa", "bb"]);
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		expect(raw.sessions["sess-h"].hashes).toEqual(["aa", "bb"]);
+		expect(await store.getEntry("sess-h")).toEqual({ conversationId: "conv-h", hashes: ["aa", "bb"] });
+		expect(await store.get("sess-h")).toBe("conv-h");
+	});
+
+	test("pre-upgrade entry without hashes loads as the unknown baseline (hashes undefined)", async () => {
+		const dir = await mkdtemp("/tmp/agy-store-legacy-");
+		const path = join(dir, "opencode-sessions.json");
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(
+			path,
+			JSON.stringify({
+				version: 1,
+				sessions: { "sess-legacy": { conversationId: "conv-old", updatedAt: iso(-DAY_MS) } },
+			}),
+		);
+		const store = openSessionStore(path);
+		const entry = await store.getEntry("sess-legacy");
+		expect(entry?.conversationId).toBe("conv-old");
+		expect(entry?.hashes).toBeUndefined();
+		expect(await store.getEntry("never-bound")).toBeUndefined();
+	});
+
+	test("rebinding without hashes replaces the entry and drops stale hashes", async () => {
+		const { store } = await setup();
+		await store.bind("sess-r", "conv-1", ["h0"]);
+		await store.bind("sess-r", "conv-2");
+		const entry = await store.getEntry("sess-r");
+		expect(entry?.conversationId).toBe("conv-2");
+		expect(entry?.hashes).toBeUndefined();
+	});
+});

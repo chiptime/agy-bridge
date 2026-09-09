@@ -31,6 +31,7 @@ const OK_RESULT: TurnResult = {
 		conversationId: "c1",
 	},
 	resumed: false,
+	diverged: false,
 	logPath: "/tmp/run.log",
 	conversationId: "c1",
 };

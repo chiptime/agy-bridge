@@ -8,6 +8,21 @@
  * failure maps onto provider semantics via errors.ts and throws TurnError.
  * Abort kills the child through the stream tap, persists the tapped
  * conversation id, then rejects with an AbortError (D2).
+ *
+ * v1.1 divergence policy — decided BEFORE the timeout-resume machinery:
+ * - no stored entry → first turn: fresh agy conversation, last-user-turn
+ *   prompt (unchanged behavior);
+ * - stored entry WITHOUT hashes (pre-upgrade) → unknown baseline: ADOPT it
+ *   and treat the turn as linear (resuming preserves agy's context; one
+ *   adoption turn, then the incoming hashes are stored and protection is
+ *   active);
+ * - stored hashes a PREFIX of the incoming hashes → linear continuation:
+ *   resume via --conversation (unchanged behavior);
+ * - otherwise (earlier messages edited/deleted/reordered in the client) →
+ *   DIVERGED: fresh agy conversation with the caller's seedPrompt (a bounded
+ *   re-render of the visible thread, messages.renderSeed), onDiverged fires,
+ *   and after success the NEW conversation id + incoming hashes become the
+ *   baseline.
  */
 import {
 	classifyRun,
@@ -20,6 +35,7 @@ import {
 import type { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import type { AgyAdapterConfig } from "./config";
+import { hashesArePrefix } from "./messages";
 import type { SessionStore } from "./session-store";
 import { createTap } from "./stream-tap";
 import { prepareWorkdir, pruneScratch } from "./workdir";
@@ -32,12 +48,23 @@ export interface TurnResult {
 	classification: Classification;
 	run: SpawnRun;
 	resumed: boolean;
+	/** v1.1: the visible thread diverged from agy's history; a fresh, seeded conversation was started. */
+	diverged: boolean;
 	logPath: string;
 	conversationId?: string;
 }
 
 export interface TurnRequest {
 	prompt: string;
+	/**
+	 * v1.1: ordered per-message hashes of the opencode prompt array AS
+	 * FORWARDED this turn (messages.messageHashes). Compared against the
+	 * stored baseline to pick resume vs fresh re-seed, then stored as the
+	 * new baseline after a successful turn.
+	 */
+	hashes: string[];
+	/** v1.1: seeded prompt used INSTEAD of prompt when divergence is detected. */
+	seedPrompt?: string;
 	/** Resolved --model value; undefined means agy picks its own default. */
 	modelArg?: string;
 	sessionId: string;
@@ -46,6 +73,8 @@ export interface TurnRequest {
 	onLine?: (line: string) => void;
 	/** Announces the single resume attempt (D5 status part). */
 	onResume?: () => void;
+	/** v1.1: announces the divergence re-seed (status part). */
+	onDiverged?: () => void;
 }
 
 export interface TurnDeps {
@@ -99,12 +128,32 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 	});
 	if (workdir.scratch) pruneScratch(dirname(workdir.dir));
 	const logPath = `${workdir.dir}/run.log`;
-	const resumeId = await deps.store.get(req.sessionId);
-	const attempt = async (resumeConversationId: string | undefined, resumed: boolean): Promise<TurnResult> => {
+	// v1.1 divergence decision (see header comment): pick resume id vs
+	// fresh-and-seeded BEFORE any spawn. The timeout resume-once machinery
+	// below is unchanged and composes with both shapes.
+	const entry = await deps.store.getEntry(req.sessionId);
+	let diverged = false;
+	let resumeId: string | undefined;
+	if (entry === undefined) {
+		resumeId = undefined; // first turn: fresh, last-user-turn only
+	} else if (entry.hashes === undefined) {
+		resumeId = entry.conversationId; // unknown baseline: adopt once, then protected
+	} else if (hashesArePrefix(entry.hashes, req.hashes)) {
+		resumeId = entry.conversationId; // linear continuation
+	} else {
+		diverged = true; // edited/deleted/reordered history → fresh re-seed
+		req.onDiverged?.();
+	}
+	const prompt = diverged ? (req.seedPrompt ?? req.prompt) : req.prompt;
+	const attempt = async (
+		resumeConversationId: string | undefined,
+		resumed: boolean,
+		turnPrompt: string,
+	): Promise<TurnResult> => {
 		const tap = createTap(req.onLine, { signal: req.signal, spawnFn: deps.spawnFn });
 		const run = await runAgyStream({
 			bin: deps.bin,
-			prompt: req.prompt,
+			prompt: turnPrompt,
 			workdir: workdir.dir,
 			timeoutMs: deps.config.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
 			model: req.modelArg,
@@ -125,13 +174,14 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			classification,
 			run,
 			resumed,
+			diverged,
 			logPath,
 			conversationId: run.conversationId ?? tap.conversationId,
 		};
 	};
-	let result = await attempt(resumeId, resumeId !== undefined);
+	let result = await attempt(resumeId, resumeId !== undefined, prompt);
 	const persistAndThrowAbort = async (): Promise<never> => {
-		if (result.conversationId) await deps.store.bind(req.sessionId, result.conversationId);
+		if (result.conversationId) await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
 		throw abortError();
 	};
 	if (req.signal?.aborted) await persistAndThrowAbort();
@@ -141,11 +191,11 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		result.classification.outcome === "timeout" && !result.resumed && result.conversationId !== undefined;
 	if (canResume) {
 		req.onResume?.();
-		result = await attempt(result.conversationId, true);
+		result = await attempt(result.conversationId, true, prompt);
 		if (req.signal?.aborted) await persistAndThrowAbort();
 	}
 	if (result.classification.outcome === "success") {
-		if (result.conversationId) await deps.store.bind(req.sessionId, result.conversationId);
+		if (result.conversationId) await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
 		return result;
 	}
 	if (result.resumed) await deps.store.rebind(req.sessionId);

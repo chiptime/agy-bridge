@@ -14,23 +14,31 @@
 import { describe, expect, test } from "bun:test";
 import { APICallError, type LanguageModelV3, type SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { AgyEnvelope } from "agy-bridge-engine";
-import { AgyLanguageModel, formatStepUpdate } from "../src/language-model";
+import { AgyLanguageModel, formatStepUpdate, normalizeResponseText } from "../src/language-model";
+import { messageHashes, type PromptMessage } from "../src/messages";
 import { TurnError, type TurnDeps, type TurnRequest, type TurnResult } from "../src/turn";
-import type { SessionStore } from "../src/session-store";
+import type { SessionEntry, SessionStore } from "../src/session-store";
 import { resolveConfig, type AgyAdapterConfig } from "../src/config";
 
-/** Minimal fake store: a fixed mapping (or none) plus a call log. */
-function fakeStore(existing?: string): { store: SessionStore; lookedUp: string[] } {
-	const lookedUp: string[] = [];
+/** Minimal fake store: fixed entries (optionally with the v1.1 hashes
+ * baseline) plus a log of binds. */
+function fakeStore(entries: Record<string, SessionEntry> = {}): {
+	store: SessionStore;
+	bound: Array<{ sessionId: string; conversationId: string; hashes?: string[] }>;
+} {
+	const bound: Array<{ sessionId: string; conversationId: string; hashes?: string[] }> = [];
 	return {
-		lookedUp,
+		bound,
 		store: {
-			get: async (id) => {
-				lookedUp.push(id);
-				return existing;
+			get: async (id) => entries[id]?.conversationId,
+			getEntry: async (id) => entries[id],
+			bind: async (id, conversationId, hashes) => {
+				bound.push({ sessionId: id, conversationId, hashes });
+				entries[id] = hashes ? { conversationId, hashes } : { conversationId };
 			},
-			bind: async () => {},
-			rebind: async () => {},
+			rebind: async (id) => {
+				delete entries[id];
+			},
 			prune: async () => 0,
 		},
 	};
@@ -49,12 +57,15 @@ interface FakeRun {
 }
 
 /** Fake runner: records deps+req, replays lines, optionally resumes/throws
- * (the throw lands AFTER the lines so mid-run failure states are testable). */
+ * (the throw lands AFTER the lines so mid-run failure states are testable).
+ * Mirrors the runTurn contract it stands in for: onDiverged fires iff the
+ * request carries a seedPrompt (turn.ts calls it exactly when it re-seeds). */
 function fakeRunner(run: FakeRun): (deps: TurnDeps, req: TurnRequest) => Promise<TurnResult> {
 	return async (deps, req) => {
 		for (const line of run.lines ?? []) req.onLine?.(line);
 		if (run.throw) throw run.throw;
 		if (run.resume) req.onResume?.();
+		if (req.seedPrompt !== undefined) req.onDiverged?.();
 		return {
 			classification: { outcome: "success", reason: "" },
 			run: {
@@ -66,6 +77,7 @@ function fakeRunner(run: FakeRun): (deps: TurnDeps, req: TurnRequest) => Promise
 				conversationId: run.envelope?.conversation_id,
 			},
 			resumed: run.resume ?? false,
+			diverged: false,
 			logPath: "/tmp/agy-run-x/run.log",
 			conversationId: run.envelope?.conversation_id,
 		};
@@ -94,8 +106,8 @@ const PROMPT = [
 	{ role: "user", content: [{ type: "text", text: "second question" }] },
 ] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
 
-function makeModel(run: FakeRun, existing?: string) {
-	const { store, lookedUp } = fakeStore(existing);
+function makeModel(run: FakeRun, entries: Record<string, SessionEntry> = {}) {
+	const { store, bound } = fakeStore(entries);
 	const model = new AgyLanguageModel({
 		provider: "agy",
 		modelId: "agy/default",
@@ -103,7 +115,7 @@ function makeModel(run: FakeRun, existing?: string) {
 		store,
 		run: fakeRunner(run),
 	});
-	return { model, lookedUp };
+	return { model, bound };
 }
 
 /** Drain a doStream result into an ordered part list. */
@@ -182,7 +194,7 @@ describe("unit: language-model — V3 mapping (R4, D5/D6, R6)", () => {
 
 	test("runner receives the mapped prompt, modelArg, session context, and abort signal", async () => {
 		const seen: Seen[] = [];
-		const { store } = fakeStore("conv-existing");
+		const { store } = fakeStore({ "sess-9": { conversationId: "conv-existing" } });
 		const controller = new AbortController();
 		const model = new AgyLanguageModel({
 			provider: "agy",
@@ -408,5 +420,123 @@ describe("unit: formatStepUpdate — readable progress lines", () => {
 		} as unknown as Record<string, unknown>;
 		expect(() => formatStepUpdate(hostile)).not.toThrow();
 		expect(formatStepUpdate(hostile)).toBe("(step update)\n");
+	});
+});
+
+describe("unit: language-model — v1.1 divergence re-seeding", () => {
+	// Note: binding of the new baseline (conversationId + hashes) happens
+	// inside runTurn; turn.test.ts owns that against the real store. These
+	// tests pin the language-model MAPPING: seeded prompt, hashes on the
+	// request, and the ⟲ status line.
+	test("divergence: seeded prompt (system + prior thread + new turn), hashes forwarded, ⟲ status line", async () => {
+		const seen: Seen[] = [];
+		const { store } = fakeStore({
+			"sess-div": { conversationId: "conv-old", hashes: ["stale-0", "stale-1", "stale-2", "stale-3"] },
+		});
+		const model = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			config: resolveConfig({ scratchRoot: "/tmp" }),
+			store,
+			run: async (deps, req) => {
+				seen.push({ deps, req });
+				return fakeRunner({ envelope: OK_ENVELOPE })(deps, req);
+			},
+		});
+		const parts = await drain(model, { agy: { sessionId: "sess-div" } });
+		const req = seen[0].req;
+		// Seeded prompt: the fresh-conversation system text, then the guarded
+		// prior thread, then the actual last user turn.
+		expect(req.prompt.startsWith("Be brief.\n\n--- Previous conversation")).toBe(true);
+		expect(req.prompt).toContain("--- Previous conversation (context restored after edits in the client) ---");
+		expect(req.prompt).toContain("User: first question");
+		expect(req.prompt).toContain("Assistant: old answer");
+		expect(req.prompt).toContain("--- End of previous conversation ---\n\nsecond question");
+		// The incoming hashes ride along for the store baseline.
+		expect(req.hashes).toEqual(messageHashes(PROMPT as unknown as PromptMessage[]));
+		// The divergence announcement lands in the live reasoning block.
+		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map(
+			(d) => d.delta,
+		);
+		expect(deltas.some((d) => d.includes("⟲ history diverged — new agy conversation seeded"))).toBe(true);
+	});
+
+	test("linear continuation: stored prefix → NO seed, plain last-turn prompt, incoming hashes forwarded", async () => {
+		const seen: Seen[] = [];
+		const { store } = fakeStore({
+			"sess-lin": { conversationId: "conv-old", hashes: messageHashes(PROMPT.slice(0, 3) as unknown as PromptMessage[]) },
+		});
+		const model = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			config: resolveConfig({ scratchRoot: "/tmp" }),
+			store,
+			run: async (deps, req) => {
+				seen.push({ deps, req });
+				return fakeRunner({ envelope: OK_ENVELOPE })(deps, req);
+			},
+		});
+		const parts = await drain(model, { agy: { sessionId: "sess-lin" } });
+		expect(seen[0].req.prompt).toBe("second question");
+		expect(seen[0].req.seedPrompt).toBeUndefined();
+		expect(seen[0].req.hashes).toEqual(messageHashes(PROMPT as unknown as PromptMessage[]));
+		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map(
+			(d) => d.delta,
+		);
+		expect(deltas.some((d) => d.includes("⟲ history diverged"))).toBe(false);
+	});
+
+	test("unknown baseline: pre-upgrade entry (no hashes) is ADOPTED — resume semantics, no seed, hashes computed", async () => {
+		const seen: Seen[] = [];
+		const { store } = fakeStore({ "sess-adopt": { conversationId: "conv-old" } });
+		const model = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			config: resolveConfig({ scratchRoot: "/tmp" }),
+			store,
+			run: async (deps, req) => {
+				seen.push({ deps, req });
+				return fakeRunner({ envelope: OK_ENVELOPE })(deps, req);
+			},
+		});
+		const parts = await drain(model, { agy: { sessionId: "sess-adopt" } });
+		// No system prepend, no seed: the turn behaves as a linear continuation.
+		expect(seen[0].req.prompt).toBe("second question");
+		expect(seen[0].req.seedPrompt).toBeUndefined();
+		expect(seen[0].req.hashes).toEqual(messageHashes(PROMPT as unknown as PromptMessage[]));
+		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map(
+			(d) => d.delta,
+		);
+		expect(deltas.some((d) => d.includes("⟲ history diverged"))).toBe(false);
+	});
+});
+
+const NORMALIZE_CASES: Array<{ name: string; input: string; want: string }> = [
+	{ name: "plain text untouched", input: "full answer", want: "full answer" },
+	{ name: "CRLF becomes LF", input: "line one\r\nline two", want: "line one\nline two" },
+	{ name: "multiple CRLFs all normalized", input: "a\r\n\r\nb", want: "a\n\nb" },
+	{ name: "trailing whitespace stripped at the very end", input: "answer\n\n  \n", want: "answer" },
+	{ name: "CRLF then trailing blank lines fully stripped", input: "a\r\nb\r\n\r\n", want: "a\nb" },
+	{ name: "empty string stays empty", input: "", want: "" },
+	{ name: "whitespace-only collapses to empty", input: " \r\n\t", want: "" },
+	{ name: "internal spaces kept, only the very end stripped", input: "a \nb ", want: "a \nb" },
+];
+
+describe("unit: normalizeResponseText — v1.1 CRLF + trailing-whitespace normalization", () => {
+	test("table: every contract row normalizes as specified", () => {
+		for (const c of NORMALIZE_CASES) expect(normalizeResponseText(c.input), c.name).toBe(c.want);
+	});
+
+	test("text-delta carries the normalized response; a whitespace-only response emits no text parts", async () => {
+		const { model } = makeModel({ envelope: { ...OK_ENVELOPE, response: "line one\r\nline two\r\n" } });
+		const parts = await drain(model, { agy: { sessionId: "s" } });
+		const delta = (parts.find((p) => p["type"] === "text-delta") as { delta: string }).delta;
+		expect(delta).toBe("line one\nline two");
+
+		const { model: blank } = makeModel({
+			envelope: { conversation_id: "c", status: "SUCCESS", response: "\r\n \r\n" },
+		});
+		const blankParts = await drain(blank, { agy: { sessionId: "s" } });
+		expect(blankParts.map((p) => p["type"])).toEqual(["stream-start", "finish"]);
 	});
 });

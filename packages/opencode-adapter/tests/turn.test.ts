@@ -7,6 +7,13 @@
  * hostile model ids reach agy as ONE argv element, and exactly one
  * --add-dir equal to the child cwd. Runs use a fake spawnImpl (engine
  * asSpawn pattern) and a recording SessionStore wrapper.
+ *
+ * v1.1 divergence policy: BEFORE the timeout-resume machinery, the stored
+ * hashes baseline decides resume vs fresh re-seed — a stored PREFIX of the
+ * incoming hashes (or a pre-upgrade entry without hashes, adopted once) is
+ * linear and resumes; anything else is divergence: NO --conversation, the
+ * seedPrompt is sent instead, onDiverged fires, and the fresh conversation
+ * id + incoming hashes become the new baseline.
  */
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
@@ -17,6 +24,9 @@ import { join } from "node:path";
 import { runTurn, TurnError, type TurnDeps } from "../src/turn";
 import { openSessionStore, type SessionStore } from "../src/session-store";
 import { AgyConfigError, resolveConfig } from "../src/config";
+
+/** Placeholder baseline for tests with no stored session (any value works). */
+const H1 = ["h0"];
 
 /** Minimal ChildProcess stand-in: scripted NDJSON lines, then exit/close. */
 function fakeChild(opts: { lines?: unknown[]; exit?: number | null; hold?: boolean }) {
@@ -50,9 +60,10 @@ function recordingStore(path: string): { store: SessionStore; calls: string[] } 
 		calls,
 		store: {
 			get: (id) => real.get(id),
-			bind: (id, conv) => {
+			getEntry: (id) => real.getEntry(id),
+			bind: (id, conv, hashes) => {
 				calls.push(`bind:${conv}`);
-				return real.bind(id, conv);
+				return real.bind(id, conv, hashes);
 			},
 			rebind: (id) => {
 				calls.push("rebind");
@@ -88,7 +99,7 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
 		await utimes(stale, old, old);
 		const evil = `evil'; rm -rf ~ && echo "pwned";`;
-		const result = await runTurn(deps, { prompt: "hi there", modelArg: evil, sessionId: "sess-argv" });
+		const result = await runTurn(deps, { prompt: "hi there", hashes: H1, modelArg: evil, sessionId: "sess-argv" });
 		expect(result.classification.outcome).toBe("success");
 		expect(deps.config.scratchRoot).toBe(root);
 		expect(calls).toEqual(["spawn", "bind:conv-ok"]);
@@ -102,7 +113,7 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 			return fakeChild({ lines: [{ event: "init", conversation_id: "c" }, SUCCESS("c")], exit: 0 });
 		});
 		const evil = `x"; DROP TABLE; 'quote space`;
-		await runTurn(deps, { prompt: "p", modelArg: evil, sessionId: "s" });
+		await runTurn(deps, { prompt: "p", hashes: H1, modelArg: evil, sessionId: "s" });
 		const { args, cwd } = spawns[0];
 		expect(args.filter((a) => a === "--add-dir")).toHaveLength(1);
 		expect(args[args.indexOf("--add-dir") + 1]).toBe(cwd);
@@ -122,6 +133,7 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		});
 		const result = await runTurn(deps, {
 			prompt: "p",
+			hashes: H1,
 			sessionId: "sess-resume",
 			onResume: () => events.push("resume"),
 		});
@@ -139,7 +151,7 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		);
 		let caught: TurnError | undefined;
 		try {
-			await runTurn(deps, { prompt: "p", sessionId: "sess-twice" });
+			await runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-twice" });
 		} catch (err) {
 			caught = err as TurnError;
 		}
@@ -173,11 +185,12 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		});
 		let caught: TurnError | undefined;
 		try {
-			await runTurn(blockedSetup.deps, {
-				prompt: "p",
-				modelArg: "gemini-3.8-flash-high",
-				sessionId: "s",
-			});
+		await runTurn(blockedSetup.deps, {
+			prompt: "p",
+			hashes: H1,
+			modelArg: "gemini-3.8-flash-high",
+			sessionId: "s",
+		});
 		} catch (err) {
 			caught = err as TurnError;
 		}
@@ -190,7 +203,7 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 			return fakeChild({ lines: [SUCCESS("c")], exit: 0 });
 		});
 		open.deps.config = resolveConfig({ scratchRoot: "/tmp", timeoutMs: 30_000, quotaSnapshotDir: "/nonexistent-snapshot" });
-		const ok = await runTurn(open.deps, { prompt: "p", sessionId: "s2" });
+		const ok = await runTurn(open.deps, { prompt: "p", hashes: H1, sessionId: "s2" });
 		expect(ok.classification.outcome).toBe("success");
 		expect(spawned).toBe(1);
 	});
@@ -200,7 +213,7 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		const { store, deps } = await setup(() =>
 			fakeChild({ lines: [{ event: "init", conversation_id: "conv-ab" }], hold: true }),
 		);
-		const promise = runTurn(deps, { prompt: "p", sessionId: "sess-ab", signal: controller.signal });
+		const promise = runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-ab", signal: controller.signal });
 		setTimeout(() => controller.abort(), 20);
 		let name = "";
 		await promise.catch((err: Error) => {
@@ -218,7 +231,7 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 			return fakeChild({ lines: [SUCCESS("c")], exit: 0 });
 		});
 		deps.config = resolveConfig({ workdirMode: "session", timeoutMs: 30_000 });
-		const result = await runTurn({ ...deps, worktree }, { prompt: "p", sessionId: "s" });
+		const result = await runTurn({ ...deps, worktree }, { prompt: "p", hashes: H1, sessionId: "s" });
 		expect(result.classification.outcome).toBe("success");
 		expect(result.logPath).toBe(join(worktree, "run.log"));
 		expect(spawns[0].cwd).toBe(worktree);
@@ -229,7 +242,92 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		});
 		missing.deps.config = resolveConfig({ workdirMode: "session", timeoutMs: 30_000 });
 		await expect(
-			runTurn({ ...missing.deps, worktree: "relative/path" }, { prompt: "p", sessionId: "s" }),
+			runTurn({ ...missing.deps, worktree: "relative/path" }, { prompt: "p", hashes: H1, sessionId: "s" }),
 		).rejects.toThrow(AgyConfigError);
+	});
+});
+
+describe("unit: turn — v1.1 divergence policy (resume vs fresh re-seed)", () => {
+	test("linear continuation: stored hashes are a PREFIX of incoming → resume --conversation; success stores the incoming hashes", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-next" }, SUCCESS("conv-next")], exit: 0 });
+		});
+		await store.bind("sess-lin", "conv-stored", ["h0", "h1"]);
+		const result = await runTurn(deps, { prompt: "p", hashes: ["h0", "h1", "h2"], sessionId: "sess-lin" });
+		expect(result.classification.outcome).toBe("success");
+		expect(result.diverged).toBe(false);
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0][spawns[0].indexOf("--conversation") + 1]).toBe("conv-stored");
+		expect(await store.getEntry("sess-lin")).toEqual({
+			conversationId: "conv-next",
+			hashes: ["h0", "h1", "h2"],
+		});
+	});
+
+	test("divergence: edited middle message → NO --conversation, the seedPrompt is sent, onDiverged fires, fresh id + incoming hashes bound", async () => {
+		const spawns: string[][] = [];
+		const events: string[] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-fresh" }, SUCCESS("conv-fresh")], exit: 0 });
+		});
+		await store.bind("sess-div", "conv-stale", ["h0", "h1"]);
+		const result = await runTurn(deps, {
+			prompt: "last turn only",
+			seedPrompt: "--- Previous conversation ---\nseeded visible thread\n--- End ---\n\nlast turn only",
+			hashes: ["h0", "EDITED", "h2"],
+			sessionId: "sess-div",
+			onDiverged: () => events.push("diverged"),
+		});
+		expect(result.diverged).toBe(true);
+		expect(events).toEqual(["diverged"]);
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0]).not.toContain("--conversation");
+		// The positional prompt after --print is the SEEDED one, not the bare turn.
+		expect(spawns[0][spawns[0].indexOf("--print") + 1]).toContain("seeded visible thread");
+		expect(await store.getEntry("sess-div")).toEqual({
+			conversationId: "conv-fresh",
+			hashes: ["h0", "EDITED", "h2"],
+		});
+	});
+
+	test("unknown baseline: pre-upgrade entry without hashes ADOPTS the baseline — resume with --conversation, hashes stored after", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-adopt" }, SUCCESS("conv-adopt")], exit: 0 });
+		});
+		await store.bind("sess-adopt", "conv-old"); // pre-upgrade entry: no hashes
+		const result = await runTurn(deps, { prompt: "p", hashes: ["h0"], sessionId: "sess-adopt" });
+		expect(result.diverged).toBe(false);
+		expect(spawns[0][spawns[0].indexOf("--conversation") + 1]).toBe("conv-old");
+		expect(await store.getEntry("sess-adopt")).toEqual({ conversationId: "conv-adopt", hashes: ["h0"] });
+	});
+
+	test("divergence keeps resume-once coherent: a timeout on the seeded run resumes the SEEDED conversation", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return spawns.length === 1
+				? fakeChild({ lines: [{ event: "init", conversation_id: "conv-seed-1" }], exit: 124 })
+				: fakeChild({ lines: [{ event: "init", conversation_id: "conv-seed-2" }, SUCCESS("conv-seed-2")], exit: 0 });
+		});
+		await store.bind("sess-div2", "conv-stale", ["h0", "h1"]);
+		const result = await runTurn(deps, {
+			prompt: "last turn",
+			seedPrompt: "SEEDED",
+			hashes: ["h0", "EDITED"],
+			sessionId: "sess-div2",
+		});
+		expect(result.diverged).toBe(true);
+		expect(result.resumed).toBe(true);
+		// The resume continues the fresh SEEDED conversation, not the stale one.
+		expect(spawns[1][spawns[1].indexOf("--conversation") + 1]).toBe("conv-seed-1");
+		expect(await store.getEntry("sess-div2")).toEqual({
+			conversationId: "conv-seed-2",
+			hashes: ["h0", "EDITED"],
+		});
 	});
 });
