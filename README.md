@@ -91,3 +91,12 @@ bun test            # root: runs all workspace tests
 ```
 
 Engine package: `cd packages/engine && bun test && bunx tsc --noEmit`.
+
+## Documentation
+
+- [CHANGELOG.md](CHANGELOG.md) — notable changes per release.
+- [docs/troubleshooting.md](docs/troubleshooting.md) — symptom → cause → fix
+  for the failure modes observed in the wild (provider init, model lookup,
+  timeouts, divergence, quota pollution, auth).
+- [`packages/opencode-adapter/README.md`](packages/opencode-adapter/README.md)
+  — install, configuration, workdir modes, divergence policy, errors.
