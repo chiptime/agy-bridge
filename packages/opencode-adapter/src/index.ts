@@ -26,6 +26,15 @@ import { resolveRegistry, buildModelRecord, type AgyModel } from "./models";
 import { discoverModels } from "./discovery";
 
 /**
+ * Registry-form transport: opencode's npm loader imports the package
+ * entrypoint and scans its exports for a `create*` factory (verified against
+ * the 1.18.29 binary). Re-exporting here makes the "." entry serve BOTH the
+ * plugin (default export) and the provider factory — the same package works
+ * from the `plugin` array and from `provider.<id>.npm`.
+ */
+export { createAgyProvider, AGY_PROVIDER_ID } from "./provider";
+
+/**
  * server(input, options) extension point: opencode forwards plugin options
  * from config; tests and embeddings use the same keys to inject the
  * discovery seam or pin the model config without touching process.env.

@@ -1766,5 +1766,7 @@ var agyPlugin = {
 var src_default = agyPlugin;
 export {
   src_default as default,
-  agyPlugin
+  createAgyProvider,
+  agyPlugin,
+  AGY_PROVIDER_ID
 };

@@ -13,19 +13,17 @@ id must stay `agy` — the plugin's session channel keys on it.
 
 ## Install
 
-**Local (from this repo)** — the `npm` field must be a `file://` URL pointing at
-the **entry file** (`dist/provider.js`), and `models` keys are **BARE ids**
-(no `provider/` prefix — full ids cause `ProviderModelNotFoundError`).
-Verified against opencode 1.18.29; registry-style specs and directory paths
-are treated as npm coordinates and fail to initialize:
+**From npm (≥0.2.1)** — the package serves both the plugin and the provider
+factory from the same entrypoint (it re-exports `createAgyProvider`, which
+opencode's loader looks for):
 
 ```jsonc
 // opencode.json
 {
-  "plugin": ["file:///abs/path/to/agy-bridge/packages/opencode-adapter/dist/index.js"],
+  "plugin": ["agy-bridge-opencode"],
   "provider": {
     "agy": {
-      "npm": "file:///abs/path/to/agy-bridge/packages/opencode-adapter/dist/provider.js",
+      "npm": "agy-bridge-opencode",
       "options": { "workdirMode": "session", "timeoutMs": 600000 },
       "models": {
         "default": { "name": "Agy Default" },
@@ -36,19 +34,32 @@ are treated as npm coordinates and fail to initialize:
 }
 ```
 
+**Local development (from this repo)** — `npm` must be a `file://` URL to the
+**entry file** (`dist/index.js`), and `models` keys are **BARE ids** (no
+`provider/` prefix — full ids cause `ProviderModelNotFoundError`). Verified
+against opencode 1.18.29: registry-style specs and directory paths are
+treated as npm coordinates and fail to initialize; `file://` URLs to an
+entry file are imported directly:
+
+```jsonc
+{
+  "plugin": ["file:///abs/path/to/agy-bridge/packages/opencode-adapter/dist/index.js"],
+  "provider": {
+    "agy": {
+      "npm": "file:///abs/path/to/agy-bridge/packages/opencode-adapter/dist/index.js",
+      "options": { "workdirMode": "session", "timeoutMs": 600000 }
+    }
+  }
+}
+```
+
 - Rebuild after source changes (`bun run build` in the package) — the host
   imports `dist/`, and the module is cached per server process (restart
   opencode to pick up a rebuild).
 - `models` is optional: the plugin registers everything `agy models` reports
   (24h cache). Config entries override names/limits or add pass-through ids.
-- **From npm (planned)**: once published, both fields become
-  `"agy-bridge-opencode@<version>"`.
-
-`agy/default` (first in `/model`, agy picks the backend) plus the
-`gemini-3.8-flash-*` tiers ship built in; `models` entries override limits or
-add ids passed through as `--model <suffix>`. Budgets pass through `options`:
-`timeoutMs` is the per-attempt cap, per-model `limit: { context, output }`
-scales the window opencode shows.
+- ⚠️ **0.2.0 is broken in the registry form** (missing `create*` re-export on
+  the entrypoint) — use ≥0.2.1, or the local `file://` form above.
 
 ## Workdir modes
 
