@@ -55,6 +55,27 @@ against them:
      `[agy] print timeout after Ns with turn in progress` (mid-turn cut,
      artifact never lands).
 
+## Models (opencode adapter)
+
+The agy provider's model list is **discovered dynamically** from `agy models`
+(TSV rows `<id>\t<Human Name>` after one preamble line; no `--json` flag,
+~1-2s backend round-trip):
+
+- `agy/default` is always first and maps to NO `--model` argument.
+- Discovered models register as `agy/<id>` with agy's own display names,
+  through the plugin's `provider.models` hook (pinned
+  `@opencode-ai/plugin@1.18.30`).
+- The static builtin list (default + the three `gemini-3.8-flash-*` tiers)
+  is only the fallback when discovery is absent or empty.
+- **Cache**: the discovery result is cached at
+  `~/.local/state/agy-bridge/models-cache.json` (honors `XDG_STATE_HOME` and
+  the adapter's `stateDir` option) with a **24h TTL**. A stale cache still
+  beats an empty refresh; refresh failures degrade silently
+  (cache → static list). Set `AGY_BIN` to point at a non-PATH agy binary.
+- **Config overrides still win**: a `models` config key matching any
+  registry entry overrides name/limits in place; any other key extends the
+  list. Unknown model ids keep passing through as `--model <id>`.
+
 ## Development
 
 ```

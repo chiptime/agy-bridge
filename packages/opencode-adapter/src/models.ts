@@ -1,11 +1,14 @@
 /**
  * Model registry for the agy provider (spec R8). agy/default FIRST and mapped
- * to NO --model argument; live-verified Gemini IDs next (checked against
- * `agy models` 2026-09-09); config entries override in place or extend at the
- * end; unknown ids pass through as --model <suffix>. The pool hint reuses the
- * engine's poolForModel so the quota gate (D7) and the registry agree.
+ * to NO --model argument; with dynamic discovery (WU: `agy models`) the
+ * discovered models become agy/<id> entries with agy's own display names —
+ * the static builtin list is ONLY the fallback when discovery is absent or
+ * empty. Config entries override in place or extend at the end; unknown ids
+ * pass through as --model <suffix>. The pool hint reuses the engine's
+ * poolForModel so the quota gate (D7) and the registry agree.
  */
 import { poolForModel, type Pool } from "agy-bridge-engine";
+import type { Model as ModelV2 } from "@opencode-ai/sdk/v2";
 import type { ModelConfig } from "./config";
 
 export const DEFAULT_LIMITS = { context: 128000, output: 8192 } as const;
@@ -25,7 +28,7 @@ function model(id: string, name: string, modelArg?: string): AgyModel {
 	return { id, name, modelArg, limit: { ...DEFAULT_LIMITS }, pool: poolForModel(modelArg ?? "") };
 }
 
-/** Live-verified registry order (R8): default first, then the Gemini tiers. */
+/** Static fallback registry order (R8): default first, then the Gemini tiers. */
 export const BUILTIN_MODELS: readonly AgyModel[] = [
 	model("agy/default", "default"),
 	model("agy/gemini-3.8-flash-high", "gemini-3.8-flash-high", "gemini-3.8-flash-high"),
@@ -38,14 +41,55 @@ function normalize(id: string): string {
 	return id.startsWith("agy/") ? id.slice("agy/".length) : id;
 }
 
+/** One bare discovery row from the engine's listAgyModels. */
+export interface DiscoveredEntry {
+	id: string;
+	name: string;
+}
+
 /**
- * Registry with config merge applied (R8): a config key matching a builtin
- * overrides name/limits IN PLACE (position and modelArg preserved); any other
- * key extends the list in insertion order. User limits are validated by
- * resolveConfig before they reach this module.
+ * The base registry for a discovery round: the discovered models (bare id →
+ * agy/<id>, agy's human name kept, modelArg = bare id) after the mandatory
+ * agy/default — or the static builtin list when discovery is undefined or
+ * empty (spawn failure, backend outage, cold cache). Deduped by id, first
+ * occurrence wins, so a discovered "default" can never displace ours.
  */
+function baseRegistry(discovered?: readonly DiscoveredEntry[]): AgyModel[] {
+	const base = discovered && discovered.length > 0
+		? [
+				model("agy/default", "default"),
+				...discovered.map((d) => model(`agy/${normalize(d.id)}`, d.name, normalize(d.id))),
+			]
+		: [...BUILTIN_MODELS];
+	const seen = new Set<string>();
+	return base.filter((m) => (seen.has(m.id) ? false : seen.add(m.id)));
+}
+
+/**
+ * Registry with discovery and config merge applied: agy/default first, then
+ * discovered models (static list ONLY as the undefined/empty fallback), then
+ * a config key matching any entry overrides name/limits IN PLACE (position
+ * and modelArg preserved) while any other key extends the list in insertion
+ * order. The final list is deduped by id (first occurrence wins). User
+ * limits are validated by resolveConfig before they reach this module.
+ */
+export function resolveRegistry(
+	user: Record<string, ModelConfig> = {},
+	discovered?: readonly DiscoveredEntry[],
+): AgyModel[] {
+	return applyConfig(baseRegistry(discovered), user);
+}
+
+/** Legacy entry point kept for the provider side: static registry + config. */
 export function listModels(user: Record<string, ModelConfig> = {}): AgyModel[] {
-	const merged: AgyModel[] = BUILTIN_MODELS.map((m) => ({ ...m, limit: { ...m.limit } }));
+	return applyConfig([...BUILTIN_MODELS], user);
+}
+
+function applyConfig(
+	base: AgyModel[],
+	user: Record<string, ModelConfig>,
+): AgyModel[] {
+	const merged = base.map((m) => ({ ...m, limit: { ...m.limit } }));
 	for (const [id, cfg] of Object.entries(user)) {
 		const existing = merged.find((m) => m.id === id);
 		if (existing) {
@@ -55,7 +99,8 @@ export function listModels(user: Record<string, ModelConfig> = {}): AgyModel[] {
 			merged.push(model(id, normalize(id), normalize(id)));
 		}
 	}
-	return merged;
+	const seen = new Set<string>();
+	return merged.filter((m) => (seen.has(m.id) ? false : seen.add(m.id)));
 }
 
 /**
@@ -68,4 +113,46 @@ export function resolveModel(id: string, user: Record<string, ModelConfig> = {})
 	if (found) return found;
 	const suffix = normalize(id);
 	return model(`agy/${suffix}`, suffix, suffix);
+}
+
+/**
+ * Build the record the plugin's `provider.models` hook returns (pinned
+ * @opencode-ai/plugin@1.18.30: `models?(provider: ProviderV2, ctx) =>
+ * Promise<Record<string, ModelV2>>`). Keys are BARE model suffixes — the
+ * host namespaces them under the provider id — and each value is the full
+ * SDK v2 Model descriptor. Transport truth: every model is served by our
+ * own custom provider factory (package export "./provider"), NOT a direct
+ * HTTP endpoint, so `api.url` stays empty and `api.npm` names this package.
+ * Unknown economics/metadata are neutral zeros with an empty release date.
+ */
+export function buildModelRecord(
+	registry: readonly AgyModel[],
+	providerId: string,
+): Record<string, ModelV2> {
+	const record: Record<string, ModelV2> = {};
+	for (const entry of registry) {
+		const suffix = normalize(entry.id);
+		record[suffix] = {
+			id: suffix,
+			providerID: providerId,
+			api: { id: entry.modelArg ?? suffix, url: "", npm: "agy-bridge-opencode" },
+			name: entry.name,
+			capabilities: {
+				temperature: true,
+				reasoning: true,
+				attachment: false,
+				toolcall: true,
+				input: { text: true, audio: false, image: false, video: false, pdf: false },
+				output: { text: true, audio: false, image: false, video: false, pdf: false },
+				interleaved: false,
+			},
+			cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+			limit: { context: entry.limit.context, output: entry.limit.output },
+			status: "active",
+			options: {},
+			headers: {},
+			release_date: "",
+		};
+	}
+	return record;
 }

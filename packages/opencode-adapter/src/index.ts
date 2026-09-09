@@ -10,16 +10,64 @@
  * per-request input field `sessionID` (capital D) and the worktree comes
  * from the PluginInput this server was initialized with — no module state,
  * so concurrent sessions cannot race.
+ *
+ * Dynamic model discovery: the server also registers the pinned
+ * `provider.models` hook (@opencode-ai/plugin@1.18.30:
+ * `models?(provider: ProviderV2, ctx: ProviderHookContext) =>
+ * Promise<Record<string, ModelV2>>`). Discovery runs lazily on the FIRST
+ * hook call (not at plugin init) and is memoized per server instance; the
+ * cache-first discoverModels pipeline (models-cache.json, 24h TTL) sits in
+ * front, and any failure degrades to the static builtin registry.
  */
 import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin";
+import type { ModelConfig } from "./config";
 import { AGY_PROVIDER_ID } from "./provider";
+import { resolveRegistry, buildModelRecord, type AgyModel } from "./models";
+import { discoverModels } from "./discovery";
 
-const server: Plugin = async (input) => {
+/**
+ * server(input, options) extension point: opencode forwards plugin options
+ * from config; tests and embeddings use the same keys to inject the
+ * discovery seam or pin the model config without touching process.env.
+ */
+export interface AgyPluginServerOptions {
+	/** Test/DI seam: replace the engine's `agy models` lister. */
+	listAgyModels?: (bin: string) => Promise<{ id: string; name: string }[]>;
+	/** Config models override/extension (same shape as the provider option). */
+	models?: Record<string, ModelConfig>;
+	/** Binary override; default env AGY_BIN ?? "agy". */
+	bin?: string;
+	/** Environment snapshot override (paths.ts house pattern). */
+	env?: Record<string, string | undefined>;
+	/** State dir override for the models cache (validated absolute upstream). */
+	stateDir?: string;
+}
+
+const server: Plugin = async (input, options) => {
 	const worktree = input.worktree;
+	const opts = (options ?? {}) as AgyPluginServerOptions;
+	// Memoized lazy discovery: nothing spawns at plugin init; the first
+	// provider.models call pays the (cached) round-trip once.
+	let registry: AgyModel[] | null = null;
+	const getRegistry = async (): Promise<AgyModel[]> => {
+		if (registry) return registry;
+		const discovered = await discoverModels({
+			bin: opts.bin,
+			env: opts.env,
+			stateDir: opts.stateDir,
+			list: opts.listAgyModels,
+		});
+		registry = resolveRegistry(opts.models ?? {}, discovered);
+		return registry;
+	};
 	const hooks: Hooks = {
 		"chat.params": async (req, output) => {
 			if (req.model.providerID !== AGY_PROVIDER_ID) return;
 			output.options.agy = { sessionId: req.sessionID, worktree };
+		},
+		provider: {
+			id: AGY_PROVIDER_ID,
+			models: async (provider) => buildModelRecord(await getRegistry(), provider.id),
 		},
 	};
 	return hooks;

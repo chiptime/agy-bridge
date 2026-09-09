@@ -38,6 +38,8 @@ import {
 	parseStreamLine,
 	runAgy,
 } from "../src/spawn";
+import { listAgyModels, parseAgyModelsOutput } from "../src/models-list";
+import { listAgyModels as listAgyModelsFromIndex } from "../src";
 
 describe("unit: outcomes — classify run signals", () => {
 	const cases: Array<[string, RunSignal, Outcome, string]> = [
@@ -1001,6 +1003,98 @@ describe("unit: spawn — stream-json NDJSON line extraction (pure)", () => {
 			parseStreamLine('{"event":"step_update","step_update":{"state":"ACTIVE"}}'),
 		).toEqual({ event: "step_update" });
 		expect(parseStreamLine("")).toEqual({});
+	});
+});
+
+describe("unit: models-list — dynamic discovery via `agy models` (TSV)", () => {
+	/** Real-shaped output captured from `agy models` (v1.1.28, 2026-09-09): one preamble line, then 14 TSV rows. */
+	const REAL_OUTPUT = [
+		"Fetching available models...",
+		"gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+		"gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)",
+		"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+		"gemini-3.7-flash-high\tGemini 3.7 Flash (High)",
+		"gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)",
+		"gemini-3.7-flash-low\tGemini 3.7 Flash (Low)",
+		"gemini-3.6-flash-high\tGemini 3.6 Flash (High)",
+		"gemini-3.6-flash-medium\tGemini 3.6 Flash (Medium)",
+		"gemini-3.6-flash-low\tGemini 3.6 Flash (Low)",
+		"gemini-3.1-pro-high\tGemini 3.1 Pro (High)",
+		"gemini-3.1-pro-low\tGemini 3.1 Pro (Low)",
+		"claude-sonnet-4-6\tClaude Sonnet 4.6",
+		"claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)",
+		"gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
+		"",
+	].join("\n");
+
+	test("parses the real-shaped output: preamble skipped, all 14 models in order", () => {
+		const models = parseAgyModelsOutput(REAL_OUTPUT);
+		expect(models).toHaveLength(14);
+		expect(models[0]).toEqual({ id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" });
+		expect(models[13]).toEqual({ id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" });
+		expect(models.map((m) => m.id)).toContain("claude-opus-4-6-thinking");
+	});
+
+	test("skips blank, malformed (no tab), and empty-name lines; trims whitespace and CRLF", () => {
+		const models = parseAgyModelsOutput(
+			[
+				"some preamble without tabs",
+				"",
+				"  \t  ",
+				"m-1\tModel One",
+				"\tm-2 has empty id? no — leading tab means empty id",
+				"m-3-no-tab",
+				"m-4\t   ",
+				"m-5\tTrimmed Name  \r",
+			].join("\n"),
+		);
+		expect(models).toEqual([
+			{ id: "m-1", name: "Model One" },
+			{ id: "m-5", name: "Trimmed Name" },
+		]);
+	});
+
+	test("empty output parses to []", () => {
+		expect(parseAgyModelsOutput("")).toEqual([]);
+		expect(parseAgyModelsOutput("only a preamble line\n")).toEqual([]);
+	});
+
+	test("listAgyModels returns parsed models via the default spawn path", async () => {
+		const dir = await mkdtemp("/tmp/agy-models-");
+		const stub = `${dir}/agy-stub.sh`;
+		await Bun.write(stub, `#!/bin/sh\nprintf '%s\\n' "id-1\tName One"\n`);
+		Bun.spawnSync(["chmod", "+x", stub]);
+		const models = await listAgyModels({ bin: stub });
+		expect(models).toEqual([{ id: "id-1", name: "Name One" }]);
+	});
+
+	test("listAgyModels is tolerant: spawn error, nonzero exit, and empty output all yield [] (never throws)", async () => {
+		const missing = await listAgyModels({ bin: "/nonexistent/agy-binary" });
+		expect(missing).toEqual([]);
+
+		const nonzero = await listAgyModels({
+			bin: "agy",
+			runner: () => ({ stdout: "boom", exitCode: 1 }),
+		});
+		expect(nonzero).toEqual([]);
+
+		const empty = await listAgyModels({
+			bin: "agy",
+			runner: () => ({ stdout: "", exitCode: 0 }),
+		});
+		expect(empty).toEqual([]);
+
+		const throwing = await listAgyModels({
+			bin: "agy",
+			runner: () => {
+				throw new Error("injected failure");
+			},
+		});
+		expect(throwing).toEqual([]);
+	});
+
+	test("listAgyModels is exported from the package index", () => {
+		expect(listAgyModelsFromIndex).toBe(listAgyModels);
 	});
 });
 
