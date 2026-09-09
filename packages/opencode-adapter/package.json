@@ -1,0 +1,33 @@
+{
+	"name": "agy-bridge-opencode",
+	"version": "0.1.0",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
+	},
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"default": "./src/index.ts"
+		},
+		"./provider": {
+			"types": "./src/provider.ts",
+			"default": "./src/provider.ts"
+		}
+	},
+	"dependencies": {
+		"agy-bridge-engine": "workspace:*"
+	},
+	"peerDependencies": {
+		"@opencode-ai/plugin": "1.18.30",
+		"@ai-sdk/provider": "3.0.8"
+	},
+	"devDependencies": {
+		"@opencode-ai/plugin": "1.18.30",
+		"@ai-sdk/provider": "3.0.8",
+		"@types/bun": "latest",
+		"typescript": "^7.0.2"
+	}
+}
