@@ -1229,6 +1229,73 @@ function stepSummary(line) {
   return `${compact === "{}" ? "(step update)" : compact}
 `;
 }
+function fallbackSummary(step) {
+  try {
+    const compact = JSON.stringify(step);
+    return `${compact === "{}" ? "(step update)" : compact}
+`;
+  } catch {
+    return `(step update)
+`;
+  }
+}
+function duration1s(durationSeconds) {
+  return `${durationSeconds.toFixed(1)}s`;
+}
+function formatStepUpdate(step) {
+  try {
+    const stepType = step["step_type"];
+    const state = step["state"];
+    const toolName = step["tool_name"];
+    const rawDuration = step["duration_seconds"];
+    const duration = typeof rawDuration === "number" && Number.isFinite(rawDuration) ? rawDuration : undefined;
+    if (stepType === "tool") {
+      if (typeof toolName !== "string" || toolName === "")
+        return fallbackSummary(step);
+      if (state === "ACTIVE")
+        return `\u25B8 tool ${toolName}\u2026
+`;
+      if (state === "DONE")
+        return duration !== undefined ? `\u2713 ${toolName} (${duration1s(duration)})
+` : `\u2713 ${toolName}
+`;
+      if (state === "ERROR")
+        return `\u2717 ${toolName} failed
+`;
+      return fallbackSummary(step);
+    }
+    if (stepType === "agent_response") {
+      if (state === "DONE")
+        return duration !== undefined ? `\u25CF response (${duration1s(duration)})
+` : `\u25CF response
+`;
+      return `\u25B8 response\u2026
+`;
+    }
+    if (stepType === "user_input") {
+      return `\u25B8 prompt
+`;
+    }
+    return fallbackSummary(step);
+  } catch {
+    return fallbackSummary(step);
+  }
+}
+function lineDelta(line) {
+  let parsed;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return stepSummary(line);
+  }
+  if (typeof parsed === "object" && parsed !== null) {
+    const inner = parsed["step_update"];
+    if (typeof inner === "object" && inner !== null) {
+      return formatStepUpdate(inner);
+    }
+  }
+  return stepSummary(line);
+}
 var REASONING_ID = "agy-progress";
 var TEXT_ID = "agy-response";
 
@@ -1280,7 +1347,7 @@ class AgyLanguageModel {
               if (!line.includes('"step_update"'))
                 return;
               openReasoning();
-              controller.enqueue({ type: "reasoning-delta", id: REASONING_ID, delta: stepSummary(line) });
+              controller.enqueue({ type: "reasoning-delta", id: REASONING_ID, delta: lineDelta(line) });
             },
             onResume: () => {
               openReasoning();

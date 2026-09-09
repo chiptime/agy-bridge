@@ -115,6 +115,77 @@ function stepSummary(line: string): string {
 	return `${compact === "{}" ? "(step update)" : compact}\n`;
 }
 
+/** Compact-JSON tail mirroring stepSummary's fallback; guarded so the
+ * readable formatter below can never throw, even on hostile payloads. */
+function fallbackSummary(step: Record<string, unknown>): string {
+	try {
+		const compact = JSON.stringify(step);
+		return `${compact === "{}" ? "(step update)" : compact}\n`;
+	} catch {
+		return "(step update)\n";
+	}
+}
+
+/** Finite duration rendered with exactly one decimal ("0.28" → "0.3s"). */
+function duration1s(durationSeconds: number): string {
+	return `${durationSeconds.toFixed(1)}s`;
+}
+
+/**
+ * One live step_update payload → a human-readable progress line (always
+ * \n-terminated): tool start/done/error, response done/progress, prompt.
+ * Anything unexpected (unknown step_type or state, missing tool_name,
+ * non-numeric duration, hostile getters) degrades to the tolerant
+ * compact-JSON summary; this function NEVER throws.
+ */
+export function formatStepUpdate(step: Record<string, unknown>): string {
+	try {
+		const stepType = step["step_type"];
+		const state = step["state"];
+		const toolName = step["tool_name"];
+		const rawDuration = step["duration_seconds"];
+		const duration = typeof rawDuration === "number" && Number.isFinite(rawDuration) ? rawDuration : undefined;
+		if (stepType === "tool") {
+			if (typeof toolName !== "string" || toolName === "") return fallbackSummary(step);
+			if (state === "ACTIVE") return `▸ tool ${toolName}…\n`;
+			if (state === "DONE") return duration !== undefined ? `✓ ${toolName} (${duration1s(duration)})\n` : `✓ ${toolName}\n`;
+			if (state === "ERROR") return `✗ ${toolName} failed\n`;
+			return fallbackSummary(step);
+		}
+		if (stepType === "agent_response") {
+			if (state === "DONE") return duration !== undefined ? `● response (${duration1s(duration)})\n` : "● response\n";
+			return "▸ response…\n";
+		}
+		if (stepType === "user_input") {
+			return "▸ prompt\n";
+		}
+		return fallbackSummary(step);
+	} catch {
+		return fallbackSummary(step);
+	}
+}
+
+/**
+ * Delta text for one tapped line: a real envelope-shaped step_update event
+ * ({"step_update":{...}}) renders through the readable formatter; any other
+ * shape keeps stepSummary's tolerant mapping (never throws either way).
+ */
+function lineDelta(line: string): string {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(line);
+	} catch {
+		return stepSummary(line);
+	}
+	if (typeof parsed === "object" && parsed !== null) {
+		const inner = (parsed as Record<string, unknown>)["step_update"];
+		if (typeof inner === "object" && inner !== null) {
+			return formatStepUpdate(inner as Record<string, unknown>);
+		}
+	}
+	return stepSummary(line);
+}
+
 const REASONING_ID = "agy-progress";
 const TEXT_ID = "agy-response";
 
@@ -179,10 +250,11 @@ export class AgyLanguageModel implements LanguageModelV3 {
 							signal: options.abortSignal,
 							onLine: (line) => {
 								// Live progress (D1 tap): every step_update is a
-								// reasoning delta in the single status block.
+								// reasoning delta in the single status block,
+								// rendered as a human-readable line.
 								if (!line.includes('"step_update"')) return;
 								openReasoning();
-								controller.enqueue({ type: "reasoning-delta", id: REASONING_ID, delta: stepSummary(line) });
+								controller.enqueue({ type: "reasoning-delta", id: REASONING_ID, delta: lineDelta(line) });
 							},
 							onResume: () => {
 								// D5: attempt 2 is invisible downstream except here.

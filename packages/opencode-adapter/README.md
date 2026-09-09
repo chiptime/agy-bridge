@@ -3,7 +3,9 @@
 An [opencode](https://opencode.ai) custom provider + plugin that routes chat
 turns through the `agy` CLI. opencode keeps its UI and session flow; agy owns
 the conversation, tools, and permissions inside its workdir. Backed by
-`agy-bridge-engine` for spawn, classification, and error semantics.
+`agy-bridge-engine` for spawn, classification, and error semantics. Live agent
+steps (tools, responses) stream into the reasoning panel as readable progress
+lines, e.g. `▸ tool view_file…`, `✓ view_file (0.3s)`.
 
 **Host pin:** implements `LanguageModelV3` for opencode `>=1.15.0 <2`
 (deps: `@opencode-ai/plugin` 1.18.30, `@ai-sdk/provider` 3.0.8). The provider

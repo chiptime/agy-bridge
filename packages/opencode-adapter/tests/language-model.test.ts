@@ -14,7 +14,7 @@
 import { describe, expect, test } from "bun:test";
 import { APICallError, type LanguageModelV3, type SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { AgyEnvelope } from "agy-bridge-engine";
-import { AgyLanguageModel } from "../src/language-model";
+import { AgyLanguageModel, formatStepUpdate } from "../src/language-model";
 import { TurnError, type TurnDeps, type TurnRequest, type TurnResult } from "../src/turn";
 import type { SessionStore } from "../src/session-store";
 import { resolveConfig, type AgyAdapterConfig } from "../src/config";
@@ -314,7 +314,7 @@ describe("unit: language-model — V3 mapping (R4, D5/D6, R6)", () => {
 
 	test("D5: the resume announcement lands in the live reasoning block", async () => {
 		const { model } = makeModel({
-			lines: ['{"event":"step_update","step":"first attempt"}', '{"event":"step_update","detail":{"tool":"bash"}}'],
+			lines: ['{"event":"step_update","step":"first attempt"}', '{"step_update":{"step_index":1,"detail":{"tool":"bash"}}}'],
 			envelope: OK_ENVELOPE,
 			resume: true,
 		});
@@ -327,7 +327,7 @@ describe("unit: language-model — V3 mapping (R4, D5/D6, R6)", () => {
 		expect(deltas).toHaveLength(3);
 		expect(deltas[2]).toMatch(/resum/i);
 		// Unknown step payloads degrade to compact JSON (tolerant mapping).
-		expect(deltas[1]).toBe('{"detail":{"tool":"bash"}}\n');
+		expect(deltas[1]).toBe('{"step_index":1,"detail":{"tool":"bash"}}\n');
 	});
 
 	test("D6: doGenerate drains doStream — text/usage/warnings, empty → no content", async () => {
@@ -345,5 +345,68 @@ describe("unit: language-model — V3 mapping (R4, D5/D6, R6)", () => {
 		const emptyResult = await empty.doGenerate({ prompt: PROMPT });
 		expect(emptyResult.content).toEqual([]);
 		expect(emptyResult.finishReason.unified).toBe("stop");
+	});
+
+	test("readable progress: real step_update envelopes become human lines in the reasoning block", async () => {
+		const { model } = makeModel({
+			lines: [
+				'{"step_update":{"conversation_id":"c","step_index":0,"state":"DONE","step_type":"user_input"}}',
+				'{"step_update":{"conversation_id":"c","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"path":"a.ts"}}}',
+				'{"step_update":{"conversation_id":"c","step_index":2,"state":"DONE","step_type":"tool","tool_name":"view_file","duration_seconds":0.28}}',
+				'{"step_update":{"conversation_id":"c","step_index":2,"state":"ERROR","step_type":"tool","tool_name":"bash"}}',
+				'{"step_update":{"conversation_id":"c","step_index":3,"state":"DONE","step_type":"agent_response","duration_seconds":3.17}}',
+				'{"step_update":{"conversation_id":"c","step_index":4,"state":"ACTIVE","step_type":"mystery"}}',
+			],
+			envelope: OK_ENVELOPE,
+		});
+		const parts = await drain(model, { agy: { sessionId: "s" } });
+		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map((d) => d.delta);
+		expect(deltas).toEqual([
+			"▸ prompt\n",
+			"▸ tool view_file…\n",
+			"✓ view_file (0.3s)\n",
+			"✗ bash failed\n",
+			"● response (3.2s)\n",
+			// Unknown step types keep the tolerant compact-JSON fallback.
+			'{"conversation_id":"c","step_index":4,"state":"ACTIVE","step_type":"mystery"}\n',
+		]);
+	});
+});
+
+/** Table rows pin the full output contract of formatStepUpdate. */
+const FORMAT_CASES: Array<{ name: string; step: Record<string, unknown>; want: string }> = [
+	{ name: "tool ACTIVE", step: { step_type: "tool", state: "ACTIVE", tool_name: "view_file" }, want: "▸ tool view_file…\n" },
+	{ name: "tool DONE rounds duration to 1 decimal", step: { step_type: "tool", state: "DONE", tool_name: "view_file", duration_seconds: 0.28 }, want: "✓ view_file (0.3s)\n" },
+	{ name: "tool DONE without duration", step: { step_type: "tool", state: "DONE", tool_name: "bash" }, want: "✓ bash\n" },
+	{ name: "tool DONE with whole-number duration", step: { step_type: "tool", state: "DONE", tool_name: "bash", duration_seconds: 4 }, want: "✓ bash (4.0s)\n" },
+	{ name: "tool ERROR", step: { step_type: "tool", state: "ERROR", tool_name: "bash" }, want: "✗ bash failed\n" },
+	{ name: "tool ACTIVE without tool_name falls back", step: { step_type: "tool", state: "ACTIVE", step_index: 2 }, want: '{"step_type":"tool","state":"ACTIVE","step_index":2}\n' },
+	{ name: "tool with unknown state falls back", step: { step_type: "tool", state: "WEIRD", tool_name: "bash" }, want: '{"step_type":"tool","state":"WEIRD","tool_name":"bash"}\n' },
+	{ name: "agent_response DONE with duration", step: { step_type: "agent_response", state: "DONE", duration_seconds: 3.17 }, want: "● response (3.2s)\n" },
+	{ name: "agent_response DONE without duration", step: { step_type: "agent_response", state: "DONE" }, want: "● response\n" },
+	{ name: "agent_response other states show progress", step: { step_type: "agent_response", state: "ACTIVE" }, want: "▸ response…\n" },
+	{ name: "user_input is a prompt line regardless of state", step: { step_type: "user_input", state: "DONE" }, want: "▸ prompt\n" },
+	{ name: "unknown step_type falls back", step: { step_type: "mystery", step_index: 9 }, want: '{"step_type":"mystery","step_index":9}\n' },
+	{ name: "missing step_type falls back", step: { state: "ACTIVE" }, want: '{"state":"ACTIVE"}\n' },
+	{ name: "non-numeric duration treated as missing", step: { step_type: "tool", state: "DONE", tool_name: "x", duration_seconds: "0.5" }, want: "✓ x\n" },
+	{ name: "empty record falls back to the placeholder", step: {}, want: "(step update)\n" },
+];
+
+describe("unit: formatStepUpdate — readable progress lines", () => {
+	test("table: every contract row renders exactly one \\n-terminated line", () => {
+		for (const c of FORMAT_CASES) {
+			expect(c.want.endsWith("\n"), `${c.name}: fixture must be line-oriented`).toBe(true);
+			expect(formatStepUpdate(c.step), `${c.name}`).toBe(c.want);
+		}
+	});
+
+	test("never throws: a hostile payload (throwing getter) degrades to the placeholder", () => {
+		const hostile = {
+			get step_type(): string {
+				throw new Error("boom");
+			},
+		} as unknown as Record<string, unknown>;
+		expect(() => formatStepUpdate(hostile)).not.toThrow();
+		expect(formatStepUpdate(hostile)).toBe("(step update)\n");
 	});
 });
