@@ -375,10 +375,32 @@ function resolveConfig(options = {}) {
 }
 
 // src/session-store.ts
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync
+} from "fs";
 import { dirname, join } from "path";
 import { randomUUID } from "crypto";
 var SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+var LOCK_WAIT_MS = 3000;
+var LOCK_STALE_MS = 3000;
+var LOCK_POLL_MS = 20;
+
+class SessionStoreBusyError extends Error {
+  lockPath;
+  constructor(lockPath) {
+    super(`session store busy: lock not acquired within ${LOCK_WAIT_MS}ms: ${lockPath}`);
+    this.lockPath = lockPath;
+    this.name = "SessionStoreBusyError";
+  }
+}
 function parseStore(raw) {
   try {
     const parsed = JSON.parse(raw);
@@ -388,7 +410,12 @@ function parseStore(raw) {
   } catch {}
   return { version: 1, sessions: {} };
 }
-function openSessionStore(path) {
+function openSessionStore(path, options = {}) {
+  const lockPath = `${path}.lock`;
+  const lockWaitMs = options.lockWaitMs ?? LOCK_WAIT_MS;
+  const lockStaleMs = options.lockStaleMs ?? LOCK_STALE_MS;
+  const nowMs = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const globalSlot = { current: Promise.resolve() };
   const keyed = new Map;
   const chain = (slot, fn) => {
@@ -427,16 +454,75 @@ function openSessionStore(path) {
     }
     return pruned;
   };
+  const releaseLock = (fd) => {
+    closeSync(fd);
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      if (err?.code !== "ENOENT")
+        throw err;
+    }
+  };
+  const acquireLock = async () => {
+    const deadline = nowMs() + lockWaitMs;
+    for (;; ) {
+      mkdirSync(dirname(path), { recursive: true });
+      let fd;
+      try {
+        fd = openSync(lockPath, "wx");
+      } catch (err) {
+        if (err?.code !== "EEXIST")
+          throw err;
+      }
+      if (fd !== undefined) {
+        try {
+          writeSync(fd, `${process.pid}
+`);
+          return fd;
+        } catch (err) {
+          try {
+            releaseLock(fd);
+          } catch {}
+          throw err;
+        }
+      }
+      let fresh;
+      try {
+        fresh = nowMs() - statSync(lockPath).mtimeMs <= lockStaleMs;
+      } catch {
+        if (nowMs() >= deadline)
+          throw new SessionStoreBusyError(lockPath);
+        continue;
+      }
+      if (!fresh) {
+        try {
+          unlinkSync(lockPath);
+        } catch {}
+        continue;
+      }
+      if (nowMs() >= deadline)
+        throw new SessionStoreBusyError(lockPath);
+      await sleep(LOCK_POLL_MS);
+    }
+  };
+  const withFileLock = async (fn) => {
+    const fd = await acquireLock();
+    try {
+      return fn();
+    } finally {
+      releaseLock(fd);
+    }
+  };
   return {
-    get: (sessionId) => chain(globalSlot, () => load().sessions[sessionId]?.conversationId),
-    getEntry: (sessionId) => chain(globalSlot, () => {
+    get: (sessionId) => chain(globalSlot, () => withFileLock(() => load().sessions[sessionId]?.conversationId)),
+    getEntry: (sessionId) => chain(globalSlot, () => withFileLock(() => {
       const entry = load().sessions[sessionId];
       if (!entry)
         return;
       const hashes = Array.isArray(entry.hashes) ? entry.hashes.filter((h) => typeof h === "string") : undefined;
       return hashes === undefined ? { conversationId: entry.conversationId } : { conversationId: entry.conversationId, hashes };
-    }),
-    bind: (sessionId, conversationId, hashes) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => {
+    })),
+    bind: (sessionId, conversationId, hashes) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => withFileLock(() => {
       const file = load();
       file.sessions[sessionId] = {
         conversationId,
@@ -444,19 +530,19 @@ function openSessionStore(path) {
         ...hashes !== undefined ? { hashes } : {}
       };
       persist(file);
-    })),
-    rebind: (sessionId) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => {
+    }))),
+    rebind: (sessionId) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => withFileLock(() => {
       const file = load();
       delete file.sessions[sessionId];
       persist(file);
-    })),
-    prune: (now = new Date) => chain(globalSlot, () => {
+    }))),
+    prune: (now = new Date) => chain(globalSlot, () => withFileLock(() => {
       const file = load();
       const pruned = pruneInPlace(file, now.getTime());
       if (pruned > 0)
         persist(file);
       return pruned;
-    })
+    }))
   };
   function keyedSlot(sessionId) {
     let slot = keyed.get(sessionId);
@@ -488,7 +574,7 @@ function sessionMapPath(opts = {}) {
 import { randomUUID as randomUUID2 } from "crypto";
 
 // ../engine/src/spawn.ts
-import { mkdirSync as mkdirSync2, readdirSync, statSync, openSync, closeSync, appendFileSync } from "fs";
+import { mkdirSync as mkdirSync2, readdirSync, statSync as statSync2, openSync as openSync2, closeSync as closeSync2, appendFileSync } from "fs";
 import { spawn } from "child_process";
 import { createInterface } from "readline";
 function asAgyEnvelope(raw) {
@@ -543,7 +629,7 @@ async function runAgyStream(opts) {
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
       stdio: ["ignore", "pipe", "pipe"]
     });
-    const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, "w");
+    const logFd = openSync2(opts.logPath ?? `${opts.workdir}/run.log`, "w");
     let log = "";
     let envelope;
     let conversationId;
@@ -585,7 +671,7 @@ async function runAgyStream(opts) {
       child.stdout?.destroy();
       child.stderr?.destroy();
       try {
-        closeSync(logFd);
+        closeSync2(logFd);
       } catch {}
       resolve({
         exitCode,
@@ -943,7 +1029,7 @@ function createTap(onLine, opts = {}) {
 }
 
 // src/workdir.ts
-import { mkdtempSync, readdirSync as readdirSync2, rmSync, statSync as statSync2 } from "fs";
+import { mkdtempSync, readdirSync as readdirSync2, rmSync, statSync as statSync3 } from "fs";
 import { isAbsolute as isAbsolute2, join as join3 } from "path";
 import { tmpdir as tmpdir2 } from "os";
 var SCRATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -955,7 +1041,7 @@ function prepareWorkdir(mode, opts) {
     }
     let stat;
     try {
-      stat = statSync2(worktree);
+      stat = statSync3(worktree);
     } catch {
       stat = undefined;
     }
@@ -981,7 +1067,7 @@ function pruneScratch(root, now = new Date) {
     const dir = join3(root, entry.name);
     let mtime;
     try {
-      mtime = statSync2(dir).mtime;
+      mtime = statSync3(dir).mtime;
     } catch {
       continue;
     }

@@ -5,16 +5,21 @@
  * atomically (temp file + rename). Covers first-turn storage, stored →
  * resume lookup, failed-resume rebind-to-fresh, 50 concurrent writes always
  * landing complete JSON, >30d pruning on load and bind, and corrupt/missing
- * files being treated as empty.
+ * files being treated as empty. A second suite covers the cross-process
+ * lockfile: every opencode instance is a separate OS process, so all
+ * read-modify-write cycles serialize through `<state-file>.lock` — mutual
+ * exclusion, bounded wait (SessionStoreBusyError), stale takeover after a
+ * crash, and lock release on both success and mid-mutation failure.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openSessionStore } from "../src/session-store";
+import { openSessionStore, SessionStoreBusyError } from "../src/session-store";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 async function setup(): Promise<{ path: string; store: ReturnType<typeof openSessionStore> }> {
 	const dir = await mkdtemp("/tmp/agy-store-");
@@ -128,5 +133,91 @@ describe("unit: session-store — v1.1 divergence baseline (hashes)", () => {
 		const entry = await store.getEntry("sess-r");
 		expect(entry?.conversationId).toBe("conv-2");
 		expect(entry?.hashes).toBeUndefined();
+	});
+});
+
+describe("unit: session-store — cross-process lockfile (read-modify-write mutual exclusion)", () => {
+	test("two store instances on the same file (simulated processes): concurrent binds of different sessions both land", async () => {
+		const dir = await mkdtemp("/tmp/agy-store-xproc-");
+		const path = join(dir, "opencode-sessions.json");
+		const first = openSessionStore(path);
+		const second = openSessionStore(path);
+		await Promise.all([first.bind("sess-a", "conv-a"), second.bind("sess-b", "conv-b")]);
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		expect(raw.sessions["sess-a"].conversationId).toBe("conv-a");
+		expect(raw.sessions["sess-b"].conversationId).toBe("conv-b");
+		expect(existsSync(`${path}.lock`)).toBe(false);
+	});
+
+	test("mutual exclusion: bind spins while a fresh foreign lock is held and proceeds once it is released", async () => {
+		const { path, store } = await setup();
+		const lockPath = `${path}.lock`;
+		writeFileSync(lockPath, ""); // fresh mtime → held by a live process
+		let finished = false;
+		const bound = store.bind("sess-w", "conv-w").then(() => {
+			finished = true;
+		});
+		await sleep(40); // well inside the 3s bounded wait
+		expect(finished).toBe(false);
+		unlinkSync(lockPath); // the foreign holder releases
+		await bound;
+		expect(await store.get("sess-w")).toBe("conv-w");
+		expect(existsSync(lockPath)).toBe(false); // released its own lock
+	});
+
+	test("pure reads take the lock too: get waits for a fresh foreign lock and completes after release", async () => {
+		const { path, store } = await setup();
+		await store.bind("sess-r", "conv-r");
+		const lockPath = `${path}.lock`;
+		writeFileSync(lockPath, "");
+		let finished = false;
+		const read = store.get("sess-r").then((v) => {
+			finished = true;
+			return v;
+		});
+		await sleep(40);
+		expect(finished).toBe(false);
+		unlinkSync(lockPath);
+		expect(await read).toBe("conv-r");
+		expect(existsSync(lockPath)).toBe(false);
+	});
+
+	test("busy: fresh foreign lock held past the bounded wait → SessionStoreBusyError naming the lock; foreign lock untouched", async () => {
+		const dir = await mkdtemp("/tmp/agy-store-busy-");
+		const path = join(dir, "opencode-sessions.json");
+		const lockPath = `${path}.lock`;
+		writeFileSync(lockPath, "");
+		const store = openSessionStore(path, { lockWaitMs: 80 });
+		const error = await store.bind("sess-busy", "conv-busy").then(
+			() => undefined,
+			(err) => err,
+		);
+		expect(error).toBeInstanceOf(SessionStoreBusyError);
+		expect((error as Error).message).toContain(lockPath);
+		expect(existsSync(lockPath)).toBe(true); // belongs to the other holder — not ours to delete
+	});
+
+	test("stale takeover: a lock aged beyond the stale window is unlinked and acquisition succeeds immediately", async () => {
+		const { path, store } = await setup();
+		const lockPath = `${path}.lock`;
+		writeFileSync(lockPath, "");
+		const aged = new Date(Date.now() - 4000);
+		utimesSync(lockPath, aged, aged);
+		const started = Date.now();
+		await store.bind("sess-stale", "conv-stale");
+		expect(Date.now() - started).toBeLessThan(2000); // no busy-wait out to the 3s bound
+		expect(await store.get("sess-stale")).toBe("conv-stale");
+		expect(existsSync(lockPath)).toBe(false);
+	});
+
+	test("crash safety: a mid-mutation throw under the lock leaves the old file intact and releases the lock", async () => {
+		const { path, store } = await setup();
+		await store.bind("sess-keep", "conv-keep");
+		// A BigInt merges into the in-memory map but breaks JSON.stringify inside
+		// persist — a deterministic crash between load and rename, under the lock.
+		await expect(store.bind("sess-boom", 10n as unknown as string)).rejects.toThrow();
+		expect(existsSync(`${path}.lock`)).toBe(false);
+		const raw = JSON.parse(readFileSync(path, "utf8")); // old state, still complete JSON
+		expect(Object.keys(raw.sessions)).toEqual(["sess-keep"]);
 	});
 });
