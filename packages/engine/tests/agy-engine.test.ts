@@ -7,6 +7,7 @@
  * (dispatch/persist/validate/metrics/CLI) stayed behind in the source repo.
  */
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
@@ -328,6 +329,108 @@ describe("unit: outcomes — classify run signals", () => {
 			outcome: "timeout",
 			reason: "agy_print_wait_timeout",
 		});
+	});
+
+	test("R1 s1: expectArtifact=false + exit 0 + SUCCESS envelope + non-empty response → success(ok)", () => {
+		expect(
+			classifyRun({
+				exitCode: 0,
+				log: "streamed run, no artifact expected",
+				expectArtifact: false,
+				envelope: {
+					status: "SUCCESS",
+					response: "the streamed answer",
+					conversation_id: "conv-1",
+				},
+			}),
+		).toEqual({ outcome: "success", reason: "ok" });
+	});
+
+	test("R1 s2 (compat guard): expectArtifact omitted + no artifact → artifact_validation_failure (unchanged)", () => {
+		expect(
+			classifyRun({
+				exitCode: 0,
+				log: "streamed run, no artifact expected",
+				envelope: { status: "SUCCESS", response: "the streamed answer" },
+			}),
+		).toEqual({
+			outcome: "artifact_validation_failure",
+			reason: "artifact_missing_or_empty",
+		});
+	});
+
+	test("R1: whitespace-only SUCCESS response never satisfies the seam", () => {
+		expect(
+			classifyRun({
+				exitCode: 0,
+				log: "",
+				expectArtifact: false,
+				envelope: { status: "SUCCESS", response: "   " },
+			}),
+		).toEqual({
+			outcome: "artifact_validation_failure",
+			reason: "artifact_missing_or_empty",
+		});
+	});
+
+	test("R1: ERROR envelope keeps the exit-0 print-wait timeout gate for artifact-less runs", () => {
+		expect(
+			classifyRun({
+				exitCode: 0,
+				log: "",
+				expectArtifact: false,
+				envelope: { status: "ERROR", error: "timeout waiting for response" },
+			}),
+		).toEqual({ outcome: "timeout", reason: "agy_print_wait_timeout" });
+	});
+
+	test("R1: missing envelope never satisfies the seam", () => {
+		expect(
+			classifyRun({
+				exitCode: 0,
+				log: "finished with no parseable envelope",
+				expectArtifact: false,
+			}),
+		).toEqual({
+			outcome: "artifact_validation_failure",
+			reason: "artifact_missing_or_empty",
+		});
+	});
+
+	test("R1: seam success outranks the mid-turn stderr marker, mirroring artifact-backed success", () => {
+		const marker =
+			"[agy] print timeout after 15s with turn in progress; returning partial output\n";
+		expect(
+			classifyRun({
+				exitCode: 0,
+				log: marker,
+				expectArtifact: false,
+				envelope: { status: "SUCCESS", response: "delivered anyway" },
+			}),
+		).toEqual({ outcome: "success", reason: "ok" });
+	});
+
+	test("R1: expectArtifact=true behaves like omitted — artifact-backed success only", () => {
+		expect(
+			classifyRun({
+				exitCode: 0,
+				log: "",
+				expectArtifact: true,
+				artifactBytes: 412,
+				envelope: { status: "ERROR", error: "model refused the task" },
+			}),
+		).toEqual({ outcome: "success", reason: "ok" });
+	});
+
+	test("R1 guard: artifact-backed success still outranks auth/quota markers with the field present", () => {
+		expect(
+			classifyRun({
+				exitCode: 0,
+				artifactBytes: 412,
+				log: "429 rate limit AND captcha challenge",
+				expectArtifact: true,
+			}).outcome,
+		).toBe("success");
 	});
 });
 
@@ -1042,5 +1145,48 @@ describe("unit: spawn — async stream runner: stall watchdog, hard cap, init/re
 		setTimeout(() => child.emit("close", 1, null), 10);
 		const r = await p;
 		expect(r.progress).toBeUndefined();
+	});
+
+	test("R2 logPath: stdout lines AND stderr chunks land at the custom target; <workdir>/run.log NOT created", async () => {
+		const dir = await mkdtemp("/tmp/agy-logpath-");
+		const logDir = `${dir}/logs`;
+		mkdirSync(logDir);
+		const custom = `${logDir}/custom-run.log`;
+		const child = fakeChild();
+		const p = runAgy({
+			bin: "agy",
+			prompt: "p",
+			workdir: dir,
+			timeoutMs: 30_000,
+			stallMs: 0,
+			logPath: custom,
+			spawnImpl: asSpawn(child),
+		});
+		child.stdout.push(ndjson({ event: "init", conversation_id: "conv-log" }));
+		child.stderr?.push(Buffer.from("stderr noise\n"));
+		setTimeout(() => child.emit("close", 0, null), 10);
+		const r = await p;
+		expect(r.exitCode).toBe(0);
+		const text = await Bun.file(custom).text();
+		expect(text).toContain('"event":"init"');
+		expect(text).toContain("stderr noise");
+		expect(existsSync(`${dir}/run.log`)).toBe(false);
+	});
+
+	test("R2 default: logPath omitted keeps writing <workdir>/run.log", async () => {
+		const dir = await mkdtemp("/tmp/agy-logpath-default-");
+		const child = fakeChild();
+		const p = runAgy({
+			bin: "agy",
+			prompt: "p",
+			workdir: dir,
+			timeoutMs: 30_000,
+			stallMs: 0,
+			spawnImpl: asSpawn(child),
+		});
+		child.stdout.push(ndjson({ event: "init", conversation_id: "conv-default" }));
+		setTimeout(() => child.emit("close", 0, null), 10);
+		await p;
+		expect(await Bun.file(`${dir}/run.log`).text()).toContain('"event":"init"');
 	});
 });

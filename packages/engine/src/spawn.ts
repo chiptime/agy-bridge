@@ -21,6 +21,12 @@ export interface SpawnOptions {
 	model?: string;
 	/** Resume handle: appends `--conversation <id>` to continue an existing agy conversation. */
 	resumeConversationId?: string;
+	/**
+	 * R2 seam: redirect target for the streamed run log (mode 'w', line by
+	 * line). Defaults to `<workdir>/run.log`; the parent directory is the
+	 * caller's responsibility.
+	 */
+	logPath?: string;
 }
 
 export interface SpawnRun {
@@ -173,7 +179,7 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 			env: opts.env ? { ...process.env, ...opts.env } : process.env,
 			stdio: ['ignore', 'pipe', 'pipe'],
 		});
-		const logFd = openSync(`${opts.workdir}/run.log`, 'w');
+		const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, 'w');
 		let log = '';
 		let envelope: AgyEnvelope | undefined;
 		let conversationId: string | undefined;

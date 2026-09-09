@@ -14,7 +14,10 @@
  * 3. timedOut OR exitCode 124     → timeout (timeout)
  * 4. exitCode 0 AND artifactBytes → success (ok) — a non-empty artifact on a
  *    clean exit is the authoritative success signal; log-pattern regexes gate
- *    only runs that miss this rule (failed runs)
+ *    only runs that miss this rule (failed runs). expectArtifact:false (R1)
+ *    swaps the success evidence to a SUCCESS envelope with a non-empty
+ *    response, for hosts that consume the streamed response instead of a
+ *    file artifact
  * 5. AUTH_RE matches log          → auth_captcha (auth_or_captcha)
  * 6. failed run AND envelope.status === 'ERROR' with the print-wait timeout
  *    signature in envelope.error → timeout (agy_print_wait_timeout) — the
@@ -60,6 +63,13 @@ export interface RunSignal {
 	stalled?: boolean;
 	/** Size in bytes of the expected artifact; 0/undefined means missing. */
 	artifactBytes?: number;
+	/**
+	 * R1 seam: false means this host consumes the typed response, not a file
+	 * artifact — exit-0 success then requires an envelope with status SUCCESS
+	 * and a non-empty response instead of artifactBytes. Omitted (or true)
+	 * keeps the artifact-backed rules unchanged.
+	 */
+	expectArtifact?: boolean;
 	/** Parsed `--output-format json` envelope, when agy printed one. */
 	envelope?: AgyEnvelope;
 	/** Stream progress observed by the async runner; present only after real streamed output. */
@@ -97,7 +107,17 @@ export function classifyRun(signal: RunSignal): Classification {
 	// either way the outcome is the recoverable timeout family.
 	if (signal.stalled) return { outcome: 'timeout', reason: 'stall_detected' };
 	if (signal.timedOut || signal.exitCode === 124) return { outcome: 'timeout', reason: 'timeout' };
-	if (signal.exitCode === 0 && signal.artifactBytes) return { outcome: 'success', reason: 'ok' };
+	// R1 seam: artifact-less hosts (expectArtifact:false) prove exit-0 success
+	// with the typed envelope instead of artifactBytes. Placed alongside the
+	// artifact-backed rule so a delivered response wins over the log-pattern
+	// gates below exactly like a delivered artifact does.
+	const artifactLessSuccess =
+		signal.expectArtifact === false &&
+		signal.envelope?.status === 'SUCCESS' &&
+		(signal.envelope.response ?? '').trim() !== '';
+	if (signal.exitCode === 0 && (signal.artifactBytes || artifactLessSuccess)) {
+		return { outcome: 'success', reason: 'ok' };
+	}
 	// Mid-turn print-wait cut (live 2026-09-09): agy exits 0, reports status
 	// SUCCESS with an EMPTY response, and marks stderr with this line while
 	// the artifact never lands. The marker is the deadline signature — a
