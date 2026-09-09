@@ -13,21 +13,36 @@ id must stay `agy` — the plugin's session channel keys on it.
 
 ## Install
 
+**Local (from this repo)** — the `npm` field must be a `file://` URL pointing at
+the **entry file** (`dist/provider.js`), and `models` keys are **BARE ids**
+(no `provider/` prefix — full ids cause `ProviderModelNotFoundError`).
+Verified against opencode 1.18.29; registry-style specs and directory paths
+are treated as npm coordinates and fail to initialize:
+
 ```jsonc
 // opencode.json
 {
-  "plugin": ["agy-bridge-opencode"],
+  "plugin": ["file:///abs/path/to/agy-bridge/packages/opencode-adapter/dist/index.js"],
   "provider": {
     "agy": {
-      "npm": "agy-bridge-opencode",
+      "npm": "file:///abs/path/to/agy-bridge/packages/opencode-adapter/dist/provider.js",
       "options": { "workdirMode": "session", "timeoutMs": 600000 },
       "models": {
-        "agy/gemini-3.8-flash-high": { "name": "gemini-3.8-flash-high" }
+        "default": { "name": "Agy Default" },
+        "gemini-3.8-flash-high": { "name": "Gemini 3.8 Flash (High)" }
       }
     }
   }
 }
 ```
+
+- Rebuild after source changes (`bun run build` in the package) — the host
+  imports `dist/`, and the module is cached per server process (restart
+  opencode to pick up a rebuild).
+- `models` is optional: the plugin registers everything `agy models` reports
+  (24h cache). Config entries override names/limits or add pass-through ids.
+- **From npm (planned)**: once published, both fields become
+  `"agy-bridge-opencode@<version>"`.
 
 `agy/default` (first in `/model`, agy picks the backend) plus the
 `gemini-3.8-flash-*` tiers ship built in; `models` entries override limits or
@@ -83,8 +98,8 @@ failures surface agy's own text.
 
 opencode uses `small_model` for titles/summaries on **every** turn. Those
 calls would each start an agy-owned conversation, polluting the very sessions
-your main model relies on (and burning quota). Configure it elsewhere, e.g.
-`"small_model": { "provider_id": "opencode/grok-code", "model_id": "..." }`.
+your main model relies on (and burning quota). Point it at another provider,
+e.g. `"small_model": "google/gemini-2.5-flash"`.
 
 ## Debugging
 

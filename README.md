@@ -20,12 +20,19 @@ legacy CLI ────────┘   (spawn / classify /
 - **adapters** (future): opencode provider, pi extension, legacy CLI. Each one
   shells into the same engine instead of re-implementing agy plumbing.
 
-## Roadmap
+## Status & Roadmap
 
-- **v0** — engine port (this commit): spawn runner, outcome taxonomy, quota.
-- **v1** — opencode provider adapter.
-- **v1** — pi extension adapter.
-- **CLI adapter** for the transition period, then deprecate the dotfiles
+- ✅ **v0** — engine port: spawn runner (stream-json NDJSON, stall watchdog,
+  hard cap), outcome taxonomy (three agy timeout signatures), quota preflight.
+- ✅ **v1 — opencode provider adapter** (`packages/opencode-adapter`):
+  LanguageModelV3 provider + plugin, dynamic model discovery from
+  `agy models`, live agent progress, typed error mapping with resume-once,
+  session↔conversation persistence, divergence detection with history
+  re-seeding. Verified end-to-end against real agy (see its README).
+- ⬜ **npm publication** — the adapter is self-contained (`dist/` bundles the
+  engine); publishing unlocks registry installs.
+- ⬜ **pi extension adapter** — pattern reference: pi-claude-bridge.
+- ⬜ **CLI adapter** for the transition period, then deprecate the dotfiles
   router (`ai/opencode-router`).
 - `metrics.ts` is intentionally not ported yet — port once the engine's
   result types settle.
