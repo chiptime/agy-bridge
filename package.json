@@ -1,10 +1,14 @@
 {
-	"name": "agy-bridge",
-	"private": true,
-	"workspaces": [
-		"packages/*"
-	],
-	"scripts": {
-		"test": "bun test"
-	}
+  "name": "agy-bridge",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "bun test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chiptime/agy-bridge.git"
+  }
 }
