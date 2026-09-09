@@ -1,0 +1,10 @@
+{
+	"name": "agy-bridge",
+	"private": true,
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"test": "bun test"
+	}
+}
