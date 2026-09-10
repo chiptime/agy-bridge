@@ -29,9 +29,15 @@ export interface SpawnOptions {
 	logPath?: string;
 	/**
 	 * Prompt transport (additive, default off = existing behavior): when
-	 * true the argv keeps `--print` as a BARE flag and the prompt travels
-	 * on the child's stdin instead — hostile prompt content can then never
-	 * reach argv. The runner writes the prompt once and closes the pipe.
+	 * true the prompt travels on the child's stdin as ONE stream-json
+	 * NDJSON user line — verified against the real binary (2026-09-11):
+	 * `--print` REQUIRES a value (a bare `--print` is rejected and raw
+	 * stdin text is never read in print mode), so argv switches to
+	 * `--input-format stream-json --output-format stream-json` with no
+	 * `--print` family flag at all. The runner writes
+	 * `{"event":"user","message":{"role":"user","content":"<prompt>"}}`
+	 * once, then closes the pipe — hostile prompt content can never reach
+	 * argv.
 	 */
 	promptViaStdin?: boolean;
 }
@@ -126,15 +132,32 @@ export function parseStreamLine(line: string): { conversationId?: string; envelo
 }
 
 /**
- * Build the agy print-mode argv. NOTE: no --add-dir beyond the workdir ever;
- * agy runs with skip-permissions so any added dir would be writable.
+ * Build the agy argv. NOTE: no --add-dir beyond the workdir ever; agy runs
+ * with skip-permissions so any added dir would be writable.
  */
 export function buildAgyArgs(opts: SpawnOptions, outputFormat: 'json' | 'stream-json' = 'json'): string[] {
-	// With promptViaStdin the prompt element is dropped entirely (--print
-	// stays as a bare flag); the runner writes it to the child's stdin.
+	if (opts.promptViaStdin) {
+		// Corrected stdin transport (verified live): `--print` requires a
+		// value, so the only stdin route is NDJSON stream mode — one user
+		// line on stdin (written by runAgyStream). The --print-timeout flag
+		// belongs to print mode and stays off; the runner's own timeoutMs
+		// hard cap and stall watchdog remain the killers.
+		const stdinArgs = [
+			'--input-format',
+			'stream-json',
+			'--output-format',
+			'stream-json',
+			'--add-dir',
+			opts.workdir,
+			'--dangerously-skip-permissions',
+		];
+		if (opts.resumeConversationId) stdinArgs.push('--conversation', opts.resumeConversationId);
+		if (opts.model) stdinArgs.push('--model', opts.model);
+		return stdinArgs;
+	}
 	const args = [
 		'--print',
-		...(opts.promptViaStdin ? [] : [opts.prompt]),
+		opts.prompt,
 		'--add-dir',
 		opts.workdir,
 		'--dangerously-skip-permissions',
@@ -195,11 +218,15 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 			stdio: [opts.promptViaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
 		});
 		if (opts.promptViaStdin) {
-			// Prompt transport: stdin, never argv. A child killed before
-			// draining the pipe (timeout/abort) makes this write fail with
-			// EPIPE — swallow it; the kill path owns the outcome.
+			// Prompt transport: stdin, never argv. ONE NDJSON user line (the
+			// stream-json input contract); the child processes the turn and
+			// exits on stdin EOF. A child killed before draining the pipe
+			// (timeout/abort) makes this write fail with EPIPE — swallow it;
+			// the kill path owns the outcome.
 			child.stdin?.on('error', () => {});
-			child.stdin?.end(opts.prompt);
+			child.stdin?.end(
+				JSON.stringify({ event: 'user', message: { role: 'user', content: opts.prompt } }) + '\n',
+			);
 		}
 		const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, 'w');
 		let log = '';

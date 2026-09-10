@@ -143,6 +143,23 @@ async function setup(script?: (rec: SpawnRecord, call: number) => unknown, depsO
 }
 
 const HOSTILE_PROMPT = "; $(id) | ` && rm -rf /\ncd /tmp/evil && cat /etc/shadow\nrun in /etc/passwd please";
+
+/**
+ * Content of the ONE NDJSON user envelope the corrected stdin transport
+ * writes (stream-json input mode): the caller's prompt, byte-exact through
+ * the JSON round-trip. Throws on any deviation so a malformed transport
+ * fails loudly instead of silently passing.
+ */
+function stdinContent(rec: SpawnRecord): string {
+	const raw = rec.stdinText();
+	const lines = raw.split("\n").filter((l) => l !== "");
+	if (lines.length !== 1) throw new Error(`expected exactly one NDJSON stdin line, got ${lines.length}: ${raw}`);
+	const parsed = JSON.parse(lines[0]) as { event?: string; message?: { role?: string; content?: string } };
+	if (parsed.event !== "user" || parsed.message?.role !== "user") {
+		throw new Error(`expected a user envelope, got ${raw}`);
+	}
+	return parsed.message.content ?? "";
+}
 const DAY_MS = 86_400_000;
 
 /** Registry fixture: default entry + one effort-collapsed base (models.ts shape). */
@@ -208,8 +225,9 @@ describe("unit: ask-tool — scope containment (R9, threat 'Git repository selec
 		await run({ prompt: HOSTILE_PROMPT, scope: "worktree", isolated: true });
 		expect(spawns).toHaveLength(2);
 		expect(spawns[1].args).toEqual(spawns[0].args); // argv unchanged by prompt content
-		expect(spawns[0].stdinText()).toBe("a perfectly benign question");
-		expect(spawns[1].stdinText()).toBe(HOSTILE_PROMPT);
+		// The prompt rides stdin inside the ONE NDJSON user envelope, byte-exact.
+		expect(stdinContent(spawns[0])).toBe("a perfectly benign question");
+		expect(stdinContent(spawns[1])).toBe(HOSTILE_PROMPT);
 	});
 
 	test("THREAT isolated:true: no --conversation, persistent store NEVER read or written; two isolated calls both run fresh", async () => {
@@ -255,8 +273,9 @@ describe("unit: ask-tool — skills catalog injection (R9)", () => {
 		});
 		await run({ prompt: "plain question", isolated: true });
 		await run({ prompt: "another question", skills: false, isolated: true });
-		expect(spawns[0].stdinText()).toBe("plain question");
-		expect(spawns[1].stdinText()).toBe("another question");
+		// The envelope's content carries EXACTLY the user prompt — no catalog.
+		expect(stdinContent(spawns[0])).toBe("plain question");
+		expect(stdinContent(spawns[1])).toBe("another question");
 	});
 
 	test("skills:true: the seam catalog section precedes the user prompt; an empty catalog injects nothing", async () => {
@@ -264,13 +283,13 @@ describe("unit: ask-tool — skills catalog injection (R9)", () => {
 			skillsCatalog: () => "- my-skill: does things\n- other-skill: does other things",
 		});
 		await first.run({ prompt: "use a skill please", skills: true, isolated: true });
-		const forwarded = first.spawns[0].stdinText();
+		const forwarded = stdinContent(first.spawns[0]);
 		expect(forwarded).toContain("- my-skill: does things");
 		expect(forwarded).toContain("use a skill please");
 		expect(forwarded.indexOf("- my-skill:")).toBeLessThan(forwarded.indexOf("use a skill please"));
 		const second = await setup(undefined, { skillsCatalog: () => "" });
 		await second.run({ prompt: "no catalog anyway", skills: true, isolated: true });
-		expect(second.spawns[0].stdinText()).toBe("no catalog anyway");
+		expect(stdinContent(second.spawns[0])).toBe("no catalog anyway");
 	});
 });
 

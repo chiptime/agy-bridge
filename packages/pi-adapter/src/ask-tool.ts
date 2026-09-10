@@ -31,6 +31,7 @@ import type { spawn } from "node:child_process";
 import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
+import type { BridgeState } from "./lifecycle";
 import type { PiAgyModel } from "./models";
 import { formatStepUpdate } from "./progress";
 import type { SessionStore } from "./session-store";
@@ -120,6 +121,12 @@ export interface AskAgyDeps {
 	spawnFn?: typeof spawn;
 	/** D1 engine seam: the prompt rides stdin, never argv. Default off. */
 	promptViaStdin?: boolean;
+	/**
+	 * Lifecycle registry (R6, additive): when present, delegations register
+	 * in-flight (visible in /agy status) and keep the binding cache
+	 * coherent — the same wiring the main turn path got in D3.
+	 */
+	state?: BridgeState;
 	/** Skills catalog seam (pi exposes no skills API): rendered name/description lines. */
 	skillsCatalog?: () => string | undefined;
 	/** Wall-clock seam (tests). */
@@ -225,6 +232,7 @@ export function createAskAgyTool(deps: AskAgyDeps): ToolDefinition<typeof askAgy
 						...(deps.logRoot !== undefined ? { logRoot: deps.logRoot } : {}),
 						...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 						...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
+						...(deps.state !== undefined ? { state: deps.state } : {}),
 					},
 					{
 						context,

