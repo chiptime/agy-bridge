@@ -42,6 +42,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { BridgeState } from "./lifecycle";
 import { mapClassification, type ErrorMapping } from "./errors";
 import { mapPiPrompt, toPromptMessages } from "./messages";
 import { sessionKey, type SessionStore } from "./session-store";
@@ -99,6 +100,13 @@ export interface TurnDeps {
 	 * argv. Default off = the frozen argv transport (--print <prompt>).
 	 */
 	promptViaStdin?: boolean;
+	/**
+	 * Lifecycle registry (R6): when present, the turn registers itself
+	 * in-flight, notes tapped conversation ids, and keeps the binding
+	 * cache coherent with bind/rebind. Purely additive — absent means
+	 * today's direct-store behavior (frozen suites).
+	 */
+	state?: BridgeState;
 }
 
 /** Terminal turn failure carrying the mapped pi error semantics (errors.ts). */
@@ -212,88 +220,114 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 	const optionsCwd = (options as { cwd?: string } | undefined)?.cwd;
 	const cwd = optionsCwd ?? process.cwd();
 	const key = sessionKey(sid, cwd);
-	// Workdir authority: only deps/config or the pi turn's own cwd — never
-	// anything derived from prompt content (threat row b).
-	const workdir = deps.workdir ?? cwd;
-	// Prompt reduction + divergence decision (R4/R7): the stored hash
-	// baseline picks linear resume vs fresh re-seed; hash-less entries are
-	// adopted once.
-	const incoming = toPromptMessages(req.context.messages);
-	const hashes = messageHashes(incoming);
-	const entry = await deps.store.getEntry(key);
-	let diverged = false;
-	let resumeId: string | undefined;
-	if (entry === undefined) {
-		resumeId = undefined; // first turn: fresh, last-user-turn only
-	} else if (entry.hashes === undefined) {
-		resumeId = entry.conversationId; // unknown baseline: adopt once, then protected
-	} else if (hashesArePrefix(entry.hashes, hashes)) {
-		resumeId = entry.conversationId; // linear continuation
-	} else {
-		diverged = true; // edited/deleted/reordered history → fresh re-seed
-		req.onDiverged?.();
-	}
-	const isNewConversation = entry === undefined || diverged;
-	const seedInfo = diverged ? renderSeed(incoming) : undefined;
-	const mapping = mapPiPrompt(req.context, { isNewConversation, seed: seedInfo?.seed });
-	// Per-turn scratch dir keeps run.log out of the user's project.
-	const logPath = join(mkdtempSync(join(deps.logRoot ?? tmpdir(), "agy-run-")), "run.log");
-	const attempt = async (resumeConversationId: string | undefined, resumed: boolean): Promise<AttemptResult> => {
-		const tap = createTap({
-			signal,
-			spawnFn: deps.spawnFn,
-			onStep: (step) => req.onStep?.(step),
-		});
-		const run = await runAgyStream({
-			bin: deps.bin,
-			prompt: mapping.prompt,
-			workdir,
-			timeoutMs: deps.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
-			model: req.modelArg,
-			resumeConversationId,
-			logPath,
-			spawnImpl: tap.spawnImpl,
-			...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
-		});
-		const classification = classifyRun({
-			exitCode: run.exitCode,
-			log: run.log,
-			spawnError: run.spawnError,
-			timedOut: run.timedOut,
-			stalled: run.stalled,
-			envelope: run.envelope,
-			expectArtifact: false,
-		});
-		return { classification, run, resumed, conversationId: run.conversationId ?? tap.conversationId };
+	// In-flight registration (R6): spans the whole turn, ends on every
+	// exit path; the identity token means an overlapped turn for the
+	// same key can never end its successor's registration.
+	const tracked = deps.state?.beginTurn(key);
+	const note = (id: string | undefined) => {
+		if (id !== undefined) deps.state?.noteConversationId(key, id);
 	};
-	const resumeAttemptId = diverged ? undefined : entry?.conversationId;
-	let result = await attempt(resumeAttemptId, resumeAttemptId !== undefined);
-	const persistAndThrowAbort = async (conversationId: string | undefined): Promise<never> => {
-		if (conversationId !== undefined) await deps.store.bind(key, conversationId, hashes);
-		throw new TurnAborted();
-	};
-	if (signal?.aborted) await persistAndThrowAbort(result.conversationId);
-	// R8 resume-once: only the timeout family, only with a captured id, and
-	// only when this run was not already the one resume.
-	const canResume =
-		result.classification.outcome === "timeout" && !result.resumed && result.conversationId !== undefined;
-	if (canResume) {
-		result = await attempt(result.conversationId, true);
+	try {
+		// Workdir authority: only deps/config or the pi turn's own cwd — never
+		// anything derived from prompt content (threat row b).
+		const workdir = deps.workdir ?? cwd;
+		// Prompt reduction + divergence decision (R4/R7): the stored hash
+		// baseline picks linear resume vs fresh re-seed; hash-less entries are
+		// adopted once. With a registry wired, the lookup rides the binding
+		// cache's per-key single flight (lifecycle.ts).
+		const incoming = toPromptMessages(req.context.messages);
+		const hashes = messageHashes(incoming);
+		const entry = await (deps.state?.lookupBinding(deps.store, key) ?? deps.store.getEntry(key));
+		let diverged = false;
+		let resumeId: string | undefined;
+		if (entry === undefined) {
+			resumeId = undefined; // first turn: fresh, last-user-turn only
+		} else if (entry.hashes === undefined) {
+			resumeId = entry.conversationId; // unknown baseline: adopt once, then protected
+		} else if (hashesArePrefix(entry.hashes, hashes)) {
+			resumeId = entry.conversationId; // linear continuation
+		} else {
+			diverged = true; // edited/deleted/reordered history → fresh re-seed
+			req.onDiverged?.();
+		}
+		const isNewConversation = entry === undefined || diverged;
+		const seedInfo = diverged ? renderSeed(incoming) : undefined;
+		const mapping = mapPiPrompt(req.context, { isNewConversation, seed: seedInfo?.seed });
+		// Per-turn scratch dir keeps run.log out of the user's project.
+		const logPath = join(mkdtempSync(join(deps.logRoot ?? tmpdir(), "agy-run-")), "run.log");
+		const attempt = async (
+			resumeConversationId: string | undefined,
+			resumed: boolean,
+		): Promise<AttemptResult> => {
+			const tap = createTap({
+				signal,
+				spawnFn: deps.spawnFn,
+				onStep: (step) => req.onStep?.(step),
+			});
+			const run = await runAgyStream({
+				bin: deps.bin,
+				prompt: mapping.prompt,
+				workdir,
+				timeoutMs: deps.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
+				model: req.modelArg,
+				resumeConversationId,
+				logPath,
+				spawnImpl: tap.spawnImpl,
+				...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
+			});
+			const classification = classifyRun({
+				exitCode: run.exitCode,
+				log: run.log,
+				spawnError: run.spawnError,
+				timedOut: run.timedOut,
+				stalled: run.stalled,
+				envelope: run.envelope,
+				expectArtifact: false,
+			});
+			return { classification, run, resumed, conversationId: run.conversationId ?? tap.conversationId };
+		};
+		const resumeAttemptId = diverged ? undefined : entry?.conversationId;
+		let result = await attempt(resumeAttemptId, resumeAttemptId !== undefined);
+		note(result.conversationId);
+		const persistAndThrowAbort = async (conversationId: string | undefined): Promise<never> => {
+			if (conversationId !== undefined) {
+				await deps.store.bind(key, conversationId, hashes);
+				deps.state?.cacheBinding(key, { conversationId, hashes });
+			}
+			throw new TurnAborted();
+		};
 		if (signal?.aborted) await persistAndThrowAbort(result.conversationId);
+		// R8 resume-once: only the timeout family, only with a captured id, and
+		// only when this run was not already the one resume.
+		const canResume =
+			result.classification.outcome === "timeout" && !result.resumed && result.conversationId !== undefined;
+		if (canResume) {
+			result = await attempt(result.conversationId, true);
+			note(result.conversationId);
+			if (signal?.aborted) await persistAndThrowAbort(result.conversationId);
+		}
+		if (result.classification.outcome === "success") {
+			if (result.conversationId !== undefined) {
+				await deps.store.bind(key, result.conversationId, hashes);
+				deps.state?.cacheBinding(key, { conversationId: result.conversationId, hashes });
+			}
+			return { ...result, diverged, logPath, prompt: mapping.prompt };
+		}
+		// Terminal failure: a failed resumed attempt rebinds so the next turn
+		// runs fresh; every family maps onto the pi error terminal.
+		if (result.resumed) {
+			await deps.store.rebind(key);
+			deps.state?.dropBinding(key);
+		}
+		throw new TurnError(
+			mapClassification(result.classification, {
+				logPath,
+				conversationId: result.conversationId,
+				resumed: result.resumed,
+				detail: result.run.envelope?.error,
+			}),
+		);
+	} finally {
+		if (tracked !== undefined) deps.state?.endTurn(key, tracked);
 	}
-	if (result.classification.outcome === "success") {
-		if (result.conversationId !== undefined) await deps.store.bind(key, result.conversationId, hashes);
-		return { ...result, diverged, logPath, prompt: mapping.prompt };
-	}
-	// Terminal failure: a failed resumed attempt rebinds so the next turn
-	// runs fresh; every family maps onto the pi error terminal.
-	if (result.resumed) await deps.store.rebind(key);
-	throw new TurnError(
-		mapClassification(result.classification, {
-			logPath,
-			conversationId: result.conversationId,
-			resumed: result.resumed,
-			detail: result.run.envelope?.error,
-		}),
-	);
 }

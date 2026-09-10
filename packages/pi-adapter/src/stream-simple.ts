@@ -36,6 +36,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { AgyUsage } from "agy-bridge-engine";
 import type { spawn } from "node:child_process";
+import type { BridgeState } from "./lifecycle";
 import { mapAbort, type FinalizeReason } from "./errors";
 import { formatStepUpdate } from "./progress";
 import type { SessionStore } from "./session-store";
@@ -66,6 +67,8 @@ export interface StreamSimpleDeps {
 	 * argv. Default off = the frozen argv transport (--print <prompt>).
 	 */
 	promptViaStdin?: boolean;
+	/** Lifecycle registry (R6); forwarded to runTurn when present. */
+	state?: BridgeState;
 }
 
 function zeroUsage(): Usage {
@@ -202,8 +205,9 @@ export function createStreamSimple(
 						...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
 						...(deps.workdir !== undefined ? { workdir: deps.workdir } : {}),
 						...(deps.logRoot !== undefined ? { logRoot: deps.logRoot } : {}),
-						...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
-						...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
+					...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
+					...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
+					...(deps.state !== undefined ? { state: deps.state } : {}),
 					},
 					{
 						context,
