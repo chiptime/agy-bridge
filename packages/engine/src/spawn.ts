@@ -27,6 +27,13 @@ export interface SpawnOptions {
 	 * caller's responsibility.
 	 */
 	logPath?: string;
+	/**
+	 * Prompt transport (additive, default off = existing behavior): when
+	 * true the argv keeps `--print` as a BARE flag and the prompt travels
+	 * on the child's stdin instead — hostile prompt content can then never
+	 * reach argv. The runner writes the prompt once and closes the pipe.
+	 */
+	promptViaStdin?: boolean;
 }
 
 export interface SpawnRun {
@@ -123,7 +130,15 @@ export function parseStreamLine(line: string): { conversationId?: string; envelo
  * agy runs with skip-permissions so any added dir would be writable.
  */
 export function buildAgyArgs(opts: SpawnOptions, outputFormat: 'json' | 'stream-json' = 'json'): string[] {
-	const args = ['--print', opts.prompt, '--add-dir', opts.workdir, '--dangerously-skip-permissions'];
+	// With promptViaStdin the prompt element is dropped entirely (--print
+	// stays as a bare flag); the runner writes it to the child's stdin.
+	const args = [
+		'--print',
+		...(opts.promptViaStdin ? [] : [opts.prompt]),
+		'--add-dir',
+		opts.workdir,
+		'--dangerously-skip-permissions',
+	];
 	// agy's print-mode client wait defaults to 5m0s; without an explicit value long
 	// explorations die at 300s while our budgets (AGY_EXPLORE_TIMEOUT_MS defaults:
 	// 1200s CLI / 1230s plugin) never fire. Derive the flag from timeoutMs so it
@@ -177,8 +192,15 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 		const child = spawnFn(opts.bin, buildAgyArgs(opts, 'stream-json'), {
 			cwd: opts.workdir,
 			env: opts.env ? { ...process.env, ...opts.env } : process.env,
-			stdio: ['ignore', 'pipe', 'pipe'],
+			stdio: [opts.promptViaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
 		});
+		if (opts.promptViaStdin) {
+			// Prompt transport: stdin, never argv. A child killed before
+			// draining the pipe (timeout/abort) makes this write fail with
+			// EPIPE — swallow it; the kill path owns the outcome.
+			child.stdin?.on('error', () => {});
+			child.stdin?.end(opts.prompt);
+		}
 		const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, 'w');
 		let log = '';
 		let envelope: AgyEnvelope | undefined;

