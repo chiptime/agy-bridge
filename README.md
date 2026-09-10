@@ -1,5 +1,8 @@
 # agy-bridge
 
+[![npm version](https://img.shields.io/npm/v/agy-bridge-opencode.svg)](https://www.npmjs.com/package/agy-bridge-opencode)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](packages/opencode-adapter/LICENSE)
+
 Host-agnostic bridge engine for the `agy` CLI plus thin host adapters. The
 engine owns everything that talks to agy — spawning, the `stream-json` NDJSON
 runner, outcome classification (error taxonomy), resume handles, budgets, and
@@ -17,8 +20,35 @@ legacy CLI ────────┘   (spawn / classify /
 
 - **engine** (`packages/engine`): the ported runtime layer from
   `dotfiles/ai/opencode-router` `src/agy/*`. Zero host imports.
-- **adapters** (future): opencode provider, pi extension, legacy CLI. Each one
-  shells into the same engine instead of re-implementing agy plumbing.
+- **engine** (`packages/engine`): the ported runtime layer from
+  `dotfiles/ai/opencode-router` `src/agy/*`. Zero host imports.
+- **adapters**: **opencode provider — shipped** (`packages/opencode-adapter`,
+  published as [`agy-bridge-opencode`](https://www.npmjs.com/package/agy-bridge-opencode)).
+  Pending: pi extension, legacy CLI.
+
+## Install (opencode)
+
+Requires opencode `>=1.15` and an authenticated `agy` (run `agy` standalone
+once). In your `opencode.json`:
+
+```jsonc
+{
+  "plugin": ["agy-bridge-opencode"],
+  "provider": {
+    "agy": {
+      "npm": "agy-bridge-opencode",
+      "options": { "workdirMode": "session" }
+    }
+  }
+}
+```
+
+Restart opencode, `/model` → pick an `agy/*` model. `workdirMode: "scratch"`
+runs each turn in a disposable dir (safe default for unattended use);
+`"session"` lets agy work inside the open worktree. `small_model` must point
+at a non-agy provider. Full details — bare model keys, budgets, divergence
+policy, local `file://` development form — in the
+[adapter README](packages/opencode-adapter/README.md).
 
 ## Status & Roadmap
 
@@ -29,8 +59,10 @@ legacy CLI ────────┘   (spawn / classify /
   `agy models`, live agent progress, typed error mapping with resume-once,
   session↔conversation persistence, divergence detection with history
   re-seeding. Verified end-to-end against real agy (see its README).
-- ⬜ **npm publication** — the adapter is self-contained (`dist/` bundles the
-  engine); publishing unlocks registry installs.
+- ✅ **npm publication** —
+  [`agy-bridge-opencode@0.2.1`](https://www.npmjs.com/package/agy-bridge-opencode)
+  (registry form requires ≥0.2.1; 0.2.0's entrypoint lacked the `create*`
+  re-export — use 0.2.1 or the local `file://` form).
 - ⬜ **pi extension adapter** — pattern reference: pi-claude-bridge.
 - ⬜ **CLI adapter** for the transition period, then deprecate the dotfiles
   router (`ai/opencode-router`).
