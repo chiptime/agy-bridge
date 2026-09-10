@@ -5,6 +5,11 @@
  * outcome classification (error taxonomy incl. the three timeout variants),
  * fallback policy, and passive quota selection. The SDD contract tests
  * (dispatch/persist/validate/metrics/CLI) stayed behind in the source repo.
+ *
+ * Divergence helpers (R11 engine lift): ordered per-message content hashes,
+ * linear-continuation prefix detection, and bounded seed rendering — cases
+ * ported from the opencode-adapter messages tests (host-agnostic shapes only;
+ * mapMessages and the ⟲ status line are host behavior and stay there).
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync } from "node:fs";
@@ -39,7 +44,21 @@ import {
 	runAgy,
 } from "../src/spawn";
 import { listAgyModels, parseAgyModelsOutput } from "../src/models-list";
-import { listAgyModels as listAgyModelsFromIndex } from "../src";
+import {
+	hashesArePrefix,
+	messageHashes,
+	renderSeed,
+	SEED_MAX_CHARS,
+	SEED_MAX_MESSAGES,
+	type PromptContent,
+	type PromptMessage,
+} from "../src/messages";
+import {
+	hashesArePrefix as hashesArePrefixFromIndex,
+	messageHashes as messageHashesFromIndex,
+	listAgyModels as listAgyModelsFromIndex,
+	renderSeed as renderSeedFromIndex,
+} from "../src";
 
 describe("unit: outcomes — classify run signals", () => {
 	const cases: Array<[string, RunSignal, Outcome, string]> = [
@@ -1282,5 +1301,111 @@ describe("unit: spawn — async stream runner: stall watchdog, hard cap, init/re
 		setTimeout(() => child.emit("close", 0, null), 10);
 		await p;
 		expect(await Bun.file(`${dir}/run.log`).text()).toContain('"event":"init"');
+	});
+});
+
+describe("unit: messages — R11 divergence hashes (host-agnostic lift)", () => {
+	function user(parts: PromptContent): PromptMessage {
+		return { role: "user", content: parts };
+	}
+
+	test("messageHashes: stable across calls, 16 lowercase hex chars, distinct per content and role", () => {
+		const msgs: PromptMessage[] = [
+			{ role: "system", content: "sys" },
+			user("one"),
+			{ role: "assistant", content: [{ type: "text", text: "two" }] },
+		];
+		const first = messageHashes(msgs);
+		expect(messageHashes(msgs)).toEqual(first);
+		expect(first).toHaveLength(3);
+		for (const h of first) expect(h).toMatch(/^[0-9a-f]{16}$/);
+		expect(new Set(first).size).toBe(3);
+	});
+
+	test("messageHashes: order is carried by position — a reordered array hashes differently element-wise", () => {
+		const msgs = [user("a"), { role: "assistant", content: "b" } as PromptMessage, user("c")];
+		const h = messageHashes(msgs);
+		const swapped = messageHashes([msgs[1], msgs[0], msgs[2]]);
+		expect(swapped).not.toEqual(h);
+	});
+
+	test("hashesArePrefix table: linear continuation vs edited/deleted/reordered history", () => {
+		const h = messageHashes([user("1"), { role: "assistant", content: "a" }, user("2"), user("3")]);
+		const cases: Array<{ name: string; stored: string[]; incoming: string[]; want: boolean }> = [
+			{ name: "stored prefix of a longer incoming array", stored: h.slice(0, 3), incoming: h, want: true },
+			{ name: "identical arrays", stored: h, incoming: h, want: true },
+			{ name: "empty stored is trivially linear", stored: [], incoming: h, want: true },
+			{ name: "edited middle message", stored: [h[0], "deadbeefdeadbeef", h[2]], incoming: h, want: false },
+			{ name: "stored longer than incoming (deletions)", stored: h, incoming: h.slice(0, 2), want: false },
+			{ name: "reordered messages", stored: [h[1], h[0], h[2], h[3]], incoming: h, want: false },
+		];
+		for (const c of cases) expect(hashesArePrefix(c.stored, c.incoming), c.name).toBe(c.want);
+	});
+});
+
+describe("unit: messages — R11 bounded seed rendering (host-agnostic lift)", () => {
+	function user(parts: PromptContent): PromptMessage {
+		return { role: "user", content: parts };
+	}
+	const seedHistory = (turns: number): PromptMessage[] => {
+		const msgs: PromptMessage[] = [];
+		for (let i = 0; i < turns; i++) {
+			msgs.push(user(`question ${i}`));
+			msgs.push({ role: "assistant", content: [{ type: "text", text: `answer ${i}` }] });
+		}
+		return msgs;
+	};
+
+	test("renders the last 20 text-bearing messages as User:/Assistant: lines inside the guarded block", () => {
+		const { seed, warnings } = renderSeed(seedHistory(15)); // 30 text-bearing messages
+		const lines = seed.split("\n");
+		expect(lines[0]).toBe("--- Previous conversation (context restored after edits in the client) ---");
+		expect(lines[lines.length - 1]).toBe("--- End of previous conversation ---");
+		const rendered = lines.filter((l) => l.startsWith("User: ") || l.startsWith("Assistant: "));
+		expect(rendered).toHaveLength(SEED_MAX_MESSAGES);
+		expect(rendered[0]).toBe("User: question 5"); // last 20 of 30
+		expect(rendered[rendered.length - 1]).toBe("Assistant: answer 14");
+		expect(warnings).toEqual([]);
+	});
+
+	test("texts longer than SEED_MAX_CHARS are truncated to exactly 4000 chars", () => {
+		const long = "x".repeat(SEED_MAX_CHARS + 500);
+		const { seed } = renderSeed([user("q"), { role: "assistant", content: [{ type: "text", text: long }] }]);
+		expect(seed).toContain(`Assistant: ${"x".repeat(SEED_MAX_CHARS)}\n`);
+		expect(seed).not.toContain("x".repeat(SEED_MAX_CHARS + 1));
+	});
+
+	test("non-text parts are skipped with the existing warning text; textless messages are omitted", () => {
+		const { seed, warnings } = renderSeed([
+			user([{ type: "file", mediaType: "image/png", data: "bb" }]), // no text → omitted
+			user([{ type: "text", text: "with tool" }, { type: "tool-result", toolCallId: "t" }]),
+			{ role: "assistant", content: [{ type: "text", text: "kept" }] },
+		]);
+		expect(seed).toContain("User: with tool");
+		expect(seed).toContain("Assistant: kept");
+		expect(warnings.some((w) => w.includes("tool-result"))).toBe(true);
+		expect(warnings.some((w) => w.includes("file"))).toBe(true);
+	});
+
+	test("no text-bearing messages → empty seed, non-text parts still warned", () => {
+		const { seed, warnings } = renderSeed([user([{ type: "file", mediaType: "image/png", data: "bb" }])]);
+		expect(seed).toBe("");
+		expect(warnings).toHaveLength(1);
+	});
+
+	test("explicit k bound keeps only the last k text-bearing messages (seam used by host adapters)", () => {
+		const { seed } = renderSeed(seedHistory(5), 4); // 10 text-bearing messages
+		const rendered = seed
+			.split("\n")
+			.filter((l) => l.startsWith("User: ") || l.startsWith("Assistant: "));
+		expect(rendered).toHaveLength(4);
+		expect(rendered[0]).toBe("User: question 3");
+		expect(rendered[rendered.length - 1]).toBe("Assistant: answer 4");
+	});
+
+	test("divergence helpers are exported from the package index (additive, R11)", () => {
+		expect(messageHashesFromIndex).toBe(messageHashes);
+		expect(hashesArePrefixFromIndex).toBe(hashesArePrefix);
+		expect(renderSeedFromIndex).toBe(renderSeed);
 	});
 });
