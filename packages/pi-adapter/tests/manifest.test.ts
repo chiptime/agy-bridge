@@ -37,7 +37,8 @@ describe("unit: manifest — pi extension packaging contract (R1)", () => {
 
 	test("engine rides the workspace; shipped files are source, not build output", () => {
 		expect(pkg.dependencies).toEqual({ "agy-bridge-engine": "workspace:*" });
-		expect(pkg.files).toEqual(["extensions", "README.md"]);
+		// `src` must ship: the entry imports ../src/* at runtime (smoke.test.ts guards this).
+		expect(pkg.files).toEqual(["extensions", "src", "README.md"]);
 	});
 
 	test("tsconfig follows the house contract: strict, noEmit, source roots", () => {

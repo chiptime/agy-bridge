@@ -50,6 +50,70 @@ at a non-agy provider. Full details — bare model keys, budgets, divergence
 policy, local `file://` development form — in the
 [adapter README](packages/opencode-adapter/README.md).
 
+## Install (pi)
+
+Requires pi `>=0.85` and an authenticated `agy`. Until the npm release, load
+the package straight from a checkout — pi's jiti loader runs the TypeScript
+source, there is no build step:
+
+```sh
+bun install                                   # once, at the repo root
+pi -e ./packages/pi-adapter --list-models     # provider "agy" appears
+pi -e ./packages/pi-adapter --model agy/default
+```
+
+What the extension registers:
+
+- **Provider `agy`** — models discovered from `agy models` (24h cache,
+  fallback catalog when discovery fails). `agy/default` maps to no `--model`.
+  Effort-suffixed ids collapse into one model with thinking levels:
+  `gemini-3.8-flash-{low,medium,high}` → `agy/gemini-3.8-flash:low|medium|high`.
+- **Tool `AskAgy`** — one contained agy run per call. Params: `prompt`,
+  `model?`, `thinking?`, `scope?` (`scratch` default | `worktree`),
+  `isolated?` (no conversation continuity), `skills?` (inject the skills
+  catalog; off by default).
+- **Command `/agy`** — `status` (config, discovery cache, session binding,
+  in-flight turn) and `clear` (drop this session's binding).
+
+### Safety wall — read before pointing it at a real repository
+
+- **Provider turns run agy inside pi's cwd with `--dangerously-skip-permissions`.**
+  agy edits files itself; pi never sees those edits as diffs to approve. This
+  is inherent to agy (no tool passthrough) — only use provider turns in a
+  worktree you can `git checkout -- .` away.
+- **`AskAgy` defaults to `scope: "scratch"`**: a fresh `agy-run-*` temp dir,
+  never your cwd. Pass `scope: "worktree"` only when you want agy in the repo.
+- The prompt travels to agy as one `stream-json` NDJSON line on **stdin, never
+  argv** (a bare `--print` is rejected by agy and raw stdin is ignored, so the
+  argv is `--input-format stream-json --output-format stream-json`).
+- The globally installed `@estebanforge/pi-antigravity-bridge` coexists
+  (different provider id and state file) but its tool-call hook logs a
+  harmless `call-tool-fail` line whenever `AskAgy` runs.
+
+### Continuity
+
+Bindings live in `~/.local/state/agy-bridge/pi-sessions.json`, keyed by the
+pi session id (cwd as fallback). Each turn resumes the bound agy conversation
+with `--conversation <id>` while pi's history is a prefix of what agy already
+saw; after `/model` switches, compaction, or edits that make the history
+diverge, the adapter opens a fresh conversation seeded with a bounded
+transcript (20 messages / 4000 chars) and emits `⟲ history diverged`.
+`/new`, `/resume`, `/fork`, and `/reload` recycle all in-memory state; the
+file survives (30-day prune).
+
+### Configuration
+
+Environment: `AGY_BIN` (binary override), `XDG_STATE_HOME` (state root).
+Factory options (for a wrapper extension calling `createAgyExtension`):
+`timeoutMs`, absolute `stateDir`, absolute `scratchRoot`, `models` override
+map (same semantics as the opencode adapter). Relative paths throw before
+any spawn.
+
+### Not in v1
+
+Tool passthrough, MCP, mid-run steering, token streaming (agy does emit
+`text_delta` — future work), ACP, OAuth, images.
+
 ## Status & Roadmap
 
 - ✅ **v0** — engine port: spawn runner (stream-json NDJSON, stall watchdog,
@@ -63,7 +127,11 @@ policy, local `file://` development form — in the
   [`agy-bridge-opencode@0.2.1`](https://www.npmjs.com/package/agy-bridge-opencode)
   (registry form requires ≥0.2.1; 0.2.0's entrypoint lacked the `create*`
   re-export — use 0.2.1 or the local `file://` form).
-- ⬜ **pi extension adapter** — pattern reference: pi-claude-bridge.
+- ✅ **pi extension adapter** (`packages/pi-adapter`, `agy-bridge-pi` v0.1.0):
+  native pi provider `agy` with discovered models and thinking levels, the
+  `AskAgy` contained delegation tool, `/agy status|clear`, session continuity
+  with divergence re-seeding. Verified end-to-end against real pi 0.85 + agy
+  (see [Install (pi)](#install-pi)). Not yet published to npm.
 - ⬜ **CLI adapter** for the transition period, then deprecate the dotfiles
   router (`ai/opencode-router`).
 - `metrics.ts` is intentionally not ported yet — port once the engine's

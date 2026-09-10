@@ -24,6 +24,7 @@
   },
   "files": [
     "extensions",
+    "src",
     "README.md"
   ],
   "license": "MIT",
