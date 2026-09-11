@@ -48,7 +48,7 @@ interface PiCalls {
 	providers: RecordedProvider[];
 	tools: ToolDefinition[];
 	commands: { name: string; description?: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }[];
-	handlers: Record<string, ((event: never) => Promise<void> | void)[]>;
+	handlers: Record<string, ((event: never, ctx?: never) => Promise<void> | void)[]>;
 }
 
 /** Recording ExtensionAPI stub: the ONLY fake boundary in these tests. */
@@ -59,7 +59,7 @@ function stubPi(): { pi: ExtensionAPI; calls: PiCalls } {
 		registerTool: (tool: ToolDefinition) => calls.tools.push(tool),
 		registerCommand: (name: string, options: { description?: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }) =>
 			calls.commands.push({ name, description: options.description, handler: options.handler }),
-		on: (event: string, handler: (event: never) => Promise<void> | void) => {
+		on: (event: string, handler: (event: never, ctx?: never) => Promise<void> | void) => {
 			(calls.handlers[event] ??= []).push(handler);
 		},
 	} as unknown as ExtensionAPI;
@@ -158,17 +158,23 @@ async function factoryEnv(overrides: {
 	runner?: ReturnType<typeof runnerSeam>;
 	spawn?: ReturnType<typeof spawnSeam>;
 	options?: Record<string, unknown>;
+	skillsCatalog?: () => string | undefined;
 } = {}) {
 	const root = await mkdtemp(join(tmpdir(), "agy-pi-factory-"));
 	const { pi, calls } = stubPi();
 	const spawn = overrides.spawn ?? spawnSeam();
 	const runner = overrides.runner ?? runnerSeam();
+	// Hermetic file layer: empty tmp global/project dirs so the host's real
+	// ~/.pi/agent/agy-bridge.json can never leak into registration/notice rows.
+	const fileConfig = { cwd: join(root, "proj-empty"), agentDir: join(root, "agent-empty") };
 	const load = () =>
 		createAgyExtension(pi, {
 			options: { stateDir: root, timeoutMs: 30_000, ...overrides.options },
 			runner: runner.runner,
 			spawnFn: spawn.spawnFn,
 			now: () => 1_000,
+			fileConfig,
+			...(overrides.skillsCatalog !== undefined ? { skillsCatalog: overrides.skillsCatalog } : {}),
 		});
 	return { root, pi, calls, spawn, runner, load };
 }
@@ -237,7 +243,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		expect(runner.callCount()).toBe(0); // the discovery probe never ran
 	});
 
-	test("R1/R2: registers provider agy (default first, 1M/65536, text-only, zero cost), AskAgy, /agy, and both lifecycle handlers — each exactly once", async () => {
+	test("R1/R2: registers provider agy (default first, 1M/65536, text-only, zero cost), /agy, and both lifecycle handlers — each exactly once; AskAgy stays OFF by default (v0.2 R3)", async () => {
 		const { calls, runner, load } = await factoryEnv();
 		await load();
 		expect(runner.callCount()).toBe(1);
@@ -259,8 +265,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 			maxTokens: 65_536,
 		});
 		expect(models[0].cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-		expect(calls.tools).toHaveLength(1);
-		expect(calls.tools[0].name).toBe("AskAgy");
+		expect(calls.tools).toHaveLength(0); // v0.2 R3 behavior change: AskAgy is opt-in
 		expect(calls.commands).toHaveLength(1);
 		expect(calls.commands[0].name).toBe("agy");
 		expect(calls.commands[0].description).toBeTruthy();
@@ -371,7 +376,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		const reIds = (env.calls.providers[1].config.models ?? []).map((m) => m.id);
 		expect(reIds).toContain("reload-model");
 		expect(reIds).not.toContain("other-model");
-		expect(env.calls.tools).toHaveLength(1); // never double-registered
+		expect(env.calls.tools).toHaveLength(0); // v0.2 R3: no AskAgy by default, and reload must not register one either
 		expect(env.calls.commands).toHaveLength(1);
 		expect(env.calls.handlers["session_start"]).toHaveLength(1);
 		expect(env.calls.handlers["session_shutdown"]).toHaveLength(1);
@@ -390,7 +395,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		await env.load();
 		await env.calls.handlers["session_start"][0]({ type: "session_start", reason: "reload" } as never); // must not reject
 		expect(env.calls.providers).toHaveLength(1); // keeps the load-time registry
-		expect(env.calls.tools).toHaveLength(1);
+		expect(env.calls.tools).toHaveLength(0); // v0.2 R3: no AskAgy by default
 		expect(env.runner.callCount()).toBe(2);
 	});
 
@@ -406,6 +411,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 
 	test("R6/R10: AskAgy's state wiring — an in-flight delegation is visible in /agy status, then clears (same cwd key)", async () => {
 		const { calls, spawn, load, root } = await factoryEnv({
+			options: { askAgy: { enabled: true } }, // v0.2 R3: the tool only exists when enabled
 			spawn: spawnSeam(() => fakeChild({ lines: DEFAULT_LINES, hold: true })),
 		});
 		await load();
@@ -536,5 +542,125 @@ describe("integration: extensions/index — layered file config (v0.2 R1, D10)",
 		expect(calls.providers).toHaveLength(0);
 		expect(calls.tools).toHaveLength(0);
 		expect(runner.callCount()).toBe(0);
+	});
+});
+
+// --- v0.2 S2: conditional AskAgy registration + overrides + notice (R3, R4) ----
+
+/**
+ * session_start ctx stub capturing ui.notify — the R3 notice surface
+ * (pi's ExtensionHandler passes (event, ctx) with ctx.hasUI + ctx.ui).
+ */
+function startCtx(notes: string[], hasUI = true): never {
+	return { hasUI, ui: { notify: (msg: string) => notes.push(msg) } } as never;
+}
+
+describe("integration: extensions/index — conditional AskAgy registration + startup notice (v0.2 R3)", () => {
+	test("R3: askAgy section ABSENT → NO AskAgy and exactly ONE one-time notice on the first session_start", async () => {
+		const { calls, load } = await factoryEnv();
+		await load();
+		expect(calls.tools).toHaveLength(0);
+		const notes: string[] = [];
+		await calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("AskAgy");
+		expect(notes[0]).toContain("enabled"); // the enable hint is discoverable
+		// One-time: a second session_start (reload/new/…) never repeats it.
+		await calls.handlers["session_start"][0]({ type: "session_start", reason: "reload" } as never, startCtx(notes));
+		expect(notes).toHaveLength(1);
+	});
+
+	test("R3: the notice surfaces file-config warnings (the S1 file.warnings path)", async () => {
+		const { calls, load } = await fileFactoryEnv({ global: "{oops" });
+		await load();
+		expect(calls.tools).toHaveLength(0);
+		const notes: string[] = [];
+		await calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("config warning");
+		expect(notes[0]).toContain("malformed");
+	});
+
+	test("R3: enabled:false → no tool and NO notice (explicit opt-out is silent)", async () => {
+		const { calls, load } = await factoryEnv({ options: { askAgy: { enabled: false } } });
+		await load();
+		expect(calls.tools).toHaveLength(0);
+		const notes: string[] = [];
+		await calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
+		expect(notes).toHaveLength(0);
+	});
+
+	test("R3: enabled:true → AskAgy registered exactly once (explicit options or project file layer)", async () => {
+		const explicit = await factoryEnv({ options: { askAgy: { enabled: true } } });
+		await explicit.load();
+		expect(explicit.calls.tools).toHaveLength(1);
+		expect(explicit.calls.tools[0].name).toBe("AskAgy");
+		const notes: string[] = [];
+		await explicit.calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
+		expect(notes).toHaveLength(0); // registered → no notice
+		const fromFile = await fileFactoryEnv({ project: JSON.stringify({ askAgy: { enabled: true } }) });
+		await fromFile.load();
+		expect(fromFile.calls.tools).toHaveLength(1);
+		expect(fromFile.calls.tools[0].name).toBe("AskAgy");
+		// Schema shape through the factory (formerly pinned by the smoke test,
+		// whose plain invocation registers no tool under R3).
+		const params = fromFile.calls.tools[0].parameters as { required?: string[]; properties: Record<string, unknown> };
+		expect(params.required).toEqual(["prompt"]);
+		expect(Object.keys(params.properties).sort()).toEqual(["isolated", "model", "prompt", "scope", "skills", "thinking"]);
+	});
+});
+
+// --- v0.2 S2 R4: askAgy defaults + overrides reach the registered tool -----------
+
+/** Execute the factory-registered AskAgy tool with a minimal tool ctx. */
+async function runTool(
+	calls: PiCalls,
+	params: Record<string, unknown>,
+	cwd: string,
+): Promise<{ text: string; details: { isolated: boolean; skillsInjected: boolean } }> {
+	const tool = calls.tools[0];
+	const result = (await tool.execute(
+		"call-1",
+		params as never,
+		undefined,
+		undefined,
+		{ cwd, model: { provider: "other" } } as never,
+	)) as { content: { type: string; text: string }[]; details: { isolated: boolean; skillsInjected: boolean } };
+	return { text: result.content.map((c) => c.text).join(""), details: result.details };
+}
+
+describe("integration: extensions/index — askAgy defaults reach the tool (v0.2 R4)", () => {
+	test("R4: defaultIsolated becomes the tool's effective default; explicit isolated:false still wins", async () => {
+		const env = await factoryEnv({ options: { askAgy: { enabled: true, defaultIsolated: true } } });
+		await env.load();
+		const projDir = join(env.root, "proj");
+		const first = await runTool(env.calls, { prompt: "one-shot by default" }, projDir);
+		expect(first.details.isolated).toBe(true); // config default applied
+		const second = await runTool(env.calls, { prompt: "explicit wins", isolated: false }, projDir);
+		expect(second.details.isolated).toBe(false); // explicit caller param beats config
+	});
+
+	test("R4: without defaultIsolated the v0.1 default (session continuity) is preserved", async () => {
+		const env = await factoryEnv({ options: { askAgy: { enabled: true } } });
+		await env.load();
+		const { details } = await runTool(env.calls, { prompt: "continuity please" }, "/proj");
+		expect(details.isolated).toBe(false);
+	});
+
+	test("R4: appendSkills seam — the deps catalog reaches the tool by default; appendSkills:false withholds it", async () => {
+		const withCatalog = await factoryEnv({
+			options: { askAgy: { enabled: true } },
+			skillsCatalog: () => "- my-skill: does things",
+		});
+		await withCatalog.load();
+		await runTool(withCatalog.calls, { prompt: "use a skill please", skills: true, isolated: true }, "/proj");
+		expect(stdinContent(withCatalog.spawn.spawns[0])).toContain("- my-skill: does things");
+		const withoutCatalog = await factoryEnv({
+			options: { askAgy: { enabled: true, appendSkills: false } },
+			skillsCatalog: () => "- my-skill: does things",
+		});
+		await withoutCatalog.load();
+		await runTool(withoutCatalog.calls, { prompt: "withheld", skills: true, isolated: true }, "/proj");
+		expect(stdinContent(withoutCatalog.spawn.spawns[0])).toBe("withheld"); // seam disabled by config
 	});
 });

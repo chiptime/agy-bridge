@@ -135,7 +135,7 @@ describe("smoke: extensions/index.ts loaded like pi (R1, R2)", () => {
 		if (loaded.loader !== "jiti") console.warn("smoke: jiti not resolvable; loaded via dynamic import");
 	});
 
-	test("one invocation registers provider agy (default first), AskAgy, /agy, and both lifecycle hooks once", async () => {
+	test("one invocation registers provider agy (default first), /agy, and both lifecycle hooks once — AskAgy stays off (v0.2 R3)", async () => {
 		const { pi, calls } = stubPi();
 		await (loaded.factory as Factory)(pi);
 
@@ -155,10 +155,9 @@ describe("smoke: extensions/index.ts loaded like pi (R1, R2)", () => {
 		});
 		expect(typeof calls.providers[0]!.config.streamSimple).toBe("function");
 
-		expect(calls.tools.map((t) => t.name)).toEqual(["AskAgy"]);
-		const params = calls.tools[0]!.parameters as { required?: string[]; properties: Record<string, unknown> };
-		expect(params.required).toEqual(["prompt"]);
-		expect(Object.keys(params.properties).sort()).toEqual(["isolated", "model", "prompt", "scope", "skills", "thinking"]);
+		// v0.2 R3 behavior change: AskAgy is opt-in — a plain invocation
+		// (no askAgy config) registers NO tool and arms the one-time notice.
+		expect(calls.tools).toEqual([]);
 
 		expect(calls.commands.map((c) => c.name)).toEqual(["agy"]);
 		expect(calls.commands[0]!.description).toContain("agy bridge");
@@ -176,7 +175,7 @@ describe("smoke: extensions/index.ts loaded like pi (R1, R2)", () => {
 		const { pi, calls } = stubPi();
 		await (loaded.factory as Factory)(pi);
 		expect(calls.providers.map((p) => p.name)).toEqual(["agy"]);
-		expect(calls.tools.map((t) => t.name)).toEqual(["AskAgy"]);
+		expect(calls.tools).toEqual([]); // v0.2 R3: no AskAgy without opt-in
 		expect(calls.commands.map((c) => c.name)).toEqual(["agy"]);
 		expect(calls.handlers["session_start"]).toHaveLength(1);
 		expect(calls.handlers["session_shutdown"]).toHaveLength(1);

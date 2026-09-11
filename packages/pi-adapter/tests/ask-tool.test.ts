@@ -377,3 +377,30 @@ describe("unit: ask-tool — progress, prune, plumbing", () => {
 		expect(spawns).toHaveLength(0);
 	});
 });
+
+// --- v0.2 S2 R4: metadata overrides -----------------------------------------------
+
+describe("unit: ask-tool — metadata overrides (v0.2 R4)", () => {
+	test("configured name/label/description replace the v0.1 metadata", async () => {
+		const { tool } = await setup(undefined, {
+			metadata: { name: "AskSecond", label: "Second opinion", description: "custom description for the model" },
+		});
+		expect(tool.name).toBe("AskSecond");
+		expect(tool.label).toBe("Second opinion");
+		expect(tool.description).toBe("custom description for the model");
+	});
+
+	test("no metadata → v0.1 defaults intact (AskAgy / Ask agy / full description)", async () => {
+		const { tool } = await setup();
+		expect(tool.name).toBe("AskAgy");
+		expect(tool.label).toBe("Ask agy");
+		expect(tool.description).toContain("Delegate a self-contained sub-task to agy");
+	});
+
+	test("partial metadata: only the configured fields are overridden", async () => {
+		const { tool } = await setup(undefined, { metadata: { name: "AskSecond" } });
+		expect(tool.name).toBe("AskSecond");
+		expect(tool.label).toBe("Ask agy");
+		expect(tool.description).toContain("Delegate a self-contained sub-task to agy");
+	});
+});

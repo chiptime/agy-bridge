@@ -21,7 +21,7 @@
  * `options.sessionId ?? cwd` re-read per turn. `reason:"reload"` on
  * session_start fires the injected rebuildDiscovery seam.
  */
-import type { SessionShutdownEvent, SessionStartEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SessionShutdownEvent, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import type { DiscoveredEntry } from "./models";
 import type { SessionEntry, SessionStore } from "./session-store";
 
@@ -154,11 +154,19 @@ export interface LifecycleDeps {
 	 * break the reload itself.
 	 */
 	rebuildDiscovery?: () => void | Promise<void>;
+	/**
+	 * v0.2 R3 additive: one-time startup notice text (AskAgy is off by
+	 * default; the factory composes the enable hint plus any file-config
+	 * warnings). Fired on the FIRST session_start via ctx.ui.notify when
+	 * the host UI is available; the once-per-install guard latches on the
+	 * first attempt (the lifecycle instance is built once per install).
+	 */
+	startupNotice?: string;
 }
 
 export interface BridgeLifecycle {
 	/** Directly registerable: pi.on("session_start", lifecycle.onSessionStart). */
-	onSessionStart: (event: SessionStartEvent) => Promise<void>;
+	onSessionStart: (event: SessionStartEvent, ctx?: ExtensionContext) => Promise<void>;
 	/** Directly registerable: pi.on("session_shutdown", lifecycle.onSessionShutdown). */
 	onSessionShutdown: (event: SessionShutdownEvent) => Promise<void>;
 }
@@ -166,13 +174,20 @@ export interface BridgeLifecycle {
 /**
  * Build the two session-event handlers. Both recycle ALL in-memory
  * state for ANY reason; only session_start reason "reload" additionally
- * awaits the discovery rebuild.
+ * awaits the discovery rebuild. With a startupNotice configured (v0.2
+ * R3), the FIRST session_start also notifies the user once — guarded by
+ * ctx.hasUI so headless hosts stay silent and never throw.
  */
 export function createLifecycle(deps: LifecycleDeps): BridgeLifecycle {
+	let startupNoticeShown = false;
 	return {
-		async onSessionStart(event) {
+		async onSessionStart(event, ctx) {
 			deps.state.recycle();
 			if (event.reason === "reload") await deps.rebuildDiscovery?.();
+			if (deps.startupNotice !== undefined && !startupNoticeShown) {
+				startupNoticeShown = true;
+				if (ctx?.hasUI === true) ctx.ui.notify(deps.startupNotice);
+			}
 		},
 		async onSessionShutdown() {
 			deps.state.recycle();

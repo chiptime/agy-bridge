@@ -243,6 +243,46 @@ describe("reload rebuild", () => {
 	});
 });
 
+// --- v0.2 S2 R3: one-time startup notice -----------------------------------------
+
+/** pi passes (event, ctx: ExtensionContext) — the stub only needs hasUI + ui.notify. */
+function noticeCtx(notes: string[], hasUI = true): never {
+	return { hasUI, ui: { notify: (msg: string) => notes.push(msg) } } as never;
+}
+
+describe("startup notice (v0.2 R3)", () => {
+	test("fires once per install via ctx.ui.notify when hasUI — later session_start events never repeat it", async () => {
+		const state = createBridgeState();
+		const notes: string[] = [];
+		const lifecycle = createLifecycle({ state, startupNotice: "agy-bridge: notice text" });
+		await lifecycle.onSessionStart(startEvent("startup"), noticeCtx(notes));
+		expect(notes).toEqual(["agy-bridge: notice text"]);
+		await lifecycle.onSessionStart(startEvent("new"), noticeCtx(notes));
+		await lifecycle.onSessionStart(startEvent("reload"), noticeCtx(notes));
+		expect(notes).toEqual(["agy-bridge: notice text"]); // one-time guard latched
+	});
+
+	test("no UI → never notifies, never throws (hasUI false, ctx without ui, absent ctx)", async () => {
+		const state = createBridgeState();
+		const notes: string[] = [];
+		const lifecycle = createLifecycle({ state, startupNotice: "n" });
+		await lifecycle.onSessionStart(startEvent("startup"), noticeCtx(notes, false));
+		await lifecycle.onSessionStart(startEvent("new"), { cwd: "/p" } as never); // no ui at all
+		await lifecycle.onSessionStart(startEvent("reload")); // pi always passes ctx; defensive absence must not throw
+		expect(notes).toEqual([]);
+		expect(state.snapshot()).toEqual({ cachedBindings: 0, pendingLookups: 0, inFlightTurns: 0 }); // recycle semantics intact
+	});
+
+	test("no startupNotice dep → handlers notify nothing (v0.1 behavior preserved)", async () => {
+		const state = createBridgeState();
+		const notes: string[] = [];
+		const ctx = noticeCtx(notes);
+		await createLifecycle({ state }).onSessionStart(startEvent("startup"), ctx);
+		await createLifecycle({ state }).onSessionShutdown(shutdownEvent("quit"));
+		expect(notes).toEqual([]);
+	});
+});
+
 // --- binding cache semantics ------------------------------------------------------
 
 describe("binding cache", () => {

@@ -5,8 +5,9 @@
  * included) → model discovery via `agy models` (R2 — 24h cache in the
  * lifecycle state, never throws, static fallback catalog) → one
  * registration round (provider `agy` with the real streamSimple, the
- * AskAgy tool, the /agy command) → the session_start/session_shutdown
- * handlers.
+ * /agy command, and — since v0.2 R3 — the AskAgy tool ONLY when
+ * `askAgy.enabled`; an ABSENT section arms a one-time startup notice) →
+ * the session_start/session_shutdown handlers.
  *
  * Prompt transport: the factory enables the engine's corrected stdin seam
  * (`promptViaStdin: true`) for BOTH turn paths — argv switches to
@@ -56,6 +57,8 @@ export interface AgyExtensionDeps {
 	now?: () => number;
 	/** File-config seams (v0.2 R1, tests): pin the loader's project cwd and global dir. */
 	fileConfig?: { cwd?: string; agentDir?: string };
+	/** Skills-catalog passthrough for AskAgy (v0.2 R4 tests; pi exposes no skills API yet). */
+	skillsCatalog?: () => string | undefined;
 }
 
 /**
@@ -75,6 +78,21 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 	// R12: validation precedes every side effect — no registration, no store,
 	// no discovery probe, no spawn can happen on a bad config.
 	const config = resolveConfig(deps.options ?? {}, file);
+	// v0.2 R3: AskAgy registers ONLY when explicitly enabled. When the whole
+	// askAgy section is ABSENT (not merely enabled:false), the user gets a
+	// ONE-TIME startup notice on the first session_start — discoverability
+	// for the off-by-default tool. File-config warnings ride along so a
+	// broken config file explains itself (the S4 debug log surfaces them in
+	// the remaining cases).
+	const askAgySectionPresent =
+		deps.options?.askAgy !== undefined || Object.keys(file.askAgy).length > 0;
+	const startupNotice = askAgySectionPresent
+		? undefined
+		: [
+				"agy-bridge: the AskAgy delegation tool is available but disabled by default.",
+				'Enable it with {"askAgy": {"enabled": true}} in .pi/agy-bridge.json (project) or ~/.pi/agent/agy-bridge.json (global).',
+				...file.warnings.map((warning) => `config warning: ${warning}`),
+			].join("\n");
 	// file.warnings surface via the startup notice/debug log (v0.2 S2/S4).
 	const now = deps.now ?? Date.now;
 	const store = openPiSessionStore(config);
@@ -131,23 +149,48 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 	};
 	registerModels(registry);
 
-	pi.registerTool(
-		createAskAgyTool({
-			bin: config.agyBin,
-			store,
-			// Live view: a /reload rebuild refreshes the registry without
-			// re-registering the tool, and thinking-level resolution should
-			// see the fresh tiers.
-			get models() {
-				return registry;
-			},
-			...(config.scratchRoot !== undefined ? { scratchRoot: config.scratchRoot } : {}),
-			...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
-			...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
-			promptViaStdin: true,
-			state,
-		}),
-	);
+	// v0.2 R3: conditional registration — the tool exists only when the
+	// resolved askAgy.enabled is true. The execute-time circular guard stays
+	// regardless (the model can change onto agy mid-session and pi tools
+	// cannot be unregistered, so the guard is the only recursion fence).
+	if (config.askAgy.enabled) {
+		const { name, label, description } = config.askAgy;
+		pi.registerTool(
+			createAskAgyTool({
+				bin: config.agyBin,
+				store,
+				// Live view: a /reload rebuild refreshes the registry without
+				// re-registering the tool, and thinking-level resolution should
+				// see the fresh tiers.
+				get models() {
+					return registry;
+				},
+				...(config.scratchRoot !== undefined ? { scratchRoot: config.scratchRoot } : {}),
+				...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
+				...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
+				promptViaStdin: true,
+				state,
+				// v0.2 R4: configured metadata overrides + effective defaults
+				// (explicit caller params still win inside the tool).
+				...(name !== undefined || label !== undefined || description !== undefined
+					? {
+							metadata: {
+								...(name !== undefined ? { name } : {}),
+								...(label !== undefined ? { label } : {}),
+								...(description !== undefined ? { description } : {}),
+							},
+						}
+					: {}),
+				defaults: {
+					defaultMode: config.askAgy.defaultMode,
+					allowFullMode: config.askAgy.allowFullMode,
+					defaultIsolated: config.askAgy.defaultIsolated,
+					appendSkills: config.askAgy.appendSkills,
+				},
+				...(deps.skillsCatalog !== undefined ? { skillsCatalog: deps.skillsCatalog } : {}),
+			}),
+		);
+	}
 
 	pi.registerCommand(
 		"agy",
@@ -163,6 +206,9 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 
 	const lifecycle = createLifecycle({
 		state,
+		// v0.2 R3: the one-time "AskAgy is off" notice (only composed when the
+		// askAgy section is absent) fires on the first session_start.
+		...(startupNotice !== undefined ? { startupNotice } : {}),
 		// /reload refresh (R2): re-probe → refresh cache + registry →
 		// re-register ONLY the provider (models are REPLACED, never appended).
 		// This closure catches its own errors (D3 risk 2): a failed probe

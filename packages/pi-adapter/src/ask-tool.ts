@@ -104,6 +104,31 @@ export interface AskAgyDetails {
 	durationMs: number;
 }
 
+/** v0.2 R4: configured metadata overrides for the registered tool. */
+export interface AskAgyMetadata {
+	/** Tool id registered with pi; default "AskAgy". */
+	name?: string;
+	/** Display label; default "Ask agy". */
+	label?: string;
+	/** Schema description shown to the driving model; default ASK_AGY_DESCRIPTION. */
+	description?: string;
+}
+
+/**
+ * v0.2 R4: effective defaults from the resolved askAgy config section.
+ * Explicit caller params always win over these.
+ */
+export interface AskAgyDefaults {
+	/** Effective default mode; consumed by the S3 mode param (task 3.4). */
+	defaultMode?: "read" | "none" | "full";
+	/** Effective default for params.isolated. */
+	defaultIsolated?: boolean;
+	/** false disables the skillsCatalog seam even when params.skills is true. */
+	appendSkills?: boolean;
+	/** false narrows the mode enum at the schema level (consumed in S3, task 3.4). */
+	allowFullMode?: boolean;
+}
+
 export interface AskAgyDeps {
 	/** agy binary (config.agyBin). */
 	bin: string;
@@ -129,6 +154,10 @@ export interface AskAgyDeps {
 	state?: BridgeState;
 	/** Skills catalog seam (pi exposes no skills API): rendered name/description lines. */
 	skillsCatalog?: () => string | undefined;
+	/** v0.2 R4: configured metadata overrides (name/label/description). */
+	metadata?: AskAgyMetadata;
+	/** v0.2 R4: effective defaults from the resolved askAgy config section. */
+	defaults?: AskAgyDefaults;
 	/** Wall-clock seam (tests). */
 	now?: () => number;
 }
@@ -172,15 +201,19 @@ function isolatedStore(): SessionStore {
  */
 export function createAskAgyTool(deps: AskAgyDeps): ToolDefinition<typeof askAgyParams, AskAgyDetails> {
 	return {
-		name: "AskAgy",
-		label: "Ask agy",
-		description: ASK_AGY_DESCRIPTION,
+		// v0.2 R4: configured metadata wins field-by-field; absent fields keep
+		// the v0.1 defaults.
+		name: deps.metadata?.name ?? "AskAgy",
+		label: deps.metadata?.label ?? "Ask agy",
+		description: deps.metadata?.description ?? ASK_AGY_DESCRIPTION,
 		parameters: askAgyParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const now = deps.now ?? Date.now;
 			const start = now();
+			// v0.2 R4: effective defaults — the config's defaultIsolated applies
+			// only when the caller did not pass isolated explicitly.
+			const isolated = params.isolated ?? deps.defaults?.defaultIsolated === true;
 			const scope: AskAgyScope = params.scope ?? "scratch";
-			const isolated = params.isolated === true;
 			const modelArg = resolveAskModelArg(deps.models, params.model, params.thinking);
 			const details: AskAgyDetails = {
 				scope,
@@ -208,8 +241,10 @@ export function createAskAgyTool(deps: AskAgyDeps): ToolDefinition<typeof askAgy
 			// no prompt content is ever consulted.
 			details.workdir =
 				scope === "worktree" ? ctx.cwd : prepareScratchWorkdir({ root: deps.scratchRoot ?? tmpdir(), now }).path;
-			// Skills catalog: opt-in only, injected through the seam.
-			const catalog = params.skills === true ? (deps.skillsCatalog?.() ?? "") : "";
+			// Skills catalog: opt-in only, injected through the seam. v0.2 R4:
+			// appendSkills:false (config) disables the seam entirely.
+			const catalog =
+				params.skills === true && (deps.defaults?.appendSkills ?? true) ? (deps.skillsCatalog?.() ?? "") : "";
 			details.skillsInjected = catalog.trim() !== "";
 			const prompt = details.skillsInjected ? `Available skills:\n${catalog.trim()}\n\n${params.prompt}` : params.prompt;
 			// Non-isolated continuity is keyed by the pi session (ctx.cwd);
