@@ -19,10 +19,7 @@
  * cache-first discoverModels pipeline (models-cache.json, 24h TTL) sits in
  * front, and any failure degrades to the static builtin registry.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin";
-import { resolveStateDir } from "./paths";
 import type { ModelConfig } from "./config";
 import { AGY_PROVIDER_ID } from "./provider";
 import { resolveRegistry, buildModelRecord, type AgyModel } from "./models";
@@ -36,24 +33,6 @@ import { discoverModels } from "./discovery";
  * from the `plugin` array and from `provider.<id>.npm`.
  */
 export { createAgyProvider, AGY_PROVIDER_ID } from "./provider";
-
-/**
- * TEMPORARY DIAGNOSTIC PROBE — remove once OQ1 is resolved.
- * Appends one JSON line per event to <state>/probe-session-context.log.
- * Never throws: a failed probe must never break a turn.
- */
-function probe(event: string, payload: unknown): void {
-	try {
-		const dir = resolveStateDir();
-		mkdirSync(dir, { recursive: true });
-		appendFileSync(
-			join(dir, "probe-session-context.log"),
-			`${JSON.stringify({ at: new Date().toISOString(), event, payload })}\n`,
-		);
-	} catch {
-		/* probe is best-effort */
-	}
-}
 
 /**
  * server(input, options) extension point: opencode forwards plugin options
@@ -92,20 +71,10 @@ const server: Plugin = async (input, options) => {
 	};
 	const hooks: Hooks = {
 		"chat.params": async (req, output) => {
-			// TEMPORARY DIAGNOSTIC PROBE — remove once OQ1 is resolved.
-			probe("chat.params", {
-				providerID: req.model?.providerID,
-				modelID: req.model?.modelID,
-				sessionID: req.sessionID,
-				reqKeys: Object.keys(req ?? {}),
-				outputKeys: Object.keys(output ?? {}),
-				optionsBefore: output?.options,
-			});
 			if (req.model.providerID !== AGY_PROVIDER_ID) return;
 			output.options.sessionId = req.sessionID;
 			output.options.worktree = worktree;
 			output.options.agy = { sessionId: req.sessionID, worktree };
-			probe("chat.params:after", { optionsAfter: output.options });
 		},
 		provider: {
 			id: AGY_PROVIDER_ID,

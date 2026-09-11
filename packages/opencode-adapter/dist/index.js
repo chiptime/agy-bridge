@@ -1322,7 +1322,7 @@ function baseRegistry(discovered) {
       const baseId = `agy/${variant.base}`;
       let base = byId.get(baseId);
       if (!base) {
-        base = model(baseId, row.name, id);
+        base = model(baseId, variant.base, id);
         registry.push(base);
         byId.set(baseId, base);
       }
@@ -1363,14 +1363,24 @@ function listModels(user = {}) {
 function applyConfig(base, user) {
   const merged = base.map((m) => ({ ...m, limit: { ...m.limit } }));
   for (const [id, cfg] of Object.entries(user)) {
-    const existing = merged.find((m) => m.id === id);
+    const existing = merged.find((m) => m.id === id || m.id === `agy/${normalize(id)}`);
     if (existing) {
       if (cfg?.name !== undefined)
         existing.name = cfg.name;
       if (cfg?.limit !== undefined)
         existing.limit = { ...cfg.limit };
+      if (cfg?.variants !== undefined)
+        existing.variants = { ...cfg.variants };
     } else {
-      merged.push(model(id, normalize(id), normalize(id)));
+      const fullId = `agy/${normalize(id)}`;
+      const variants = cfg?.variants;
+      const fallbackArg = variants?.["high"]?.agyModelId ?? Object.values(variants ?? {}).find((v) => typeof v?.agyModelId === "string")?.agyModelId;
+      const extended = model(fullId, cfg?.name ?? normalize(id), fallbackArg ?? normalize(id));
+      if (cfg?.limit !== undefined)
+        extended.limit = { ...cfg.limit };
+      if (variants !== undefined)
+        extended.variants = { ...variants };
+      merged.push(extended);
     }
   }
   const seen = new Set;
@@ -1415,16 +1425,6 @@ function buildModelRecord(registry, providerId) {
 }
 
 // src/language-model.ts
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync5 } from "fs";
-import { join as join4 } from "path";
-function probeModel(event, payload) {
-  try {
-    const dir = resolveStateDir();
-    mkdirSync5(dir, { recursive: true });
-    appendFileSync2(join4(dir, "probe-session-context.log"), `${JSON.stringify({ at: new Date().toISOString(), event, payload })}
-`);
-  } catch {}
-}
 function readSessionContext(providerOptions, headers) {
   const agy = providerOptions?.["agy"];
   const rec = typeof agy === "object" && agy !== null ? agy : {};
@@ -1440,6 +1440,12 @@ function readVariant(options) {
   const rec = typeof options?.providerOptions?.["agy"] === "object" && options.providerOptions?.["agy"] !== null ? options.providerOptions["agy"] : {};
   const nested = typeof rec["agy"] === "object" && rec["agy"] !== null ? rec["agy"] : {};
   const raw = rec["variant"] ?? nested["variant"] ?? options?.["variant"];
+  return typeof raw === "string" && raw !== "" ? raw : undefined;
+}
+function readDirectModelId(options) {
+  const rec = typeof options?.providerOptions?.["agy"] === "object" && options.providerOptions?.["agy"] !== null ? options.providerOptions["agy"] : {};
+  const nested = typeof rec["agy"] === "object" && rec["agy"] !== null ? rec["agy"] : {};
+  const raw = rec["agyModelId"] ?? nested["agyModelId"];
   return typeof raw === "string" && raw !== "" ? raw : undefined;
 }
 function resolveVariantModelArg(entry, variant) {
@@ -1652,8 +1658,11 @@ class AgyLanguageModel {
   async doStream(options) {
     const { deps } = this;
     const variant = readVariant(options);
-    const modelArg = resolveVariantModelArg(this.entry, variant);
+    const directModelId = readDirectModelId(options);
+    const modelArg = directModelId ?? resolveVariantModelArg(this.entry, variant);
     const variantFallbackNotice = (() => {
+      if (directModelId !== undefined)
+        return;
       if (this.entry.variants === undefined)
         return;
       if (variant === undefined) {
@@ -1671,24 +1680,6 @@ class AgyLanguageModel {
     const entry = await deps.store.getEntry(sessionId);
     const diverged = entry !== undefined && entry.hashes !== undefined && !hashesArePrefix(entry.hashes, hashes);
     const isNewConversation = entry === undefined || diverged;
-    probeModel("decision", {
-      sessionId,
-      usedFallbackUUID: ctx.sessionId === undefined,
-      caller: {
-        managedBy: options.providerOptions?.["agy"]?.["__managed_by"],
-        toolCount: Array.isArray(options.tools) ? options.tools.length : 0,
-        maxOutputTokens: options.maxOutputTokens
-      },
-      messageCount: incoming.length,
-      roles: incoming.map((m) => m?.role),
-      incomingHashes: hashes,
-      storedHashes: entry?.hashes ?? null,
-      storedConversationId: entry?.conversationId ?? null,
-      variant: variant ?? null,
-      modelArg: modelArg ?? null,
-      decision: entry === undefined ? "FRESH (no entry)" : diverged ? "FRESH (DIVERGED)" : "RESUME",
-      isNewConversation
-    });
     const seedInfo = diverged ? renderSeed(incoming) : undefined;
     const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
     const warnings = [
@@ -1846,17 +1837,13 @@ function createAgyProvider(options = {}, testDeps = {}) {
   };
 }
 
-// src/index.ts
-import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync7 } from "fs";
-import { join as join6 } from "path";
-
 // src/models-cache.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "fs";
-import { join as join5, dirname as dirname3 } from "path";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "fs";
+import { join as join4, dirname as dirname3 } from "path";
 var MODELS_CACHE_VERSION = 1;
 var MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 function modelsCachePath(opts = {}) {
-  return join5(resolveStateDir({ override: opts.override }), "models-cache.json");
+  return join4(resolveStateDir({ override: opts.override }), "models-cache.json");
 }
 function parseModelsCache(raw) {
   let parsed;
@@ -1906,7 +1893,7 @@ function writeModelsCache(path, models, now) {
     models: models.map((m) => ({ id: m.id, name: m.name }))
   };
   try {
-    mkdirSync6(dirname3(path), { recursive: true });
+    mkdirSync5(dirname3(path), { recursive: true });
     writeFileSync3(path, `${JSON.stringify(cache, null, "\t")}
 `);
   } catch {}
@@ -1937,14 +1924,6 @@ async function discoverModels(opts = {}) {
 }
 
 // src/index.ts
-function probe(event, payload) {
-  try {
-    const dir = resolveStateDir();
-    mkdirSync7(dir, { recursive: true });
-    appendFileSync3(join6(dir, "probe-session-context.log"), `${JSON.stringify({ at: new Date().toISOString(), event, payload })}
-`);
-  } catch {}
-}
 var server = async (input, options) => {
   const worktree = input.worktree;
   const opts = options ?? {};
@@ -1963,20 +1942,11 @@ var server = async (input, options) => {
   };
   const hooks = {
     "chat.params": async (req, output) => {
-      probe("chat.params", {
-        providerID: req.model?.providerID,
-        modelID: req.model?.modelID,
-        sessionID: req.sessionID,
-        reqKeys: Object.keys(req ?? {}),
-        outputKeys: Object.keys(output ?? {}),
-        optionsBefore: output?.options
-      });
       if (req.model.providerID !== AGY_PROVIDER_ID)
         return;
       output.options.sessionId = req.sessionID;
       output.options.worktree = worktree;
       output.options.agy = { sessionId: req.sessionID, worktree };
-      probe("chat.params:after", { optionsAfter: output.options });
     },
     provider: {
       id: AGY_PROVIDER_ID,

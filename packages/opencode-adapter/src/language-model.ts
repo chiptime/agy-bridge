@@ -33,27 +33,6 @@ import type { AgyAdapterConfig } from "./config";
 import type { SessionStore } from "./session-store";
 import { hashesArePrefix, mapMessages, messageHashes, renderSeed, type PromptMessage } from "./messages";
 import { resolveModel, type AgyModel } from "./models";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { resolveStateDir } from "./paths";
-
-/**
- * TEMPORARY DIAGNOSTIC PROBE — remove once OQ1 is resolved.
- * Appends one JSON line per event to <state>/probe-session-context.log.
- * Never throws: a failed probe must never break a turn.
- */
-function probeModel(event: string, payload: unknown): void {
-	try {
-		const dir = resolveStateDir();
-		mkdirSync(dir, { recursive: true });
-		appendFileSync(
-			join(dir, "probe-session-context.log"),
-			`${JSON.stringify({ at: new Date().toISOString(), event, payload })}\n`,
-		);
-	} catch {
-		/* probe is best-effort */
-	}
-}
 
 /** Injectable turn runner — tests fake this to pin the mapping in isolation. */
 export type TurnRunner = (deps: TurnDeps, req: TurnRequest) => Promise<TurnResult>;
@@ -443,30 +422,6 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		const isNewConversation = entry === undefined || diverged;
 		// TEMPORARY DIAGNOSTIC PROBE — remove once the session-key question is
 		// resolved. Shape only: roles and hashes, never prompt content.
-		probeModel("decision", {
-			sessionId,
-			usedFallbackUUID: ctx.sessionId === undefined,
-			// Caller fingerprint: distinguishes the main chat turn from
-			// opencode's side calls (title generation, summaries, subagents).
-			caller: {
-				managedBy: (options.providerOptions?.["agy"] as Record<string, unknown> | undefined)?.["__managed_by"],
-				toolCount: Array.isArray(options.tools) ? options.tools.length : 0,
-				maxOutputTokens: options.maxOutputTokens,
-			},
-			messageCount: incoming.length,
-			roles: incoming.map((m) => m?.role),
-			incomingHashes: hashes,
-			storedHashes: entry?.hashes ?? null,
-			storedConversationId: entry?.conversationId ?? null,
-			// Variant/effort probes (shape only): which variant we READ from
-			// the call options and which --model argument we resolved, so one
-			// live turn tells us empirically where opencode delivers the
-			// chosen variant and what we spawn with.
-			variant: variant ?? null,
-			modelArg: modelArg ?? null,
-			decision: entry === undefined ? "FRESH (no entry)" : diverged ? "FRESH (DIVERGED)" : "RESUME",
-			isNewConversation,
-		});
 		const seedInfo = diverged ? renderSeed(incoming) : undefined;
 		const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
 		const warnings: SharedV3Warning[] = [
