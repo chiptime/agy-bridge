@@ -306,7 +306,9 @@ describe("unit: ask-tool — progress, prune, plumbing", () => {
 			}),
 		);
 		const { text } = await run({ prompt: "long task" });
-		expect(updates.join("")).toBe("▸ tool ls…\n✓ ls (0.4s)\n");
+		// v0.2 D2 behavior change: each update re-emits the JOINED segments so
+		// far (cumulative snapshots), not a per-step line.
+		expect(updates).toEqual(["▸ tool ls…\n", "▸ tool ls…\n✓ ls (0.4s)\n"]);
 		expect(text).toBe("the answer");
 	});
 
@@ -479,5 +481,42 @@ describe("unit: ask-tool — execution modes (v0.2 R5, D1)", () => {
 	test("allowFullMode default (unset): schema enum keeps all three modes", async () => {
 		const { tool } = await setup();
 		expect(modeEnumOf(tool)).toEqual(["read", "none", "full"]);
+	});
+});
+
+// --- v0.2 S5 R9/D2: partial-text onUpdate streaming --------------------------------
+
+describe("v0.2 R9: onUpdate partial-text streaming (D2)", () => {
+	test("every text_delta re-emits the JOINED partial text; delta steps add NO ▸ response narration", async () => {
+		const { updates, run } = await setup(() =>
+			fakeChild({
+				lines: [
+					{ event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE", text_delta: "AL" } },
+					{ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: "PHA\n" } },
+					{ event: "step_update", step_update: { step_type: "tool", state: "ACTIVE", tool_name: "ls" } },
+					{ event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE", text_delta: "GAMMA" } },
+					SUCCESS("conv-u", "ALPHA\nGAMMA"),
+				],
+			}),
+		);
+		const { text } = await run({ prompt: "stream please" });
+		// Ordered segments (streamed text + narration), cumulative per update.
+		expect(updates).toEqual(["AL", "ALPHA\n", "ALPHA\n▸ tool ls…\n", "ALPHA\n▸ tool ls…\nGAMMA"]);
+		// The final tool result stays envelope-authoritative and unchanged.
+		expect(text).toBe("ALPHA\nGAMMA");
+	});
+
+	test("narration-only delegation: cumulative snapshots of the v0.1 formatStepUpdate lines", async () => {
+		const { updates, run } = await setup(() =>
+			fakeChild({
+				lines: [
+					{ event: "step_update", step_update: { step_type: "tool", state: "ACTIVE", tool_name: "rg" } },
+					{ event: "step_update", step_update: { step_type: "tool", state: "DONE", tool_name: "rg", duration_seconds: 0.2 } },
+					SUCCESS("conv-n"),
+				],
+			}),
+		);
+		await run({ prompt: "narrate" });
+		expect(updates).toEqual(["▸ tool rg…\n", "▸ tool rg…\n✓ rg (0.2s)\n"]);
 	});
 });

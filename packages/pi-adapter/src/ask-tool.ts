@@ -43,7 +43,7 @@ import type { PiAgyModel } from "./models";
 import { formatStepUpdate } from "./progress";
 import type { SessionStore } from "./session-store";
 import { prepareScratchWorkdir } from "./scratch";
-import { normalizeResponseText } from "./stream-simple";
+import { normalizeResponseText, stepTextDelta } from "./stream-simple";
 import { runTurn, TurnAborted, TurnError } from "./turn";
 
 const ASK_AGY_DESCRIPTION = `Delegate a self-contained sub-task to agy. agy runs its OWN tool loop (read, write, edit, exec) and returns its final answer; it cannot see this conversation, so the prompt must carry ALL the context it needs. Use for isolated sub-tasks you do not need to drive step-by-step.
@@ -334,6 +334,9 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 				...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
 			});
 			try {
+				// D2/R9: ordered segments (streamed text + narration lines); every
+				// step re-emits the JOINED partial text so pi renders the live tail.
+				const segments: string[] = [];
 				const result = await runTurn(
 					{
 						bin: deps.bin,
@@ -350,11 +353,15 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 					context,
 					...(options !== undefined ? { options } : {}),
 					...(modelArg !== undefined ? { modelArg } : {}),
-					// D1 mode mapping: read|none → --mode plan (plan-mode writes/
+					// D2 mode mapping: read|none → --mode plan (plan-mode writes/
 					// commands verified blocked by Probe 1); full → --mode
 					// accept-edits (v0.1 behavior). --sandbox is never emitted.
 					mode: mode === "full" ? "accept-edits" : "plan",
-					onStep: (step) => onUpdate?.({ content: [{ type: "text", text: formatStepUpdate(step) }], details }),
+					onStep: (step) => {
+						const delta = stepTextDelta(step);
+						segments.push(delta !== undefined ? delta : formatStepUpdate(step));
+						onUpdate?.({ content: [{ type: "text", text: segments.join("") }], details });
+					},
 				},
 				);
 				details.logPath = result.logPath;

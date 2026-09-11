@@ -54,6 +54,9 @@ export const DEFAULT_TURN_TIMEOUT_MS = 1_230_000;
 /** Host status line for the divergence re-seed (R7) — rendered by stream-simple as a thinking delta. */
 export const DIVERGED_NOTICE = "⟲ history diverged — new agy conversation seeded\n";
 
+/** Host status line for the resume-once retry (v0.2 R8/D7) — rendered by stream-simple as a thinking delta. */
+export const RETRY_NOTICE = "⟲ turn timed out — resuming agy conversation\n";
+
 /** One engine attempt: classification + captured run + resume bookkeeping. */
 interface AttemptResult {
 	classification: Classification;
@@ -82,6 +85,12 @@ export interface TurnRequest {
 	onStep?: (step: Record<string, unknown>) => void;
 	/** Announces the divergence re-seed (the host renders DIVERGED_NOTICE). */
 	onDiverged?: () => void;
+	/**
+	 * v0.2 R8/D7: announces the resume-once retry, fired immediately BEFORE
+	 * the resume attempt so the host can close the streamed text and start
+	 * a fresh block (only the final attempt reconciles).
+	 */
+	onRetry?: () => void;
 	/**
 	 * v0.2 R5/D4: engine mode for AskAgy delegations. Provider turns pass
 	 * NOTHING — their argv stays byte-identical to v0.1 (agy's own default
@@ -131,9 +140,14 @@ export class TurnError extends Error {
 	}
 }
 
-/** The caller's signal aborted the turn; the tapped conversation id was already persisted. */
+/**
+ * The caller's signal aborted the turn; the tapped conversation id was
+ * already persisted. v0.2 probe 2a: when the real binary flushed a partial
+ * result envelope before dying, `response` carries it so the host can
+ * reconcile the open text block — the stream never dangles.
+ */
 export class TurnAborted extends Error {
-	constructor() {
+	constructor(public readonly response?: string) {
 		super("agy turn aborted");
 		this.name = "TurnAborted";
 	}
@@ -324,28 +338,32 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		const resumeAttemptId = diverged ? undefined : entry?.conversationId;
 		let result = await attempt(resumeAttemptId, resumeAttemptId !== undefined);
 		note(result.conversationId);
-		const persistAndThrowAbort = async (conversationId: string | undefined): Promise<never> => {
+		const persistAndThrowAbort = async (r: AttemptResult): Promise<never> => {
 			deps.debug?.log("turn_aborted", {
 				key,
 				durationMs: Date.now() - startedAt,
-				...(conversationId !== undefined ? { conversationId } : {}),
+				...(r.conversationId !== undefined ? { conversationId: r.conversationId } : {}),
 			});
-			if (conversationId !== undefined) {
-				await deps.store.bind(key, conversationId, hashes);
-				deps.state?.cacheBinding(key, { conversationId, hashes });
+			if (r.conversationId !== undefined) {
+				await deps.store.bind(key, r.conversationId, hashes);
+				deps.state?.cacheBinding(key, { conversationId: r.conversationId, hashes });
 			}
-			throw new TurnAborted();
+			// Probe 2a: a graceful-flush abort still resolved a partial envelope.
+			throw new TurnAborted(r.run.envelope?.response);
 		};
-		if (signal?.aborted) await persistAndThrowAbort(result.conversationId);
+		if (signal?.aborted) await persistAndThrowAbort(result);
 		// R8 resume-once: only the timeout family, only with a captured id, and
 		// only when this run was not already the one resume.
 		const canResume =
 			result.classification.outcome === "timeout" && !result.resumed && result.conversationId !== undefined;
 		if (canResume) {
 			deps.debug?.log("resume", { key, ...(result.conversationId !== undefined ? { conversationId: result.conversationId } : {}) });
+			// D7: announce BEFORE the resume attempt so the host closes the
+			// streamed text and starts a fresh block.
+			req.onRetry?.();
 			result = await attempt(result.conversationId, true);
 			note(result.conversationId);
-			if (signal?.aborted) await persistAndThrowAbort(result.conversationId);
+			if (signal?.aborted) await persistAndThrowAbort(result);
 		}
 		if (result.classification.outcome === "success") {
 			if (result.conversationId !== undefined) {

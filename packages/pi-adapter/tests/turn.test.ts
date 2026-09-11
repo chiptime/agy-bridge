@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import type { Context, Message, SimpleStreamOptions, UserMessage } from "@earendil-works/pi-ai";
 import { messageHashes } from "agy-bridge-engine";
 import { createDebugLogger } from "../src/debug";
-import { DIVERGED_NOTICE, runTurn, TurnAborted, TurnError, type TurnDeps, type TurnRequest } from "../src/turn";
+import { DIVERGED_NOTICE, RETRY_NOTICE, runTurn, TurnAborted, TurnError, type TurnDeps, type TurnRequest } from "../src/turn";
 import { openSessionStore } from "../src/session-store";
 
 // --- fixtures -----------------------------------------------------------------
@@ -534,5 +534,48 @@ describe("v0.2 R11: turn debug facts (injected sink — ids, codes, durations on
 		const { deps, req } = await setup(undefined, { debug: createDebugLogger({ env: {}, stateDir }) });
 		await runTurn(deps, req({ messages: [userMsg("hi")] }, { sessionId: "s-off" }));
 		expect(existsSync(join(stateDir, "debug.log"))).toBe(false);
+	});
+});
+
+// --- v0.2 S5 R8/D7: resume-once retry hook ----------------------------------------
+
+describe("v0.2 R8: onRetry hook (D7)", () => {
+	test("onRetry fires exactly once AFTER attempt 1 resolves and BEFORE the resume attempt spawns (ordering pin)", async () => {
+		let attempt = 0;
+		const order: string[] = [];
+		const { spawns, turn } = await setup((_rec, call) => {
+			order.push(`spawn-${call}`);
+			return ++attempt === 1
+				? fakeChild({ lines: [{ event: "init", conversation_id: "conv-1" }], exit: 124 })
+				: fakeChild({ lines: [{ event: "init", conversation_id: "conv-2" }, SUCCESS("conv-2")], stdin: true });
+		});
+		let retries = 0;
+		await turn({
+			context: { messages: [userMsg("q")] },
+			options: { sessionId: "s-onretry" },
+			onRetry: () => {
+				retries++;
+				order.push("onRetry");
+			},
+		});
+		expect(spawns).toHaveLength(2);
+		expect(retries).toBe(1);
+		expect(order).toEqual(["spawn-1", "onRetry", "spawn-2"]);
+	});
+
+	test("RETRY_NOTICE text pinned — stream-simple renders it as the retry thinking delta (matches DIVERGED_NOTICE ⟲ style)", () => {
+		expect(RETRY_NOTICE).toBe("⟲ turn timed out — resuming agy conversation\n");
+	});
+
+	test("success on the first attempt: onRetry never fires", async () => {
+		let retries = 0;
+		const { spawns, turn } = await setup();
+		await turn({
+			context: { messages: [userMsg("q")] },
+			options: { sessionId: "s-noretry" },
+			onRetry: () => retries++,
+		});
+		expect(spawns).toHaveLength(1);
+		expect(retries).toBe(0);
 	});
 });

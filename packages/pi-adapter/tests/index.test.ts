@@ -357,6 +357,52 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		expect(stdinContent(spawn.spawns[1])).toBe(hostile);
 	});
 
+	test("v0.2 R6 E2E: live deltas stream through the factory provider — text opens before narration, no ▸ response, envelope reconciles (D5/D9)", async () => {
+		const { calls, load } = await factoryEnv({
+			spawn: spawnSeam(() =>
+				fakeChild({
+					lines: [
+						{ event: "init", conversation_id: "conv-d" },
+						{ event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE", text_delta: "AL" } },
+						{ event: "step_update", step_update: { step_type: "agent_response", state: "DONE", text_delta: "PHA\n" } },
+						{ event: "step_update", step_update: { step_type: "tool", state: "ACTIVE", tool_name: "ls" } },
+						{ event: "step_update", step_update: { step_type: "agent_response", state: "ACTIVE", text_delta: "GAMMA" } },
+						SUCCESS("conv-d", "ALPHA\nGAMMA"),
+					],
+				}),
+			),
+		});
+		await load();
+		const streamSimple = calls.providers[0].config.streamSimple!;
+		const events = await drain(
+			streamSimple(
+				asModel((calls.providers[0].config.models ?? [])[0]),
+				{ messages: [{ role: "user", content: "stream me", timestamp: 1 }] },
+				{ sessionId: "e2e-deltas" },
+			),
+		);
+		const types = events.map((e) => e.type);
+		// D5: the first content block is TEXT — live deltas beat any narration.
+		expect(types.indexOf("text_start")).toBeLessThan(types.indexOf("thinking_start"));
+		// R6: per-delta emission; the DONE step carries the final chunk.
+		expect(events.filter((e) => e.type === "text_delta").map((e) => (e as { delta: string }).delta)).toEqual([
+			"AL",
+			"PHA\n",
+			"GAMMA",
+		]);
+		// R9: response steps with deltas never narrate; the tool step still does.
+		const narration = events
+			.filter((e) => e.type === "thinking_delta")
+			.map((e) => (e as { delta: string }).delta)
+			.join("");
+		expect(narration).not.toContain("▸ response");
+		expect(narration).toContain("▸ tool ls…");
+		// R7: the final message is envelope-authoritative (streamed + reconciled).
+		const done = events.at(-1) as unknown as { type: string; message: { content: { type: string; text?: string }[] } };
+		expect(done.type).toBe("done");
+		expect(done.message.content.filter((c) => c.type === "text").map((c) => c.text)).toEqual(["ALPHA\n", "GAMMA"]);
+	});
+
 	test("R2/R6: /reload re-probes and REPLACES the provider models; tool, command, and handlers are NEVER re-registered", async () => {
 		// Runner script switches AFTER the load-time probe, so the reload
 		// rebuild observes a NEW catalog.

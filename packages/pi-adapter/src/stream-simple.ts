@@ -6,11 +6,13 @@
  * createAssistantMessageEventStream(), returned immediately, and driven by
  * a detached async IIFE that pushes events and calls stream.end() in a
  * finally. Every event carries ONE shared, mutated-in-place `partial`
- * AssistantMessage: step_update NDJSON lines become thinking deltas
- * (contentIndex 0, rendered through formatStepUpdate), and the final
- * result envelope becomes ONE text block (contentIndex 1) followed by
- * done{reason:"stop"} with the envelope's usage mapped onto pi's Usage
- * (cost stays zero — subscription quota, not billing).
+ * AssistantMessage: step_update NDJSON lines become thinking narration
+ * (formatStepUpdate), agent_response text_deltas stream LIVE into text
+ * blocks (v0.2 R6/D5 — content grows unbounded, narration and streamed
+ * text interleave in agy's natural order), and after the turn the final
+ * result envelope is strictly reconciled against the streamed text
+ * (v0.2 R7/D6) before done{reason:"stop"} pushes the envelope's usage
+ * onto pi's Usage (cost stays zero — subscription quota, not billing).
  *
  * Turn orchestration (divergence re-seed, resume-once, abort, session
  * persistence) lives in turn.ts (runTurn); this module maps its TurnResult
@@ -41,7 +43,7 @@ import type { BridgeState } from "./lifecycle";
 import { mapAbort, type FinalizeReason } from "./errors";
 import { formatStepUpdate } from "./progress";
 import type { SessionStore } from "./session-store";
-import { DIVERGED_NOTICE, runTurn, TurnAborted, TurnError } from "./turn";
+import { DIVERGED_NOTICE, RETRY_NOTICE, runTurn, TurnAborted, TurnError } from "./turn";
 
 /** Turn budget default (owned by turn.ts); re-exported for API stability. */
 export { DEFAULT_TURN_TIMEOUT_MS } from "./turn";
@@ -105,6 +107,27 @@ export function normalizeResponseText(text: string): string {
 }
 
 /**
+ * The streamed text chunk of one step_update payload, when it carries one
+ * (v0.2 R6/R9): only agent_response steps with a non-empty string
+ * text_delta stream as text; every other payload narrates (D9). Shared by
+ * the provider bridge and the AskAgy onUpdate mirror.
+ */
+export function stepTextDelta(step: Record<string, unknown>): string | undefined {
+	if (step["step_type"] !== "agent_response") return undefined;
+	const raw = step["text_delta"];
+	return typeof raw === "string" && raw !== "" ? raw : undefined;
+}
+
+/** First index where a and b differ; when one is a prefix of the other, the shorter length (pure — D11 mismatch diagnostics). */
+function firstDivergence(a: string, b: string): number {
+	const n = Math.min(a.length, b.length);
+	for (let i = 0; i < n; i++) {
+		if (a[i] !== b[i]) return i;
+	}
+	return n;
+}
+
+/**
  * Resolve the --model argument for one turn: a thinkingLevelMap entry for
  * the requested level routes to the FULL agy id (the map value); otherwise
  * the bare model id — except the default entry, which omits --model so agy
@@ -138,11 +161,17 @@ export function createStreamSimple(
 		};
 		// Fire the async turn; return the stream synchronously per pi's contract.
 		void (async () => {
-			// Block state: at most one thinking (contentIndex 0) then one text
-			// block (contentIndex 1) — thinking always precedes text because
-			// step_update lines stream during the run and the envelope lands last.
+			// Multi-block state machine (v0.2 D5): contentIndex grows unbounded —
+			// thinking narration and streamed text interleave in agy's natural
+			// order. Opening one block kind finalizes the other; a retry (D7)
+			// closes the streamed text and starts a fresh attempt window.
 			let thinkingIdx: number | null = null;
 			let textIdx: number | null = null;
+			// Content blocks before the CURRENT attempt — reconciliation only
+			// ever touches text opened by the final attempt (R8/D7).
+			let attemptBase = 0;
+			// Concat of every text_delta streamed by the current attempt (R7).
+			let attemptText = "";
 			const closeThinking = () => {
 				if (thinkingIdx === null) return;
 				const idx = thinkingIdx;
@@ -154,9 +183,25 @@ export function createStreamSimple(
 					partial,
 				});
 			};
+			const closeText = () => {
+				if (textIdx === null) return;
+				const idx = textIdx;
+				textIdx = null;
+				stream.push({
+					type: "text_end",
+					contentIndex: idx,
+					content: (partial.content[idx] as { type: "text"; text: string }).text,
+					partial,
+				});
+			};
+			const setText = (idx: number, text: string) => {
+				(partial.content[idx] as { type: "text"; text: string }).text = text;
+			};
 			const appendThinking = (delta: string) => {
 				if (thinkingIdx === null) {
-					if (textIdx !== null) return; // text is final; late steps cannot reopen
+					// v0.2 D5: narration may follow streamed text — a new thinking
+					// block finalizes the open text one (v0.1's reopen ban is gone).
+					closeText();
 					partial.content.push({ type: "thinking", thinking: "" });
 					thinkingIdx = partial.content.length - 1;
 					stream.push({ type: "thinking_start", contentIndex: thinkingIdx, partial });
@@ -176,16 +221,51 @@ export function createStreamSimple(
 				block.text += text;
 				stream.push({ type: "text_delta", contentIndex: textIdx, delta: text, partial });
 			};
-			const closeText = () => {
-				if (textIdx === null) return;
-				const idx = textIdx;
-				textIdx = null;
-				stream.push({
-					type: "text_end",
-					contentIndex: idx,
-					content: (partial.content[idx] as { type: "text"; text: string }).text,
-					partial,
-				});
+			// D7/R8: the resume attempt streams into a NEW text block — the
+			// notice line separates the attempts and the accumulator resets,
+			// so only the FINAL attempt reconciles against the envelope.
+			const retryReset = () => {
+				appendThinking(RETRY_NOTICE);
+				attemptText = "";
+				attemptBase = partial.content.length;
+			};
+			/**
+			 * R7/D6 strict reconciliation after runTurn success (final attempt
+			 * only). Equal (normalized) keeps the streamed bytes where they
+			 * live: CRLF folds per block, message-final trailing whitespace
+			 * trims off the last block. A mismatch is a defect: debug line +
+			 * envelope-authoritative overwrite — earlier streamed blocks void
+			 * and the envelope lands in the last text block (no duplicates;
+			 * already-emitted delta events stand, never rewritten).
+			 */
+			const reconcile = (envelopeResponse: string | undefined, resumed: boolean) => {
+				const raw = envelopeResponse ?? "";
+				const env = normalizeResponseText(raw);
+				const idxs: number[] = [];
+				for (let i = attemptBase; i < partial.content.length; i++) {
+					if (partial.content[i].type === "text") idxs.push(i);
+				}
+				if (idxs.length === 0) {
+					appendText(env); // degraded/legacy run: nothing streamed — v0.1 shape
+					return;
+				}
+				if (normalizeResponseText(attemptText) !== env) {
+					deps.debug?.log("reconciliation_mismatch", {
+						offset: firstDivergence(attemptText, raw),
+						streamed_bytes: attemptText.length,
+						envelope_bytes: raw.length,
+						...(resumed ? { resumed } : {}),
+					});
+					for (const i of idxs.slice(0, -1)) setText(i, "");
+					setText(idxs[idxs.length - 1], env);
+					return;
+				}
+				for (const i of idxs) {
+					const block = partial.content[i] as { type: "text"; text: string };
+					block.text = block.text.replace(/\r\n/g, "\n");
+				}
+				const last = partial.content[idxs[idxs.length - 1]] as { type: "text"; text: string };
+				last.text = last.text.replace(/\s+$/, "");
 			};
 			const finalizeStop = () => {
 				closeText();
@@ -217,16 +297,34 @@ export function createStreamSimple(
 						context,
 						options,
 						...(modelArg !== undefined ? { modelArg } : {}),
-						onStep: (step) => appendThinking(formatStepUpdate(step)),
+						// D9: agent_response steps WITH a text delta ARE the text —
+						// append it live (no narration); every other step narrates
+						// through the v0.1 formatter (degraded binaries keep it).
+						onStep: (step) => {
+							const delta = stepTextDelta(step);
+							if (delta !== undefined) {
+								attemptText += delta;
+								appendText(delta);
+							} else {
+								appendThinking(formatStepUpdate(step));
+							}
+						},
 						onDiverged: () => appendThinking(DIVERGED_NOTICE),
+						onRetry: retryReset,
 					},
 				);
-				appendText(normalizeResponseText(result.run.envelope?.response ?? ""));
+				reconcile(result.run.envelope?.response, result.resumed);
 				toPiUsage(result.run.envelope?.usage, partial.usage);
 				finalizeStop();
 			} catch (err) {
 				if (err instanceof TurnAborted) {
-					// turn.ts already persisted the tapped conversation id.
+					// turn.ts already persisted the tapped conversation id. Probe
+					// 2a: when the real binary flushed a partial envelope before
+					// dying, reconcile the open block with it — never a dangling
+					// stream.
+					if (textIdx !== null && typeof err.response === "string") {
+						setText(textIdx, normalizeResponseText(err.response));
+					}
 					const abort = mapAbort();
 					finalizeError(abort.finalize, abort.message);
 				} else if (err instanceof TurnError) {
