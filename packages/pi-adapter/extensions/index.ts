@@ -28,6 +28,7 @@ import { listAgyModels, type AgyModelsRunner } from "agy-bridge-engine";
 import { createAskAgyTool } from "../src/ask-tool";
 import { createAgyCommand } from "../src/commands";
 import { resolveConfig, type PiAdapterOptions } from "../src/config";
+import { loadFileConfig } from "../src/file-config";
 import { createBridgeState, createLifecycle } from "../src/lifecycle";
 import { resolveRegistry, toProviderModel, type DiscoveredEntry, type PiAgyModel } from "../src/models";
 import { openPiSessionStore } from "../src/session-store";
@@ -53,6 +54,8 @@ export interface AgyExtensionDeps {
 	spawnFn?: typeof spawn;
 	/** Wall-clock seam for discovery cache aging (tests). */
 	now?: () => number;
+	/** File-config seams (v0.2 R1, tests): pin the loader's project cwd and global dir. */
+	fileConfig?: { cwd?: string; agentDir?: string };
 }
 
 /**
@@ -60,9 +63,19 @@ export interface AgyExtensionDeps {
  * AgyConfigError (R12) before ANY registration when the config is invalid.
  */
 export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDeps = {}): Promise<void> {
+	// v0.2 R1/D10: the layered file config loads FIRST and sits BEHIND the
+	// explicit options (explicit > project > global > env/defaults). The
+	// loader never throws (tolerant parse); its warnings are collected on
+	// the layer for the startup notice/debug surfaces (later slices).
+	const file = await loadFileConfig({
+		env: deps.options?.env ?? process.env,
+		cwd: deps.fileConfig?.cwd ?? process.cwd(),
+		...(deps.fileConfig?.agentDir !== undefined ? { agentDir: deps.fileConfig.agentDir } : {}),
+	});
 	// R12: validation precedes every side effect — no registration, no store,
 	// no discovery probe, no spawn can happen on a bad config.
-	const config = resolveConfig(deps.options);
+	const config = resolveConfig(deps.options ?? {}, file);
+	// file.warnings surface via the startup notice/debug log (v0.2 S2/S4).
 	const now = deps.now ?? Date.now;
 	const store = openPiSessionStore(config);
 	const state = createBridgeState();

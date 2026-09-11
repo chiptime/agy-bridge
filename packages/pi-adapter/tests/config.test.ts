@@ -96,3 +96,100 @@ describe("unit: config — env parity and fail-fast validation (R12)", () => {
 		expect(config.models).toEqual(models);
 	});
 });
+
+describe("unit: config — askAgy section and file layer (v0.2 R1, R2; D10)", () => {
+	test("confirmed defaults: enabled false, defaultMode read, allowFullMode true, isolated false, appendSkills true", () => {
+		const config = resolveConfig({ env: {} });
+		expect(config.askAgy).toEqual({
+			enabled: false,
+			defaultMode: "read",
+			allowFullMode: true,
+			defaultIsolated: false,
+			appendSkills: true,
+		});
+	});
+
+	test("THREAT: defaultMode 'turbo' throws a typed error BEFORE any spawn", () => {
+		try {
+			resolveConfig({ askAgy: { defaultMode: "turbo" } as never, env: {} });
+			throw new Error("unreachable: defaultMode turbo must throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AgyConfigError);
+			const typed = error as AgyConfigError;
+			expect(typed.field).toBe("askAgy.defaultMode");
+			expect(typed.message).toContain("turbo");
+		}
+	});
+
+	test("allowFullMode:false narrows the enum to read|none: 'full' is rejected", () => {
+		expect(() => resolveConfig({ askAgy: { allowFullMode: false, defaultMode: "full" }, env: {} })).toThrow(
+			AgyConfigError,
+		);
+		expect(resolveConfig({ askAgy: { allowFullMode: false, defaultMode: "read" }, env: {} }).askAgy.defaultMode).toBe(
+			"read",
+		);
+		expect(resolveConfig({ askAgy: { allowFullMode: false, defaultMode: "none" }, env: {} }).askAgy.defaultMode).toBe(
+			"none",
+		);
+	});
+
+	test("metadata options pass through; appendSkills defaults true", () => {
+		const askAgy = resolveConfig({
+			askAgy: { enabled: true, name: "AskSecond", label: "L", description: "D", defaultIsolated: true },
+			env: {},
+		}).askAgy;
+		expect(askAgy.enabled).toBe(true);
+		expect(askAgy.name).toBe("AskSecond");
+		expect(askAgy.label).toBe("L");
+		expect(askAgy.description).toBe("D");
+		expect(askAgy.defaultIsolated).toBe(true);
+		expect(askAgy.appendSkills).toBe(true);
+	});
+
+	test("unknown askAgy keys are ignored (tolerant, R2)", () => {
+		const askAgy = resolveConfig({ askAgy: { enabled: true, turbo: 5 } as never, env: {} }).askAgy;
+		expect(askAgy.enabled).toBe(true);
+		expect((askAgy as unknown as Record<string, unknown>)["turbo"]).toBeUndefined();
+	});
+
+	test("wrong-typed askAgy values throw with the exact field path", () => {
+		for (const [field, askAgy] of [
+			["askAgy.enabled", { enabled: "yes" }],
+			["askAgy.label", { label: 5 }],
+			["askAgy.description", { description: {} }],
+			["askAgy.defaultIsolated", { defaultIsolated: "x" }],
+			["askAgy.allowFullMode", { allowFullMode: 1 }],
+			["askAgy.appendSkills", { appendSkills: "no" }],
+		] as const) {
+			try {
+				resolveConfig({ askAgy: askAgy as never, env: {} });
+				throw new Error(`unreachable: ${field} bad type must throw`);
+			} catch (error) {
+				expect(error).toBeInstanceOf(AgyConfigError);
+				expect((error as AgyConfigError).field).toBe(field);
+			}
+		}
+	});
+
+	test("the file layer sits BEHIND explicit options: explicit beats layer beats defaults", () => {
+		const layer = { config: { timeoutMs: 60, stateDir: "/f/layer", models: { m: { name: "F" } } }, askAgy: {} };
+		const explicit = resolveConfig({ timeoutMs: 5000, env: {} }, layer);
+		expect(explicit.timeoutMs).toBe(5000);
+		expect(explicit.stateDir).toBe("/f/layer");
+		expect(explicit.models["m"]?.name).toBe("F");
+		const explicitModel = resolveConfig({ models: { m: { name: "E" } }, env: {} }, layer);
+		expect(explicitModel.models["m"]?.name).toBe("E");
+	});
+
+	test("askAgy from the file layer passes the same single validation gate; explicit wins per key", () => {
+		expect(() => resolveConfig({ env: {} }, { config: {}, askAgy: { defaultMode: "turbo" } })).toThrow(
+			AgyConfigError,
+		);
+		const resolved = resolveConfig(
+			{ askAgy: { defaultMode: "read" }, env: {} },
+			{ config: {}, askAgy: { defaultMode: "turbo", enabled: true } },
+		).askAgy;
+		expect(resolved.defaultMode).toBe("read");
+		expect(resolved.enabled).toBe(true);
+	});
+});

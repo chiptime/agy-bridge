@@ -16,8 +16,46 @@ export interface ModelConfig {
 	limit?: { context: number; output: number };
 }
 
+/** askAgy delegation section (v0.2 R2): unknown keys are ignored downstream. */
+export interface AskAgyOptions {
+	enabled?: boolean;
+	name?: string;
+	label?: string;
+	description?: string;
+	/** Closed enum (D1); validated in resolveConfig before any spawn. */
+	defaultMode?: "read" | "none" | "full";
+	/** false narrows the accepted enum to read|none (R2). */
+	allowFullMode?: boolean;
+	defaultIsolated?: boolean;
+	/** Skills-catalog seam; defaults true (R2). */
+	appendSkills?: boolean;
+}
+
+/** Resolved askAgy section: defaults filled, values validated. */
+export interface AskAgyConfig {
+	enabled: boolean;
+	name?: string;
+	label?: string;
+	description?: string;
+	defaultMode: "read" | "none" | "full";
+	allowFullMode: boolean;
+	defaultIsolated: boolean;
+	appendSkills: boolean;
+}
+
+/**
+ * Pre-merged file layer produced by file-config.ts (v0.2 R1, D10): it sits
+ * BEHIND explicit options — explicit > project > global > env/defaults.
+ */
+export interface FileConfigLayer {
+	/** Merged file values mapped onto the existing option keys. */
+	config: Partial<PiAdapterOptions>;
+	/** Merged raw askAgy section; validated by the same single gate. */
+	askAgy: Record<string, unknown>;
+}
+
 export interface PiAdapterOptions {
-	/** Environment snapshot; defaults to process.env. */
+	/** Environment snapshot; defaults to process.env. Test seam only — never a file layer. */
 	env?: Record<string, string | undefined>;
 	/** Absolute dir for per-run scratch workdirs; default os.tmpdir() (paths.ts). */
 	scratchRoot?: string;
@@ -27,6 +65,8 @@ export interface PiAdapterOptions {
 	models?: Record<string, ModelConfig>;
 	/** Per-attempt hard cap in ms; engine defaults apply when unset. */
 	timeoutMs?: number;
+	/** AskAgy delegation section (v0.2 R2). */
+	askAgy?: AskAgyOptions;
 }
 
 export interface PiAdapterConfig {
@@ -37,6 +77,8 @@ export interface PiAdapterConfig {
 	scratchRoot?: string;
 	models: Record<string, ModelConfig>;
 	timeoutMs?: number;
+	/** Resolved askAgy section with confirmed defaults (v0.2 R2). */
+	askAgy: AskAgyConfig;
 }
 
 /** Typed validation error: field names the exact rejected option. */
@@ -74,29 +116,110 @@ function validateModelLimits(id: string, limit: { context: number; output: numbe
 	}
 }
 
+/** Closed mode enum (v0.2 D1); allowFullMode:false narrows it further. */
+const ASK_AGY_MODES = ["read", "none", "full"] as const;
+
+/** askAgy field validators: undefined passes (defaults apply), wrong types throw with the exact path. */
+function requireAskAgyBool(raw: Record<string, unknown>, key: string): boolean | undefined {
+	const value = raw[key];
+	if (value === undefined) return undefined;
+	if (typeof value !== "boolean") {
+		throw new AgyConfigError(`askAgy.${key}`, `askAgy.${key} must be a boolean, got ${typeof value}`);
+	}
+	return value;
+}
+
+function requireAskAgyString(raw: Record<string, unknown>, key: string): string | undefined {
+	const value = raw[key];
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") {
+		throw new AgyConfigError(`askAgy.${key}`, `askAgy.${key} must be a string, got ${typeof value}`);
+	}
+	return value;
+}
+
+/**
+ * Validate the merged raw askAgy section into a resolved one (v0.2 R2, D10).
+ * Unknown keys are ignored (tolerant); wrong-typed values and defaultMode
+ * violations throw {@link AgyConfigError} BEFORE any spawn can happen.
+ * Confirmed product defaults: enabled FALSE (off by default + one-time
+ * notice, R3) and defaultMode "read" (safe second-opinion behavior).
+ */
+function validateAskAgy(raw: Record<string, unknown>): AskAgyConfig {
+	const enabled = requireAskAgyBool(raw, "enabled") ?? false;
+	const name = requireAskAgyString(raw, "name");
+	const label = requireAskAgyString(raw, "label");
+	const description = requireAskAgyString(raw, "description");
+	const allowFullMode = requireAskAgyBool(raw, "allowFullMode") ?? true;
+	const defaultIsolated = requireAskAgyBool(raw, "defaultIsolated") ?? false;
+	const appendSkills = requireAskAgyBool(raw, "appendSkills") ?? true;
+	const rawMode = raw["defaultMode"];
+	let defaultMode: AskAgyConfig["defaultMode"] = "read";
+	if (rawMode !== undefined) {
+		if (typeof rawMode !== "string" || !(ASK_AGY_MODES as readonly string[]).includes(rawMode)) {
+			throw new AgyConfigError(
+				"askAgy.defaultMode",
+				`askAgy.defaultMode must be "read", "none", or "full", got "${String(rawMode)}"`,
+			);
+		}
+		defaultMode = rawMode as AskAgyConfig["defaultMode"];
+	}
+	if (!allowFullMode && defaultMode === "full") {
+		throw new AgyConfigError(
+			"askAgy.defaultMode",
+			`askAgy.defaultMode "full" requires allowFullMode, which is configured false (accepted modes: read|none)`,
+		);
+	}
+	return {
+		enabled,
+		...(name !== undefined ? { name } : {}),
+		...(label !== undefined ? { label } : {}),
+		...(description !== undefined ? { description } : {}),
+		defaultMode,
+		allowFullMode,
+		defaultIsolated,
+		appendSkills,
+	};
+}
+
 /**
  * Resolve raw options into a validated config. Relative path options,
  * non-positive-integer limits/timeoutMs, and output>context limits all
  * throw {@link AgyConfigError} BEFORE any spawn can happen (threat matrix:
- * config errors never reach the child process).
+ * config errors never reach the child process). The optional file layer
+ * (v0.2 R1/D10) feeds values BEHIND the explicit options; both converge on
+ * this single validation gate.
  */
-export function resolveConfig(options: PiAdapterOptions = {}): PiAdapterConfig {
+export function resolveConfig(options: PiAdapterOptions = {}, fileLayer?: FileConfigLayer): PiAdapterConfig {
 	const env = options.env ?? process.env;
-	if (options.scratchRoot !== undefined) requireAbsolute("scratchRoot", options.scratchRoot);
-	if (options.stateDir !== undefined) requireAbsolute("stateDir", options.stateDir);
-	const models: Record<string, ModelConfig> = {};
-	for (const [id, entry] of Object.entries(options.models ?? {})) {
+	const layer = fileLayer?.config ?? {};
+	const pickLayered = <T>(fileValue: T | undefined, explicit: T | undefined): T | undefined =>
+		explicit !== undefined ? explicit : fileValue;
+	const scratchRoot = pickLayered(layer.scratchRoot, options.scratchRoot);
+	const stateDir = pickLayered(layer.stateDir, options.stateDir);
+	const timeoutMs = pickLayered(layer.timeoutMs, options.timeoutMs);
+	// Per-key merge (D10): file entries first, explicit entries win per key.
+	const models: Record<string, ModelConfig> = { ...(layer.models ?? {}) };
+	for (const [id, entry] of Object.entries(options.models ?? {})) models[id] = entry;
+	if (scratchRoot !== undefined) requireAbsolute("scratchRoot", scratchRoot);
+	if (stateDir !== undefined) requireAbsolute("stateDir", stateDir);
+	for (const [id, entry] of Object.entries(models)) {
 		if (entry?.limit !== undefined) validateModelLimits(id, entry.limit);
-		models[id] = entry;
 	}
-	if (options.timeoutMs !== undefined && !isPositiveInt(options.timeoutMs)) {
-		throw new AgyConfigError("timeoutMs", `timeoutMs must be a positive integer, got ${String(options.timeoutMs)}`);
+	if (timeoutMs !== undefined && !isPositiveInt(timeoutMs)) {
+		throw new AgyConfigError("timeoutMs", `timeoutMs must be a positive integer, got ${String(timeoutMs)}`);
 	}
+	const explicitAskAgy: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(options.askAgy ?? {})) {
+		if (value !== undefined) explicitAskAgy[key] = value;
+	}
+	const askAgy = validateAskAgy({ ...(fileLayer?.askAgy ?? {}), ...explicitAskAgy });
 	return {
 		agyBin: env["AGY_BIN"] ?? "agy",
-		stateDir: options.stateDir ?? resolveStateDir({ env }),
-		scratchRoot: options.scratchRoot,
+		stateDir: stateDir ?? resolveStateDir({ env }),
+		scratchRoot,
 		models,
-		timeoutMs: options.timeoutMs,
+		timeoutMs,
+		askAgy,
 	};
 }

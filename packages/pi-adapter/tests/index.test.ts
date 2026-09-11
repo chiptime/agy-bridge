@@ -16,6 +16,7 @@ import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import { mkdtemp } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type {
@@ -445,3 +446,95 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 function ids0(models: ProviderModelDeclaration[]): string[] {
 	return models.map((m) => m.id);
 }
+
+// --- v0.2 S1: layered file config feeding the factory (R1, D10) ----------------
+
+/**
+ * Factory environment with REAL tmp config files: the loader runs for real
+ * against an injected global agent dir and project cwd, so the precedence
+ * rows exercise the whole file→layer→resolveConfig→registration chain.
+ */
+function fileFactoryEnv(files: { global?: string; project?: string }, options: Record<string, unknown> = {}) {
+	const { pi, calls } = stubPi();
+	const runner = runnerSeam();
+	const root = mkdtempSync(join(tmpdir(), "agy-pi-filecfg-"));
+	const agentDir = join(root, "agent");
+	const project = join(root, "proj");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(join(project, ".pi"), { recursive: true });
+	if (files.global !== undefined) writeFileSync(join(agentDir, "agy-bridge.json"), files.global);
+	if (files.project !== undefined) writeFileSync(join(project, ".pi", "agy-bridge.json"), files.project);
+	const load = () =>
+		createAgyExtension(pi, {
+			options: { timeoutMs: 30_000, ...options },
+			runner: runner.runner,
+			fileConfig: { cwd: project, agentDir },
+		});
+	return { calls, runner, load };
+}
+
+/** The registered display name pi would show for one model id. */
+function modelName(calls: PiCalls, id: string): string | undefined {
+	const models = (calls.providers[0]?.config.models ?? []) as ProviderModelDeclaration[];
+	return models.find((m) => m.id === id)?.name;
+}
+
+describe("integration: extensions/index — layered file config (v0.2 R1, D10)", () => {
+	test("R1: the factory loads the file layer — project file wins over global", async () => {
+		const { calls, load } = fileFactoryEnv({
+			global: JSON.stringify({ models: { "other-model": { name: "FROM-GLOBAL" } } }),
+			project: JSON.stringify({ models: { "other-model": { name: "FROM-PROJECT" } } }),
+		});
+		await load();
+		expect(calls.providers).toHaveLength(1);
+		expect(modelName(calls, "other-model")).toBe("FROM-PROJECT");
+	});
+
+	test("explicit factory options beat the file layer (per key, both layers land)", async () => {
+		const { calls, load } = fileFactoryEnv(
+			{
+				global: JSON.stringify({ models: { "other-model": { name: "FROM-GLOBAL" } } }),
+				project: JSON.stringify({
+					models: { "other-model": { name: "FROM-PROJECT" }, "extra-model": { name: "FROM-PROJECT-ONLY" } },
+				}),
+			},
+			{ models: { "other-model": { name: "FROM-EXPLICIT" } } },
+		);
+		await load();
+		expect(modelName(calls, "other-model")).toBe("FROM-EXPLICIT");
+		expect(modelName(calls, "extra-model")).toBe("FROM-PROJECT-ONLY");
+	});
+
+	test("a malformed global file warns and the factory continues with the project layer", async () => {
+		const { calls, load } = fileFactoryEnv({
+			global: "{oops",
+			project: JSON.stringify({ models: { "other-model": { name: "FROM-PROJECT" } } }),
+		});
+		await load();
+		expect(calls.providers).toHaveLength(1);
+		expect(modelName(calls, "other-model")).toBe("FROM-PROJECT");
+	});
+
+	test("file values pass the single validation gate: a relative file stateDir throws BEFORE any registration", async () => {
+		const { pi, calls, runner } = stubPiAndRunner();
+		const root = mkdtempSync(join(tmpdir(), "agy-pi-filecfg-"));
+		const project = join(root, "proj");
+		mkdirSync(join(project, ".pi"), { recursive: true });
+		writeFileSync(join(project, ".pi", "agy-bridge.json"), JSON.stringify({ stateDir: "relative/nope" }));
+		let threw: unknown;
+		try {
+			await createAgyExtension(pi, {
+				options: { timeoutMs: 30_000 },
+				runner: runner.runner,
+				fileConfig: { cwd: project, agentDir: join(root, "agent") },
+			});
+		} catch (error) {
+			threw = error;
+		}
+		expect(threw).toBeInstanceOf(AgyConfigError);
+		expect((threw as AgyConfigError).field).toBe("stateDir");
+		expect(calls.providers).toHaveLength(0);
+		expect(calls.tools).toHaveLength(0);
+		expect(runner.callCount()).toBe(0);
+	});
+});
