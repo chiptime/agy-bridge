@@ -415,3 +415,60 @@ describe("unit: turn — live hooks and model plumbing", () => {
 		expect(readdirSync(workdir)).toEqual([]);
 	});
 });
+
+// --- v0.2 S3: additive mode passthrough (R5, D4) ---
+
+describe("unit: turn — mode passthrough (v0.2 R5, D4)", () => {
+	test("req.mode reaches the engine argv as --mode <v> (AskAgy paths only; both values)", async () => {
+		const { spawns, turn } = await setup(() => fakeChild({ lines: [SUCCESS("c")], stdin: true }), {
+			promptViaStdin: true,
+		});
+		const modeReq = (mode?: "plan" | "accept-edits"): TurnRequest => ({
+			context: { messages: [userMsg("q")] },
+			options: { sessionId: "s-mode" },
+			...(mode !== undefined ? { mode } : {}),
+		});
+		await turn(modeReq());
+		await turn(modeReq("plan"));
+		await turn(modeReq("accept-edits"));
+		expect(spawns).toHaveLength(3);
+		expect(spawns[0].args).not.toContain("--mode"); // unset → v0.1 argv
+		expect(spawns[1].args[spawns[1].args.indexOf("--mode") + 1]).toBe("plan");
+		expect(spawns[2].args[spawns[2].args.indexOf("--mode") + 1]).toBe("accept-edits");
+	});
+
+	test("THREAT (e) provider path: no req.mode → argv byte-identical to the v0.1 D4 pin (no --mode anywhere)", async () => {
+		const { spawns, turn } = await setup(() => fakeChild({ lines: [SUCCESS("c")], stdin: true }), {
+			promptViaStdin: true,
+		});
+		await turn({ context: { messages: [userMsg("q")] }, options: { sessionId: "s-d4" } });
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0].args).toEqual([
+			"--input-format",
+			"stream-json",
+			"--output-format",
+			"stream-json",
+			"--add-dir",
+			process.cwd(),
+			"--dangerously-skip-permissions",
+		]);
+	});
+
+	test("abort mid-stream regression WITH mode set: SIGTERM + tapped conversationId persisted + --mode still in argv", async () => {
+		const controller = new AbortController();
+		const { store, spawns, turn } = await setup(() =>
+			fakeChild({ lines: [{ event: "init", conversation_id: "conv-ab" }], hold: true, stdin: true }),
+		);
+		const p = turn({
+			context: { messages: [userMsg("q")] },
+			options: { sessionId: "s-ab-mode", signal: controller.signal },
+			mode: "plan",
+		});
+		setTimeout(() => controller.abort(), 25);
+		await expect(p).rejects.toBeInstanceOf(TurnAborted);
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0].child.killed).toBe(true);
+		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("plan");
+		expect(await store.get("s-ab-mode")).toBe("conv-ab");
+	});
+});

@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { messageHashes } from "agy-bridge-engine";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAskAgyTool, type AskAgyDeps, type AskAgyParams } from "../src/ask-tool";
+import { AgyConfigError } from "../src/config";
 import { openSessionStore, type SessionStore } from "../src/session-store";
 import type { PiAgyModel } from "../src/models";
 
@@ -402,5 +403,81 @@ describe("unit: ask-tool — metadata overrides (v0.2 R4)", () => {
 		expect(tool.name).toBe("AskSecond");
 		expect(tool.label).toBe("Ask agy");
 		expect(tool.description).toContain("Delegate a self-contained sub-task to agy");
+	});
+});
+
+// --- v0.2 S3 R5/D1: execution modes (THREAT rows precede the 3.4 GREEN) ---
+
+/** Runtime shape of the mode union in the tool's TypeBox schema. */
+function modeEnumOf(tool: { parameters: unknown }): string[] {
+	const schema = tool.parameters as { properties: { mode?: { anyOf?: { const?: string }[] } } };
+	return (schema.properties.mode?.anyOf ?? []).map((literal) => literal.const ?? "");
+}
+
+describe("unit: ask-tool — execution modes (v0.2 R5, D1)", () => {
+	test("default mode read (no param, no defaultMode): spawned argv carries --mode plan", async () => {
+		const { spawns, run } = await setup();
+		const { text } = await run({ prompt: "read-only question" });
+		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("plan");
+		expect(text).toBe("the answer");
+	});
+
+	test("mode:full → --mode accept-edits (v0.1 escalation; allowFullMode defaults true)", async () => {
+		const { spawns, run } = await setup();
+		await run({ prompt: "do the full task", mode: "full" });
+		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("accept-edits");
+	});
+
+	test("config defaultMode:none (no param): --mode plan AND forced scratch; details.scope reports scratch", async () => {
+		const { scratchRoot, spawns, run } = await setup(undefined, { defaults: { defaultMode: "none" } });
+		const { details } = await run({ prompt: "think, do not touch", scope: "worktree" });
+		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("plan");
+		expect(spawns[0].cwd.startsWith(join(scratchRoot, "agy-run-"))).toBe(true);
+		expect((details as { scope: string }).scope).toBe("scratch");
+	});
+
+	test("config defaultMode:full (no param): --mode accept-edits (explicit caller mode still wins)", async () => {
+		const { spawns, run } = await setup(undefined, { defaults: { defaultMode: "full" } });
+		await run({ prompt: "default full task" });
+		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("accept-edits");
+	});
+
+	test("THREAT mode:none + scope:worktree → FRESH scratch wins (mode coerces scope, never rejected); --mode plan; details.scope=scratch", async () => {
+		const { scratchRoot, ctxDir, spawns, run } = await setup();
+		const { details } = await run({ prompt: "just think", mode: "none", scope: "worktree" });
+		expect((details as { scope: string }).scope).toBe("scratch");
+		expect(spawns[0].cwd.startsWith(join(scratchRoot, "agy-run-"))).toBe(true);
+		expect(spawns[0].cwd).not.toBe(ctxDir);
+		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("plan");
+	});
+
+	test("THREAT mode:read + scope:worktree → worktree honored (only none coerces); --mode plan", async () => {
+		const { ctxDir, spawns, run } = await setup();
+		await run({ prompt: "inspect this repo", mode: "read", scope: "worktree" });
+		expect(spawns[0].cwd).toBe(ctxDir);
+		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("plan");
+	});
+
+	test("THREAT invalid mode value: AgyConfigError BEFORE any spawn (zero children)", async () => {
+		const { spawns, run } = await setup();
+		await expect(run({ prompt: "x", mode: "turbo" } as never)).rejects.toThrow(AgyConfigError);
+		expect(spawns).toHaveLength(0);
+	});
+
+	test("THREAT allowFullMode:false: schema enum excludes full; requesting full fails closed (AgyConfigError → pi tool error text, NO spawn)", async () => {
+		const { spawns, tool, run } = await setup(undefined, { defaults: { allowFullMode: false } });
+		expect(modeEnumOf(tool)).toEqual(["read", "none"]);
+		const err = await run({ prompt: "x", mode: "full" }).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(AgyConfigError);
+		expect((err as Error).message).toContain("allowFullMode");
+		expect(spawns).toHaveLength(0);
+	});
+
+	test("allowFullMode default (unset): schema enum keeps all three modes", async () => {
+		const { tool } = await setup();
+		expect(modeEnumOf(tool)).toEqual(["read", "none", "full"]);
 	});
 });

@@ -603,10 +603,11 @@ describe("integration: extensions/index — conditional AskAgy registration + st
 		expect(fromFile.calls.tools).toHaveLength(1);
 		expect(fromFile.calls.tools[0].name).toBe("AskAgy");
 		// Schema shape through the factory (formerly pinned by the smoke test,
-		// whose plain invocation registers no tool under R3).
+		// whose plain invocation registers no tool under R3). v0.2 R5 adds the
+		// mode param to the schema — the pinned key list grows accordingly.
 		const params = fromFile.calls.tools[0].parameters as { required?: string[]; properties: Record<string, unknown> };
 		expect(params.required).toEqual(["prompt"]);
-		expect(Object.keys(params.properties).sort()).toEqual(["isolated", "model", "prompt", "scope", "skills", "thinking"]);
+		expect(Object.keys(params.properties).sort()).toEqual(["isolated", "mode", "model", "prompt", "scope", "skills", "thinking"]);
 	});
 });
 

@@ -40,6 +40,15 @@ export interface SpawnOptions {
 	 * argv.
 	 */
 	promptViaStdin?: boolean;
+	/**
+	 * Delegation mode seam (v0.2 R10, additive): "plan" maps AskAgy's
+	 * read/none modes, "accept-edits" maps full. When set, `--mode <v>` is
+	 * pushed in BOTH argv branches immediately after
+	 * --dangerously-skip-permissions; undefined keeps the argv byte-identical
+	 * to v0.1. --sandbox is never emitted (incompatible with
+	 * skip-permissions, D3).
+	 */
+	mode?: "plan" | "accept-edits";
 }
 
 export interface SpawnRun {
@@ -151,6 +160,9 @@ export function buildAgyArgs(opts: SpawnOptions, outputFormat: 'json' | 'stream-
 			opts.workdir,
 			'--dangerously-skip-permissions',
 		];
+		// Mode seam (R10): identical position in both branches — right after
+		// --dangerously-skip-permissions, before the resume/model flags.
+		if (opts.mode !== undefined) stdinArgs.push('--mode', opts.mode);
 		if (opts.resumeConversationId) stdinArgs.push('--conversation', opts.resumeConversationId);
 		if (opts.model) stdinArgs.push('--model', opts.model);
 		return stdinArgs;
@@ -162,6 +174,9 @@ export function buildAgyArgs(opts: SpawnOptions, outputFormat: 'json' | 'stream-
 		opts.workdir,
 		'--dangerously-skip-permissions',
 	];
+	// Mode seam (R10): identical position in both branches — right after
+	// --dangerously-skip-permissions, before the format/resume/model flags.
+	if (opts.mode !== undefined) args.push('--mode', opts.mode);
 	// agy's print-mode client wait defaults to 5m0s; without an explicit value long
 	// explorations die at 300s while our budgets (AGY_EXPLORE_TIMEOUT_MS defaults:
 	// 1200s CLI / 1230s plugin) never fire. Derive the flag from timeoutMs so it

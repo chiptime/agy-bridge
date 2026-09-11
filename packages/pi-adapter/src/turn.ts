@@ -81,6 +81,12 @@ export interface TurnRequest {
 	onStep?: (step: Record<string, unknown>) => void;
 	/** Announces the divergence re-seed (the host renders DIVERGED_NOTICE). */
 	onDiverged?: () => void;
+	/**
+	 * v0.2 R5/D4: engine mode for AskAgy delegations. Provider turns pass
+	 * NOTHING — their argv stays byte-identical to v0.1 (agy's own default
+	 * = accept-edits).
+	 */
+	mode?: "plan" | "accept-edits";
 }
 
 export interface TurnDeps {
@@ -274,6 +280,7 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				logPath,
 				spawnImpl: tap.spawnImpl,
 				...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
+				...(req.mode !== undefined ? { mode: req.mode } : {}),
 			});
 			const classification = classifyRun({
 				exitCode: run.exitCode,

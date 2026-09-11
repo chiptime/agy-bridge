@@ -29,8 +29,14 @@
 import { tmpdir } from "node:os";
 import type { spawn } from "node:child_process";
 import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ExtensionContext,
+	ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
+import { AgyConfigError } from "./config";
 import type { BridgeState } from "./lifecycle";
 import type { PiAgyModel } from "./models";
 import { formatStepUpdate } from "./progress";
@@ -47,44 +53,64 @@ Continuity: calls in the same session continue one agy conversation by default; 
 
 Skills: pass skills:true to prepend the available skill catalog (names + one-line descriptions) to the prompt.`;
 
-const askAgyParams = Type.Object({
-	prompt: Type.String({
-		description: "Self-contained task for agy, with all the context it needs (it cannot see this conversation).",
-	}),
-	model: Type.Optional(
-		Type.String({ description: "agy model id (bare id, e.g. \"gemini-3.8-flash\"); omit for agy's default." }),
-	),
-	thinking: Type.Optional(
-		Type.Union(
-			[
-				Type.Literal("minimal"),
-				Type.Literal("low"),
-				Type.Literal("medium"),
-				Type.Literal("high"),
-				Type.Literal("xhigh"),
-				Type.Literal("max"),
-			],
-			{ description: "Thinking level; routes through the model's tier map (e.g. gemini-3.8-flash + high)." },
-		),
-	),
-	scope: Type.Optional(
-		Type.Union([Type.Literal("scratch"), Type.Literal("worktree")], {
-			description:
-				"Where agy runs: 'scratch' (default) = fresh tmp dir under the validated scratch root, project NOT visible; 'worktree' = the current project directory.",
-			default: "scratch",
-		}),
-	),
-	isolated: Type.Optional(
-		Type.Boolean({ description: "true = one-shot: no conversation continuity (no stored context, no resume)." }),
-	),
-	skills: Type.Optional(
-		Type.Boolean({ description: "true = prepend the skill catalog (names + descriptions) to the prompt. Default off." }),
-	),
+/**
+ * v0.2 R5/D1: the mode param's schema description — documents the none→
+ * scratch coercion for the driving model (mode wins over scope:"worktree",
+ * coerced and reported in details.scope, never rejected).
+ */
+const MODE_DESCRIPTION = `Execution mode for agy: "read" (default) = agy plans but does not modify the project or run commands; "none" = same containment AND the run is FORCED into a fresh scratch directory even if scope "worktree" is passed (mode wins over scope; details.scope reports "scratch"); "full" = agy may modify files and run commands (requires allowFullMode in the config).`;
+
+/** Runtime-narrowable mode enum: allowFullMode:false drops the "full" literal from the schema (fail closed); the static type stays the wide closed set. */
+const MODE_UNION_FULL = Type.Union([Type.Literal("read"), Type.Literal("none"), Type.Literal("full")], {
+	description: MODE_DESCRIPTION,
 });
+const MODE_UNION_NARROW = Type.Union([Type.Literal("read"), Type.Literal("none")], { description: MODE_DESCRIPTION });
+const modeParam = (allowFullMode: boolean) => Type.Optional(allowFullMode ? MODE_UNION_FULL : MODE_UNION_NARROW);
+
+const buildAskAgyParams = (allowFullMode: boolean) =>
+	Type.Object({
+		prompt: Type.String({
+			description: "Self-contained task for agy, with all the context it needs (it cannot see this conversation).",
+		}),
+		model: Type.Optional(
+			Type.String({ description: "agy model id (bare id, e.g. \"gemini-3.8-flash\"); omit for agy's default." }),
+		),
+		thinking: Type.Optional(
+			Type.Union(
+				[
+					Type.Literal("minimal"),
+					Type.Literal("low"),
+					Type.Literal("medium"),
+					Type.Literal("high"),
+					Type.Literal("xhigh"),
+					Type.Literal("max"),
+				],
+				{ description: "Thinking level; routes through the model's tier map (e.g. gemini-3.8-flash + high)." },
+			),
+		),
+		scope: Type.Optional(
+			Type.Union([Type.Literal("scratch"), Type.Literal("worktree")], {
+				description:
+					"Where agy runs: 'scratch' (default) = fresh tmp dir under the validated scratch root, project NOT visible; 'worktree' = the current project directory.",
+				default: "scratch",
+			}),
+		),
+		mode: modeParam(allowFullMode),
+		isolated: Type.Optional(
+			Type.Boolean({ description: "true = one-shot: no conversation continuity (no stored context, no resume)." }),
+		),
+		skills: Type.Optional(
+			Type.Boolean({ description: "true = prepend the skill catalog (names + descriptions) to the prompt. Default off." }),
+		),
+	});
+
+const askAgyParams = buildAskAgyParams(true);
 
 export type AskAgyParams = Static<typeof askAgyParams>;
 export type AskAgyScope = "scratch" | "worktree";
 export type AskAgyThinking = NonNullable<AskAgyParams["thinking"]>;
+/** v0.2 R5/D1 closed mode set (engine mapping lives in resolveAskAgyMode). */
+export type AskAgyMode = NonNullable<AskAgyParams["mode"]>;
 
 export interface AskAgyDetails {
 	scope: AskAgyScope;
@@ -119,13 +145,13 @@ export interface AskAgyMetadata {
  * Explicit caller params always win over these.
  */
 export interface AskAgyDefaults {
-	/** Effective default mode; consumed by the S3 mode param (task 3.4). */
+	/** Effective default mode (v0.2 R5): params.mode wins; absent → this; ultimate fallback "read". */
 	defaultMode?: "read" | "none" | "full";
 	/** Effective default for params.isolated. */
 	defaultIsolated?: boolean;
 	/** false disables the skillsCatalog seam even when params.skills is true. */
 	appendSkills?: boolean;
-	/** false narrows the mode enum at the schema level (consumed in S3, task 3.4). */
+	/** false narrows the mode enum at the schema level AND rejects mode:"full" in execute (v0.2 R5, consumed). */
 	allowFullMode?: boolean;
 }
 
@@ -184,6 +210,28 @@ export function resolveAskModelArg(
 	return entry.modelArg ?? entry.id;
 }
 
+/**
+ * Effective mode for one delegation (pure, v0.2 R5/D1): explicit param >
+ * config default > "read". Any value outside the allowed closed set —
+ * including "full" when allowFullMode:false — throws AgyConfigError BEFORE
+ * any spawn (the schema already narrows for the host; this is the typed
+ * fence for direct callers).
+ */
+export function resolveAskAgyMode(requested: string | undefined, defaults: AskAgyDefaults | undefined): AskAgyMode {
+	const mode = (requested ?? defaults?.defaultMode ?? "read") as AskAgyMode;
+	const allowFull = defaults?.allowFullMode !== false;
+	if (!allowFull && mode === "full") {
+		throw new AgyConfigError(
+			"mode",
+			`mode "full" rejected: allowFullMode is configured false (accepted modes: read|none)`,
+		);
+	}
+	if (mode !== "read" && mode !== "none" && mode !== "full") {
+		throw new AgyConfigError("mode", `mode must be "read", "none", or "full", got "${String(requested)}"`);
+	}
+	return mode;
+}
+
 /** Isolated calls never touch the persistent store: a throwaway in-memory store gives runTurn fresh-conversation semantics with zero disk I/O. */
 function isolatedStore(): SessionStore {
 	return {
@@ -199,21 +247,38 @@ function isolatedStore(): SessionStore {
  * Build the AskAgy ToolDefinition (handed to pi.registerTool by the D4
  * factory). One execute call = one runTurn call = one engine run.
  */
-export function createAskAgyTool(deps: AskAgyDeps): ToolDefinition<typeof askAgyParams, AskAgyDetails> {
+export function createAskAgyTool(deps: AskAgyDeps) {
+	// v0.2 R5/R2: the schema's mode enum narrows at the schema level when
+	// allowFullMode:false (fail closed for the driving model too).
+	const parameters = buildAskAgyParams(deps.defaults?.allowFullMode !== false);
 	return {
 		// v0.2 R4: configured metadata wins field-by-field; absent fields keep
 		// the v0.1 defaults.
 		name: deps.metadata?.name ?? "AskAgy",
 		label: deps.metadata?.label ?? "Ask agy",
 		description: deps.metadata?.description ?? ASK_AGY_DESCRIPTION,
-		parameters: askAgyParams,
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		parameters,
+		async execute(
+			_toolCallId: string,
+			params: AskAgyParams,
+			signal: AbortSignal | undefined,
+			onUpdate: AgentToolUpdateCallback<AskAgyDetails> | undefined,
+			ctx: ExtensionContext,
+		): Promise<AgentToolResult<AskAgyDetails>> {
 			const now = deps.now ?? Date.now;
 			const start = now();
+			// v0.2 R5/D1: effective mode — explicit param > config default >
+			// "read"; invalid values and full-without-allowFullMode throw the
+			// typed config error BEFORE any spawn (zero children).
+			const mode = resolveAskAgyMode(params.mode, deps.defaults);
 			// v0.2 R4: effective defaults — the config's defaultIsolated applies
 			// only when the caller did not pass isolated explicitly.
 			const isolated = params.isolated ?? deps.defaults?.defaultIsolated === true;
-			const scope: AskAgyScope = params.scope ?? "scratch";
+			// Containment (threat row, D1): the scope decision happens in ONE
+			// place and "none" FORCES the fresh-scratch workdir there — mode
+			// wins over an explicit scope:"worktree" (coerced, never rejected;
+			// details.scope reports the effective "scratch").
+			const scope: AskAgyScope = mode === "none" ? "scratch" : (params.scope ?? "scratch");
 			const modelArg = resolveAskModelArg(deps.models, params.model, params.thinking);
 			const details: AskAgyDetails = {
 				scope,
@@ -269,12 +334,16 @@ export function createAskAgyTool(deps: AskAgyDeps): ToolDefinition<typeof askAgy
 						...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
 						...(deps.state !== undefined ? { state: deps.state } : {}),
 					},
-					{
-						context,
-						...(options !== undefined ? { options } : {}),
-						...(modelArg !== undefined ? { modelArg } : {}),
-						onStep: (step) => onUpdate?.({ content: [{ type: "text", text: formatStepUpdate(step) }], details }),
-					},
+				{
+					context,
+					...(options !== undefined ? { options } : {}),
+					...(modelArg !== undefined ? { modelArg } : {}),
+					// D1 mode mapping: read|none → --mode plan (plan-mode writes/
+					// commands verified blocked by Probe 1); full → --mode
+					// accept-edits (v0.1 behavior). --sandbox is never emitted.
+					mode: mode === "full" ? "accept-edits" : "plan",
+					onStep: (step) => onUpdate?.({ content: [{ type: "text", text: formatStepUpdate(step) }], details }),
+				},
 				);
 				details.logPath = result.logPath;
 				details.durationMs = now() - start;

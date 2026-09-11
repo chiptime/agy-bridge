@@ -1516,3 +1516,75 @@ describe("unit: spawn — promptViaStdin seam (additive): the prompt rides stdin
 		expect(r.exitCode).toBeNull();
 	});
 });
+
+describe("unit: spawn — additive mode seam (v0.2 R10/D4): --mode in BOTH argv branches, default byte-identical", () => {
+	const base = { bin: "agy", prompt: "p", workdir: "/w", timeoutMs: 600_000 };
+
+	test("mode unset: print-branch argv byte-identical to v0.1 (D4 pin)", () => {
+		expect(buildAgyArgs(base)).toEqual([
+			"--print",
+			"p",
+			"--add-dir",
+			"/w",
+			"--dangerously-skip-permissions",
+			"--print-timeout",
+			"590s",
+			"--output-format",
+			"json",
+		]);
+	});
+
+	test("mode unset: stream-json stdin-branch argv byte-identical to v0.1 (D4 pin)", () => {
+		expect(buildAgyArgs({ ...base, promptViaStdin: true })).toEqual([
+			"--input-format",
+			"stream-json",
+			"--output-format",
+			"stream-json",
+			"--add-dir",
+			"/w",
+			"--dangerously-skip-permissions",
+		]);
+	});
+
+	test("mode:plan → --mode plan in the print branch (position pinned: right after skip-permissions)", () => {
+		expect(buildAgyArgs({ ...base, mode: "plan" })).toEqual([
+			"--print",
+			"p",
+			"--add-dir",
+			"/w",
+			"--dangerously-skip-permissions",
+			"--mode",
+			"plan",
+			"--print-timeout",
+			"590s",
+			"--output-format",
+			"json",
+		]);
+	});
+
+	test("mode:accept-edits → --mode accept-edits in the print branch", () => {
+		const args = buildAgyArgs({ ...base, mode: "accept-edits" });
+		expect(args[args.indexOf("--mode") + 1]).toBe("accept-edits");
+		expect(args.indexOf("--mode")).toBe(args.indexOf("--dangerously-skip-permissions") + 1);
+	});
+
+	test("mode:plan → --mode plan in the stream-json stdin branch (same position as print)", () => {
+		expect(buildAgyArgs({ ...base, promptViaStdin: true, mode: "plan" })).toEqual([
+			"--input-format",
+			"stream-json",
+			"--output-format",
+			"stream-json",
+			"--add-dir",
+			"/w",
+			"--dangerously-skip-permissions",
+			"--mode",
+			"plan",
+		]);
+	});
+
+	test("mode:accept-edits → --mode accept-edits in the stream-json stdin branch (same position as print)", () => {
+		const args = buildAgyArgs({ ...base, promptViaStdin: true, mode: "accept-edits" });
+		expect(args[args.indexOf("--mode") + 1]).toBe("accept-edits");
+		expect(args.indexOf("--mode")).toBe(args.indexOf("--dangerously-skip-permissions") + 1);
+	});
+});
