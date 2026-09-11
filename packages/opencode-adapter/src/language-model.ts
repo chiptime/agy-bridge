@@ -32,7 +32,28 @@ import { runTurn, TurnError, type TurnDeps, type TurnRequest, type TurnResult } 
 import type { AgyAdapterConfig } from "./config";
 import type { SessionStore } from "./session-store";
 import { hashesArePrefix, mapMessages, messageHashes, renderSeed, type PromptMessage } from "./messages";
-import { resolveModel } from "./models";
+import { resolveModel, type AgyModel } from "./models";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { resolveStateDir } from "./paths";
+
+/**
+ * TEMPORARY DIAGNOSTIC PROBE — remove once OQ1 is resolved.
+ * Appends one JSON line per event to <state>/probe-session-context.log.
+ * Never throws: a failed probe must never break a turn.
+ */
+function probeModel(event: string, payload: unknown): void {
+	try {
+		const dir = resolveStateDir();
+		mkdirSync(dir, { recursive: true });
+		appendFileSync(
+			join(dir, "probe-session-context.log"),
+			`${JSON.stringify({ at: new Date().toISOString(), event, payload })}\n`,
+		);
+	} catch {
+		/* probe is best-effort */
+	}
+}
 
 /** Injectable turn runner — tests fake this to pin the mapping in isolation. */
 export type TurnRunner = (deps: TurnDeps, req: TurnRequest) => Promise<TurnResult>;
@@ -51,22 +72,78 @@ export interface AgyLanguageModelDeps {
 	spawnFn?: TurnDeps["spawnFn"];
 }
 
-/** Session context surfaced by the plugin's chat.params hook (D3/OQ1). */
-interface AgySessionContext {
+/** Session context surfaced by the plugin's chat.params hook (D3/OQ1) or host headers. */
+export interface AgySessionContext {
 	sessionId?: string;
 	worktree?: string;
 }
 
-/** Read providerOptions.agy (the plugin channel); string fields validated. */
-function readSessionContext(providerOptions?: SharedV3ProviderOptions): AgySessionContext {
+/**
+ * Read providerOptions.agy (the plugin channel) or host headers; string fields validated.
+ * Supports:
+ * - direct provider options: providerOptions.agy.sessionId
+ * - opencode runtime wrapped: providerOptions.agy.agy.sessionId
+ * - host header fallback: headers["x-session-id"], headers["x-session-affinity"]
+ */
+export function readSessionContext(
+	providerOptions?: SharedV3ProviderOptions,
+	headers?: Record<string, string | undefined>,
+): AgySessionContext {
 	const agy = providerOptions?.["agy"];
-	if (typeof agy !== "object" || agy === null) return {};
-	const sessionId = (agy as Record<string, unknown>)["sessionId"];
-	const worktree = (agy as Record<string, unknown>)["worktree"];
+	const rec = (typeof agy === "object" && agy !== null ? agy : {}) as Record<string, unknown>;
+	const nested = (typeof rec["agy"] === "object" && rec["agy"] !== null ? rec["agy"] : {}) as Record<string, unknown>;
+	const rawSessionId =
+		rec["sessionId"] ??
+		nested["sessionId"] ??
+		headers?.["x-session-id"] ??
+		headers?.["X-Session-Id"] ??
+		headers?.["x-session-affinity"];
+	const rawWorktree = rec["worktree"] ?? nested["worktree"];
 	return {
-		sessionId: typeof sessionId === "string" && sessionId !== "" ? sessionId : undefined,
-		worktree: typeof worktree === "string" && worktree !== "" ? worktree : undefined,
+		sessionId: typeof rawSessionId === "string" && rawSessionId !== "" ? rawSessionId : undefined,
+		worktree: typeof rawWorktree === "string" && rawWorktree !== "" ? rawWorktree : undefined,
 	};
+}
+
+/**
+ * Read the effort-variant selection for this call, checking the plausible
+ * delivery locations IN ORDER (the exact channel is an OPEN empirical
+ * question — the doStream probe records what we resolved per live turn):
+ * 1. providerOptions.agy.variant (the plugin channel, mirrors sessionId)
+ * 2. providerOptions.agy.agy.variant (the opencode runtime wrapped shape)
+ * 3. any top-level field of the call options named "variant"
+ * Non-string or empty values degrade to undefined (no variant selected).
+ */
+export function readVariant(
+	options?: Pick<LanguageModelV3CallOptions, "providerOptions"> & Record<string, unknown>,
+): string | undefined {
+	const rec = (
+		typeof options?.providerOptions?.["agy"] === "object" && options.providerOptions?.["agy"] !== null
+			? options.providerOptions["agy"]
+			: {}
+	) as Record<string, unknown>;
+	const nested = (typeof rec["agy"] === "object" && rec["agy"] !== null ? rec["agy"] : {}) as Record<string, unknown>;
+	const raw = rec["variant"] ?? nested["variant"] ?? options?.["variant"];
+	return typeof raw === "string" && raw !== "" ? raw : undefined;
+}
+
+/**
+ * Map a selected variant onto the --model argument via the registry entry's
+ * variants payload ({ agyModelId }). Documented fallbacks, in order:
+ * - UNKNOWN variant or no variant → the entry's own modelArg. For a
+ *   collapsed base that is the HIGHEST discovered effort, because agy ids
+ *   are effort-encoded and a collapsed base has NO exact bare agy id to
+ *   spawn (spawning the bare id would target a nonexistent model).
+ * - agy/default and flat models keep their modelArg (undefined / full id).
+ */
+export function resolveVariantModelArg(entry: AgyModel, variant: string | undefined): string | undefined {
+	if (variant !== undefined) {
+		const payload = entry.variants?.[variant];
+		if (typeof payload?.agyModelId === "string" && payload.agyModelId !== "") {
+			return payload.agyModelId;
+		}
+	}
+	return entry.modelArg;
 }
 
 const EMPTY_USAGE: LanguageModelV3Usage = {
@@ -140,6 +217,64 @@ function duration1s(durationSeconds: number): string {
 	return `${durationSeconds.toFixed(1)}s`;
 }
 
+/** Collapse newlines/tabs to single spaces, trim, and truncate to maxLen with ellipsis. */
+export function sanitizePreview(text: string, maxLen: number = 60): string {
+	const collapsed = text.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+	if (maxLen !== undefined && collapsed.length > maxLen) {
+		return `${collapsed.slice(0, maxLen)}…`;
+	}
+	return collapsed;
+}
+
+const CANDIDATE_ENTRIES: ReadonlyArray<{ key: string; label: string }> = [
+	{ key: "path", label: "path" },
+	{ key: "AbsolutePath", label: "path" },
+	{ key: "TargetFile", label: "path" },
+	{ key: "file", label: "file" },
+	{ key: "command", label: "command" },
+	{ key: "CommandLine", label: "command" },
+	{ key: "pattern", label: "pattern" },
+	{ key: "Pattern", label: "pattern" },
+	{ key: "query", label: "query" },
+	{ key: "Query", label: "query" },
+	{ key: "url", label: "url" },
+	{ key: "Url", label: "url" },
+];
+
+/** Inspect toolInfo for canonical candidate keys, returning formatted label and sanitized preview. */
+export function extractToolParam(toolInfo: unknown): string | undefined {
+	if (typeof toolInfo !== "object" || toolInfo === null) return undefined;
+	try {
+		const rec = toolInfo as Record<string, unknown>;
+		// Support real agy tool_info shape: { name: "...", parameters: { ... } }
+		const targets: Array<Record<string, unknown>> = [];
+		const params = rec["parameters"];
+		if (typeof params === "object" && params !== null && !Array.isArray(params)) {
+			targets.push(params as Record<string, unknown>);
+		}
+		const args = rec["args"] ?? rec["arguments"];
+		if (typeof args === "object" && args !== null && !Array.isArray(args)) {
+			targets.push(args as Record<string, unknown>);
+		}
+		targets.push(rec);
+
+		for (const target of targets) {
+			for (const { key, label } of CANDIDATE_ENTRIES) {
+				const val = target[key];
+				if (typeof val === "string") {
+					const preview = sanitizePreview(val);
+					if (preview.length > 0) {
+						return `${label}: ${preview}`;
+					}
+				}
+			}
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * One live step_update payload → a human-readable progress line (always
  * \n-terminated): tool start/done/error, response done/progress, prompt.
@@ -156,13 +291,25 @@ export function formatStepUpdate(step: Record<string, unknown>): string {
 		const duration = typeof rawDuration === "number" && Number.isFinite(rawDuration) ? rawDuration : undefined;
 		if (stepType === "tool") {
 			if (typeof toolName !== "string" || toolName === "") return fallbackSummary(step);
-			if (state === "ACTIVE") return `▸ tool ${toolName}…\n`;
-			if (state === "DONE") return duration !== undefined ? `✓ ${toolName} (${duration1s(duration)})\n` : `✓ ${toolName}\n`;
-			if (state === "ERROR") return `✗ ${toolName} failed\n`;
+			const param = extractToolParam(step["tool_info"]);
+			const paramStr = param !== undefined ? ` (${param})` : "";
+			if (state === "ACTIVE") return `▸ tool ${toolName}${paramStr}…\n`;
+			if (state === "DONE") {
+				const durStr = duration !== undefined ? ` (${duration1s(duration)})` : "";
+				return `✓ ${toolName}${paramStr}${durStr}\n`;
+			}
+			if (state === "ERROR") return `✗ ${toolName}${paramStr} failed\n`;
 			return fallbackSummary(step);
 		}
 		if (stepType === "agent_response") {
 			if (state === "DONE") return duration !== undefined ? `● response (${duration1s(duration)})\n` : "● response\n";
+			const rawDelta = step["text_delta"];
+			if (typeof rawDelta === "string") {
+				const preview = sanitizePreview(rawDelta);
+				if (preview.length > 0) {
+					return `▸ response: ${preview}\n`;
+				}
+			}
 			return "▸ response…\n";
 		}
 		if (stepType === "user_input") {
@@ -209,7 +356,9 @@ export class AgyLanguageModel implements LanguageModelV3 {
 	/** Resolved full registry id (e.g. "agy/default"). */
 	readonly modelId: string;
 	readonly supportedUrls: Record<string, RegExp[]> = {};
-	private readonly modelArg: string | undefined;
+	/** Full resolved registry entry — its variants payload maps a selected
+	 * effort variant to the agy id passed as --model at turn time. */
+	private readonly entry: AgyModel;
 	private readonly deps: AgyLanguageModelDeps;
 
 	constructor(deps: AgyLanguageModelDeps) {
@@ -217,7 +366,9 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		this.provider = deps.provider;
 		const resolved = resolveModel(deps.modelId, deps.config.models);
 		this.modelId = resolved.id;
-		this.modelArg = resolved.modelArg;
+		// Constructor-time modelArg is the FALLBACK only: a variant selected
+		// per call overrides it at doStream time (see resolveVariantModelArg).
+		this.entry = resolved;
 	}
 
 	async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
@@ -232,8 +383,30 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		// turn.ts stores the new conversation id + hashes as the baseline.
 		// turn.ts owns the authoritative resume/fresh decision from the same
 		// baseline; this pre-computation only selects prompt building.
-		const { deps, modelArg } = this;
-		const ctx = readSessionContext(options.providerOptions);
+		const { deps } = this;
+		// Per-call variant resolution: a variant selected in the picker (or
+		// delivered via providerOptions) overrides the constructor-time
+		// modelArg for THIS turn only; see resolveVariantModelArg for the
+		// fallback contract.
+		const variant = readVariant(options);
+		const modelArg = resolveVariantModelArg(this.entry, variant);
+		// Loud-fallback policy: for a collapsed base, an unresolved or unknown
+		// variant silently spawns the highest-effort agy id. That is a safe
+		// default but a silent misfire (the user DID pick an effort; the host
+		// may have delivered it somewhere we do not read). Surface every
+		// fallback as a V3 warning so the host can show it. Flat models and
+		// agy/default never fall back — they have no variants payload.
+		const variantFallbackNotice = (() => {
+			if (this.entry.variants === undefined) return undefined;
+			if (variant === undefined) {
+				return `model "${this.entry.id}" has effort variants but none was selected; using "${modelArg ?? "agy default"}"`;
+			}
+			if (this.entry.variants[variant] === undefined) {
+				return `unknown variant "${variant}" for model "${this.entry.id}"; using "${modelArg ?? "agy default"}"`;
+			}
+			return undefined;
+		})();
+		const ctx = readSessionContext(options.providerOptions, options.headers);
 		const sessionId = ctx.sessionId ?? randomUUID();
 		// Boundary cast (documented in messages.ts): V3 prompt messages are a
 		// closed union without index signatures; mapMessages only reads
@@ -244,9 +417,39 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		const diverged =
 			entry !== undefined && entry.hashes !== undefined && !hashesArePrefix(entry.hashes, hashes);
 		const isNewConversation = entry === undefined || diverged;
+		// TEMPORARY DIAGNOSTIC PROBE — remove once the session-key question is
+		// resolved. Shape only: roles and hashes, never prompt content.
+		probeModel("decision", {
+			sessionId,
+			usedFallbackUUID: ctx.sessionId === undefined,
+			// Caller fingerprint: distinguishes the main chat turn from
+			// opencode's side calls (title generation, summaries, subagents).
+			caller: {
+				managedBy: (options.providerOptions?.["agy"] as Record<string, unknown> | undefined)?.["__managed_by"],
+				toolCount: Array.isArray(options.tools) ? options.tools.length : 0,
+				maxOutputTokens: options.maxOutputTokens,
+			},
+			messageCount: incoming.length,
+			roles: incoming.map((m) => m?.role),
+			incomingHashes: hashes,
+			storedHashes: entry?.hashes ?? null,
+			storedConversationId: entry?.conversationId ?? null,
+			// Variant/effort probes (shape only): which variant we READ from
+			// the call options and which --model argument we resolved, so one
+			// live turn tells us empirically where opencode delivers the
+			// chosen variant and what we spawn with.
+			variant: variant ?? null,
+			modelArg: modelArg ?? null,
+			decision: entry === undefined ? "FRESH (no entry)" : diverged ? "FRESH (DIVERGED)" : "RESUME",
+			isNewConversation,
+		});
 		const seedInfo = diverged ? renderSeed(incoming) : undefined;
 		const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
-		const warnings: SharedV3Warning[] = [...(seedInfo?.warnings ?? []), ...mapping.warnings].map((w) => ({
+		const warnings: SharedV3Warning[] = [
+			...(seedInfo?.warnings ?? []),
+			...mapping.warnings,
+			...(variantFallbackNotice !== undefined ? [variantFallbackNotice] : []),
+		].map((w) => ({
 			type: "other",
 			message: w,
 		}));

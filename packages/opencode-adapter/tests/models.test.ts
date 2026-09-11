@@ -2,8 +2,10 @@
  * Unit tests for the model registry (spec R8.s1–s3): agy/default first with
  * no --model, live-verified IDs, unknown passthrough, config merge, default
  * limits 128000/8192, and the gemini-pool routing hint via the engine.
- * Plus the dynamic-discovery registry (resolveRegistry) and the host-facing
- * ModelV2 record builder consumed by the plugin's provider.models hook.
+ * Plus the dynamic-discovery registry (resolveRegistry), the host-facing
+ * ModelV2 record builder consumed by the plugin's provider.models hook, and
+ * the effort-variant collapse (suffixed agy ids → one base entry with
+ * per-effort variant payloads).
  */
 import { describe, expect, test } from "bun:test";
 import { listModels, resolveModel, resolveRegistry, buildModelRecord } from "../src/models";
@@ -16,14 +18,14 @@ const DISCOVERED_SAMPLE = [
 ];
 
 describe("unit: models — registry, merge, passthrough, pool hint", () => {
-	test("R8.s1: registry order — agy/default FIRST, then live-verified IDs", () => {
+	// DELIBERATE CHANGE (effort-variant collapse): the static fallback list
+	// now routes through the same collapse as live discovery (mirroring the
+	// pi-adapter), so the three suffixed Gemini tiers surface as ONE base
+	// entry "agy/gemini-3.8-flash" with high/medium/low variants instead of
+	// three flat entries.
+	test("R8.s1: registry order — agy/default FIRST, suffixed tiers collapsed into the base", () => {
 		const ids = listModels().map((m) => m.id);
-		expect(ids).toEqual([
-			"agy/default",
-			"agy/gemini-3.8-flash-high",
-			"agy/gemini-3.8-flash-medium",
-			"agy/gemini-3.8-flash-low",
-		]);
+		expect(ids).toEqual(["agy/default", "agy/gemini-3.8-flash"]);
 	});
 
 	test("R8.s2: agy/default maps to NO --model argument", () => {
@@ -48,21 +50,28 @@ describe("unit: models — registry, merge, passthrough, pool hint", () => {
 	});
 
 	test("config merge: overrides keep their registry position, extensions append", () => {
+		// DELIBERATE CHANGE: with collapsing, the override key is the collapsed
+		// BASE id; a legacy suffixed key extends flat at the end (pinned-config
+		// back-compat path), and the extension case is unchanged.
 		const merged = listModels({
-			"agy/gemini-3.8-flash-high": { name: "Fast lane", limit: { context: 1000, output: 500 } },
+			"agy/gemini-3.8-flash": { name: "Fast lane", limit: { context: 1000, output: 500 } },
+			"agy/gemini-3.8-flash-high": { name: "Legacy pin" },
 			"agy/mistral-large": { name: "Mistral" },
 		});
 		expect(merged.map((m) => m.id)).toEqual([
 			"agy/default",
+			"agy/gemini-3.8-flash",
+			// Extensions append in CONFIG insertion order: the legacy suffixed
+			// pin (flat, full-id modelArg) then the unknown extension.
 			"agy/gemini-3.8-flash-high",
-			"agy/gemini-3.8-flash-medium",
-			"agy/gemini-3.8-flash-low",
 			"agy/mistral-large",
 		]);
 		const overridden = merged[1];
 		expect(overridden.name).toBe("Fast lane");
 		expect(overridden.limit).toEqual({ context: 1000, output: 500 });
+		// modelArg of the collapsed base is preserved through the override.
 		expect(overridden.modelArg).toBe("gemini-3.8-flash-high");
+		expect(overridden.variants).toBeDefined();
 		expect(resolveModel("agy/mistral-large", { "agy/mistral-large": { name: "Mistral" } }).modelArg).toBe(
 			"mistral-large",
 		);
@@ -78,17 +87,19 @@ describe("unit: models — registry, merge, passthrough, pool hint", () => {
 });
 
 describe("unit: models — dynamic registry via resolveRegistry (discovery merge)", () => {
-	test("merge order: agy/default first, then discovered models with display names and modelArg", () => {
+	// DELIBERATE CHANGE (effort-variant collapse): suffixed discovered ids
+	// surface as their BASE model (variants carry the full agy ids), bare ids
+	// stay flat.
+	test("merge order: agy/default first, suffixed ids collapsed to bases, bare ids flat", () => {
 		const reg = resolveRegistry({}, DISCOVERED_SAMPLE);
 		expect(reg.map((m) => m.id)).toEqual([
 			"agy/default",
-			"agy/gemini-3.8-flash-high",
-			"agy/gemini-3.1-pro-high",
+			"agy/gemini-3.8-flash",
+			"agy/gemini-3.1-pro",
 			"agy/claude-sonnet-4-6",
 		]);
 		expect(reg[0].modelArg).toBeUndefined(); // agy/default → NO --model (R8.s2)
 		expect(reg[1].name).toBe("Gemini 3.8 Flash (High)");
-		expect(reg[1].modelArg).toBe("gemini-3.8-flash-high");
 	});
 
 	test("undefined or empty discovery falls back to the static builtin list", () => {
@@ -100,19 +111,19 @@ describe("unit: models — dynamic registry via resolveRegistry (discovery merge
 	test("config models override discovered entries IN PLACE (wins over discovery) and extend at the end", () => {
 		const reg = resolveRegistry(
 			{
-				"agy/gemini-3.1-pro-high": { name: "Pro lane", limit: { context: 10_000, output: 1_000 } },
+				"agy/gemini-3.1-pro": { name: "Pro lane", limit: { context: 10_000, output: 1_000 } },
 				"agy/mistral-large": { name: "Mistral" },
 			},
 			DISCOVERED_SAMPLE,
 		);
 		expect(reg.map((m) => m.id)).toEqual([
 			"agy/default",
-			"agy/gemini-3.8-flash-high",
-			"agy/gemini-3.1-pro-high",
+			"agy/gemini-3.8-flash",
+			"agy/gemini-3.1-pro",
 			"agy/claude-sonnet-4-6",
 			"agy/mistral-large",
 		]);
-		const pro = reg.find((m) => m.id === "agy/gemini-3.1-pro-high");
+		const pro = reg.find((m) => m.id === "agy/gemini-3.1-pro");
 		expect(pro?.name).toBe("Pro lane");
 		expect(pro?.limit).toEqual({ context: 10_000, output: 1_000 });
 		expect(pro?.modelArg).toBe("gemini-3.1-pro-high");
@@ -132,14 +143,15 @@ describe("unit: models — dynamic registry via resolveRegistry (discovery merge
 		expect(new Set(ids).size).toBe(ids.length);
 		expect(reg[0].id).toBe("agy/default");
 		expect(reg[0].name).toBe("default");
-		const flash = reg.filter((m) => m.id === "agy/gemini-3.8-flash-high");
+		const flash = reg.filter((m) => m.id === "agy/gemini-3.8-flash");
 		expect(flash).toHaveLength(1);
 		expect(flash[0].name).toBe("A");
 	});
 
 	test("pool hint still routes discovered ids through the engine's poolForModel", () => {
 		const reg = resolveRegistry({}, DISCOVERED_SAMPLE);
-		expect(reg.find((m) => m.id === "agy/gemini-3.8-flash-high")?.pool).toBe("gemini");
+		// Collapsed base: modelArg fallback is the full (gemini-prefixed) id.
+		expect(reg.find((m) => m.id === "agy/gemini-3.8-flash")?.pool).toBe("gemini");
 		expect(reg.find((m) => m.id === "agy/claude-sonnet-4-6")?.pool).toBe("3p");
 	});
 });
@@ -149,8 +161,8 @@ describe("unit: models — host model record for the provider.models hook (Model
 		const record = buildModelRecord(resolveRegistry({}, DISCOVERED_SAMPLE), "agy");
 		expect(Object.keys(record)).toEqual([
 			"default",
-			"gemini-3.8-flash-high",
-			"gemini-3.1-pro-high",
+			"gemini-3.8-flash",
+			"gemini-3.1-pro",
 			"claude-sonnet-4-6",
 		]);
 		const m = record["claude-sonnet-4-6"];
@@ -180,5 +192,98 @@ describe("unit: models — host model record for the provider.models hook (Model
 		);
 		const record = buildModelRecord(reg, "agy");
 		expect(record["claude-sonnet-4-6"].limit).toEqual({ context: 50_000, output: 4096 });
+	});
+});
+
+describe("unit: models — effort-variant collapse (suffixed ids → base entries with variants)", () => {
+	/** Mirrors the real 14-model discovery: effort suffixes, bare ids, and a
+	 * "-thinking"/"-medium" id that exercises the suffix edge cases. */
+	const FULL_DISCOVERY = [
+		{ id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+		{ id: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)" },
+		{ id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+		{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+		{ id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)" },
+		{ id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
+	];
+
+	test("suffixed ids collapse into ONE base entry; bare ids and non-effort suffixes stay flat", () => {
+		const reg = resolveRegistry({}, FULL_DISCOVERY);
+		expect(reg.map((m) => m.id)).toEqual([
+			"agy/default",
+			"agy/gemini-3.8-flash",
+			"agy/claude-sonnet-4-6",
+			"agy/claude-opus-4-6-thinking",
+			// "-medium" IS an effort suffix: gpt-oss-120b-medium collapses too.
+			"agy/gpt-oss-120b",
+		]);
+	});
+
+	test("variant payloads carry the full agy id as agyModelId (--model channel)", () => {
+		const base = resolveRegistry({}, FULL_DISCOVERY).find((m) => m.id === "agy/gemini-3.8-flash");
+		expect(base?.variants).toEqual({
+			high: { agyModelId: "gemini-3.8-flash-high" },
+			medium: { agyModelId: "gemini-3.8-flash-medium" },
+			low: { agyModelId: "gemini-3.8-flash-low" },
+		});
+	});
+
+	test("bare and non-effort-suffix ids are flat: no variants key", () => {
+		const reg = resolveRegistry({}, FULL_DISCOVERY);
+		expect(reg.find((m) => m.id === "agy/claude-sonnet-4-6")?.variants).toBeUndefined();
+		expect(reg.find((m) => m.id === "agy/claude-opus-4-6-thinking")?.variants).toBeUndefined();
+	});
+
+	test("agy/default stays first with modelArg undefined and no variants", () => {
+		const reg = resolveRegistry({}, FULL_DISCOVERY);
+		expect(reg[0].id).toBe("agy/default");
+		expect(reg[0].modelArg).toBeUndefined();
+		expect(reg[0].variants).toBeUndefined();
+	});
+
+	test("collapsed base modelArg falls back to the HIGHEST discovered effort (no bare agy id exists)", () => {
+		const reg = resolveRegistry({}, FULL_DISCOVERY);
+		expect(reg.find((m) => m.id === "agy/gemini-3.8-flash")?.modelArg).toBe("gemini-3.8-flash-high");
+		// Partial efforts: high missing → medium wins; only low → low.
+		const partial = resolveRegistry(
+			{},
+			[
+				{ id: "x-low", name: "X (Low)" },
+				{ id: "y-medium", name: "Y (Medium)" },
+			],
+		);
+		expect(partial.find((m) => m.id === "agy/x")?.modelArg).toBe("x-low");
+		expect(partial.find((m) => m.id === "agy/y")?.modelArg).toBe("y-medium");
+	});
+
+	test("backward compat: suffixed ids stay DIRECTLY selectable via resolveModel (passthrough)", () => {
+		// The picker no longer lists flat suffixed entries, but a session (or
+		// pinned config) holding agy/gemini-3.8-flash-high must keep working.
+		const m = resolveModel("agy/gemini-3.8-flash-high");
+		expect(m.id).toBe("agy/gemini-3.8-flash-high");
+		expect(m.modelArg).toBe("gemini-3.8-flash-high");
+		expect(m.pool).toBe("gemini");
+		// Bare suffixed id without the agy/ prefix resolves identically.
+		expect(resolveModel("gemini-3.8-flash-medium").modelArg).toBe("gemini-3.8-flash-medium");
+	});
+
+	test("clean picker: flat suffixed entries do NOT appear in the host record keys", () => {
+		const record = buildModelRecord(resolveRegistry({}, FULL_DISCOVERY), "agy");
+		const keys = Object.keys(record);
+		expect(keys).toEqual(["default", "gemini-3.8-flash", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b"]);
+		expect(keys.some((k) => k.endsWith("-high") || k.endsWith("-medium") || k.endsWith("-low"))).toBe(false);
+	});
+
+	test("buildModelRecord emits the variants payload on collapsed bases only", () => {
+		const record = buildModelRecord(resolveRegistry({}, FULL_DISCOVERY), "agy");
+		expect(record["gemini-3.8-flash"].variants).toEqual({
+			high: { agyModelId: "gemini-3.8-flash-high" },
+			medium: { agyModelId: "gemini-3.8-flash-medium" },
+			low: { agyModelId: "gemini-3.8-flash-low" },
+		});
+		expect(record["gpt-oss-120b"].variants).toEqual({
+			medium: { agyModelId: "gpt-oss-120b-medium" },
+		});
+		expect(record["claude-sonnet-4-6"].variants).toBeUndefined();
 	});
 });

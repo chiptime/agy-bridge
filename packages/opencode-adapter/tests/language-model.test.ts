@@ -14,7 +14,15 @@
 import { describe, expect, test } from "bun:test";
 import { APICallError, type LanguageModelV3, type SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { AgyEnvelope } from "agy-bridge-engine";
-import { AgyLanguageModel, formatStepUpdate, normalizeResponseText } from "../src/language-model";
+import {
+	AgyLanguageModel,
+	extractToolParam,
+	formatStepUpdate,
+	normalizeResponseText,
+	readSessionContext,
+	readVariant,
+	sanitizePreview,
+} from "../src/language-model";
 import { messageHashes, type PromptMessage } from "../src/messages";
 import { TurnError, type TurnDeps, type TurnRequest, type TurnResult } from "../src/turn";
 import type { SessionEntry, SessionStore } from "../src/session-store";
@@ -123,8 +131,9 @@ async function drain(
 	model: AgyLanguageModel,
 	providerOptions?: SharedV3ProviderOptions,
 	signal?: AbortSignal,
+	headers?: Record<string, string | undefined>,
 ) {
-	const { stream } = await model.doStream({ prompt: PROMPT, providerOptions, abortSignal: signal });
+	const { stream } = await model.doStream({ prompt: PROMPT, providerOptions, abortSignal: signal, headers });
 	const reader = stream.getReader();
 	const parts: Array<Record<string, unknown>> = [];
 	for (;;) {
@@ -231,8 +240,39 @@ describe("unit: language-model — V3 mapping (R4, D5/D6, R6)", () => {
 		});
 		await drain(freshModel);
 		expect(freshSeen[0].req.prompt).toBe("Be brief.\n\nsecond question");
-		// No providerOptions.agy → session key falls back to a generated id.
+		// No providerOptions.agy and no headers → session key falls back to a generated id.
 		expect(freshSeen[0].req.sessionId).toMatch(/^[0-9a-f-]{8,}$/);
+
+		// Opencode double-nested providerOptions shape: { agy: { agy: { sessionId, worktree } } }
+		const nestedSeen: Seen[] = [];
+		const nestedModel = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			config: resolveConfig({ scratchRoot: "/tmp" }),
+			store: fakeStore().store,
+			run: async (deps, req) => {
+				nestedSeen.push({ deps, req });
+				return fakeRunner({ envelope: OK_ENVELOPE })(deps, req);
+			},
+		});
+		await drain(nestedModel, { agy: { agy: { sessionId: "sess-nested-42", worktree: "/wt/nested" } } });
+		expect(nestedSeen[0].req.sessionId).toBe("sess-nested-42");
+		expect(nestedSeen[0].deps.worktree).toBe("/wt/nested");
+
+		// Host header fallback: x-session-id without providerOptions
+		const headerSeen: Seen[] = [];
+		const headerModel = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			config: resolveConfig({ scratchRoot: "/tmp" }),
+			store: fakeStore().store,
+			run: async (deps, req) => {
+				headerSeen.push({ deps, req });
+				return fakeRunner({ envelope: OK_ENVELOPE })(deps, req);
+			},
+		});
+		await drain(headerModel, undefined, undefined, { "x-session-id": "ses_from_header" });
+		expect(headerSeen[0].req.sessionId).toBe("ses_from_header");
 	});
 
 	test("R4: empty response still finishes (stop, all-undefined usage), no text parts", async () => {
@@ -375,7 +415,7 @@ describe("unit: language-model — V3 mapping (R4, D5/D6, R6)", () => {
 		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map((d) => d.delta);
 		expect(deltas).toEqual([
 			"▸ prompt\n",
-			"▸ tool view_file…\n",
+			"▸ tool view_file (path: a.ts)…\n",
 			"✓ view_file (0.3s)\n",
 			"✗ bash failed\n",
 			"● response (3.2s)\n",
@@ -387,22 +427,143 @@ describe("unit: language-model — V3 mapping (R4, D5/D6, R6)", () => {
 
 /** Table rows pin the full output contract of formatStepUpdate. */
 const FORMAT_CASES: Array<{ name: string; step: Record<string, unknown>; want: string }> = [
-	{ name: "tool ACTIVE", step: { step_type: "tool", state: "ACTIVE", tool_name: "view_file" }, want: "▸ tool view_file…\n" },
+	{ name: "tool ACTIVE without tool_info", step: { step_type: "tool", state: "ACTIVE", tool_name: "view_file" }, want: "▸ tool view_file…\n" },
+	{ name: "tool ACTIVE with path parameter", step: { step_type: "tool", state: "ACTIVE", tool_name: "view_file", tool_info: { path: "src/index.ts" } }, want: "▸ tool view_file (path: src/index.ts)…\n" },
+	{ name: "tool ACTIVE with command parameter", step: { step_type: "tool", state: "ACTIVE", tool_name: "bash", tool_info: { command: "cargo test" } }, want: "▸ tool bash (command: cargo test)…\n" },
+	{ name: "tool ACTIVE with multiline sanitized parameter", step: { step_type: "tool", state: "ACTIVE", tool_name: "bash", tool_info: { command: "npm test\n--watch\n--coverage" } }, want: "▸ tool bash (command: npm test --watch --coverage)…\n" },
+	{ name: "tool ACTIVE without parameter in tool_info", step: { step_type: "tool", state: "ACTIVE", tool_name: "ls", tool_info: {} }, want: "▸ tool ls…\n" },
 	{ name: "tool DONE rounds duration to 1 decimal", step: { step_type: "tool", state: "DONE", tool_name: "view_file", duration_seconds: 0.28 }, want: "✓ view_file (0.3s)\n" },
+	{ name: "tool DONE with parameter and duration", step: { step_type: "tool", state: "DONE", tool_name: "view_file", tool_info: { path: "a.ts" }, duration_seconds: 0.28 }, want: "✓ view_file (path: a.ts) (0.3s)\n" },
 	{ name: "tool DONE without duration", step: { step_type: "tool", state: "DONE", tool_name: "bash" }, want: "✓ bash\n" },
+	{ name: "tool DONE with parameter without duration", step: { step_type: "tool", state: "DONE", tool_name: "view_file", tool_info: { path: "a.ts" } }, want: "✓ view_file (path: a.ts)\n" },
 	{ name: "tool DONE with whole-number duration", step: { step_type: "tool", state: "DONE", tool_name: "bash", duration_seconds: 4 }, want: "✓ bash (4.0s)\n" },
-	{ name: "tool ERROR", step: { step_type: "tool", state: "ERROR", tool_name: "bash" }, want: "✗ bash failed\n" },
+	{ name: "tool ERROR without parameter", step: { step_type: "tool", state: "ERROR", tool_name: "bash" }, want: "✗ bash failed\n" },
+	{ name: "tool ERROR with parameter", step: { step_type: "tool", state: "ERROR", tool_name: "bash", tool_info: { command: "cargo test" } }, want: "✗ bash (command: cargo test) failed\n" },
 	{ name: "tool ACTIVE without tool_name falls back", step: { step_type: "tool", state: "ACTIVE", step_index: 2 }, want: '{"step_type":"tool","state":"ACTIVE","step_index":2}\n' },
 	{ name: "tool with unknown state falls back", step: { step_type: "tool", state: "WEIRD", tool_name: "bash" }, want: '{"step_type":"tool","state":"WEIRD","tool_name":"bash"}\n' },
 	{ name: "agent_response DONE with duration", step: { step_type: "agent_response", state: "DONE", duration_seconds: 3.17 }, want: "● response (3.2s)\n" },
 	{ name: "agent_response DONE without duration", step: { step_type: "agent_response", state: "DONE" }, want: "● response\n" },
-	{ name: "agent_response other states show progress", step: { step_type: "agent_response", state: "ACTIVE" }, want: "▸ response…\n" },
+	{ name: "agent_response ACTIVE with text_delta", step: { step_type: "agent_response", state: "ACTIVE", text_delta: "Thinking about the problem" }, want: "▸ response: Thinking about the problem\n" },
+	{ name: "agent_response ACTIVE with multiline text_delta", step: { step_type: "agent_response", state: "ACTIVE", text_delta: "Line 1\r\nLine 2" }, want: "▸ response: Line 1 Line 2\n" },
+	{ name: "agent_response ACTIVE with empty text_delta", step: { step_type: "agent_response", state: "ACTIVE", text_delta: "" }, want: "▸ response…\n" },
+	{ name: "agent_response ACTIVE with whitespace-only text_delta", step: { step_type: "agent_response", state: "ACTIVE", text_delta: "   \n\t  " }, want: "▸ response…\n" },
+	{ name: "agent_response other states show progress without text_delta", step: { step_type: "agent_response", state: "ACTIVE" }, want: "▸ response…\n" },
 	{ name: "user_input is a prompt line regardless of state", step: { step_type: "user_input", state: "DONE" }, want: "▸ prompt\n" },
 	{ name: "unknown step_type falls back", step: { step_type: "mystery", step_index: 9 }, want: '{"step_type":"mystery","step_index":9}\n' },
 	{ name: "missing step_type falls back", step: { state: "ACTIVE" }, want: '{"state":"ACTIVE"}\n' },
 	{ name: "non-numeric duration treated as missing", step: { step_type: "tool", state: "DONE", tool_name: "x", duration_seconds: "0.5" }, want: "✓ x\n" },
+	{ name: "tool DONE with NaN duration", step: { step_type: "tool", state: "DONE", tool_name: "grep", duration_seconds: NaN }, want: "✓ grep\n" },
+	{ name: "tool DONE with Infinity duration", step: { step_type: "tool", state: "DONE", tool_name: "grep", duration_seconds: Infinity }, want: "✓ grep\n" },
+	{ name: "agent_response DONE with NaN duration", step: { step_type: "agent_response", state: "DONE", duration_seconds: NaN }, want: "● response\n" },
+	{ name: "agent_response DONE with Infinity duration", step: { step_type: "agent_response", state: "DONE", duration_seconds: Infinity }, want: "● response\n" },
 	{ name: "empty record falls back to the placeholder", step: {}, want: "(step update)\n" },
 ];
+
+describe("unit: sanitizePreview — single-line whitespace collapse and truncation", () => {
+	test("normalizes multiple spaces, tabs, and CRLF/LF linebreaks into single spaces", () => {
+		expect(sanitizePreview("hello   world")).toBe("hello world");
+		expect(sanitizePreview("hello\tworld")).toBe("hello world");
+		expect(sanitizePreview("hello\r\nworld\nagain")).toBe("hello world again");
+		expect(sanitizePreview("\t  a \r\n b \t c  ")).toBe("a b c");
+	});
+
+	test("trims leading and trailing whitespace", () => {
+		expect(sanitizePreview("   trimmed   ")).toBe("trimmed");
+		expect(sanitizePreview("\n\t  trimmed  \r\n ")).toBe("trimmed");
+	});
+
+	test("returns empty string for empty or whitespace-only input", () => {
+		expect(sanitizePreview("")).toBe("");
+		expect(sanitizePreview("   ")).toBe("");
+		expect(sanitizePreview("\r\n\t  ")).toBe("");
+	});
+
+	test("truncates with ellipsis when exceeding custom maxLen", () => {
+		expect(sanitizePreview("1234567890", 5)).toBe("12345…");
+		expect(sanitizePreview("12345", 5)).toBe("12345");
+		expect(sanitizePreview("1234", 5)).toBe("1234");
+	});
+
+	test("truncates with ellipsis when exceeding default maxLen (60)", () => {
+		const longText = "a".repeat(70);
+		expect(sanitizePreview(longText)).toBe(`${"a".repeat(60)}…`);
+		const exactText = "a".repeat(60);
+		expect(sanitizePreview(exactText)).toBe(exactText);
+	});
+});
+
+describe("unit: extractToolParam — priority-ordered tool parameter extraction", () => {
+	test("asserts candidate priority: path > command > pattern > query > url", () => {
+		expect(extractToolParam({ path: "src/index.ts", command: "cat file" })).toBe("path: src/index.ts");
+		expect(extractToolParam({ command: "grep foo", pattern: "foo" })).toBe("command: grep foo");
+		expect(extractToolParam({ pattern: "regex.*", query: "sql query" })).toBe("pattern: regex.*");
+		expect(extractToolParam({ query: "find all", url: "https://example.com" })).toBe("query: find all");
+		expect(extractToolParam({ url: "https://example.com/api" })).toBe("url: https://example.com/api");
+	});
+
+	test("sanitizes whitespace and collapses linebreaks in extracted value", () => {
+		expect(extractToolParam({ command: "cargo test\n--all\n--release" })).toBe("command: cargo test --all --release");
+	});
+
+	test("truncates overly long parameter strings with ellipsis", () => {
+		const longCmd = "a".repeat(100);
+		expect(extractToolParam({ command: longCmd })).toBe(`command: ${"a".repeat(60)}…`);
+	});
+
+	test("skips empty or whitespace-only values and falls through to next candidate key", () => {
+		expect(extractToolParam({ path: "", command: "cargo test" })).toBe("command: cargo test");
+		expect(extractToolParam({ path: "   ", command: "cargo test" })).toBe("command: cargo test");
+		expect(extractToolParam({ path: "\t\r\n", pattern: "needle" })).toBe("pattern: needle");
+	});
+
+	test("defensively returns undefined for non-candidate keys, non-objects, and primitives", () => {
+		expect(extractToolParam({})).toBeUndefined();
+		expect(extractToolParam({ other: "value" })).toBeUndefined();
+		expect(extractToolParam({ path: 123 })).toBeUndefined();
+		expect(extractToolParam({ path: null })).toBeUndefined();
+		expect(extractToolParam(null)).toBeUndefined();
+		expect(extractToolParam(undefined)).toBeUndefined();
+		expect(extractToolParam("string")).toBeUndefined();
+		expect(extractToolParam(42)).toBeUndefined();
+	});
+
+	test("defensively returns undefined on throwing getters", () => {
+		const hostile = {
+			get path(): string {
+				throw new Error("getter exploded");
+			},
+		};
+		expect(() => extractToolParam(hostile)).not.toThrow();
+		expect(extractToolParam(hostile)).toBeUndefined();
+	});
+
+	test("extracts parameters from real agy tool_info shapes (nested parameters with PascalCase keys)", () => {
+		expect(
+			extractToolParam({
+				name: "view_file",
+				parameters: { AbsolutePath: "/tmp/test.txt" },
+			}),
+		).toBe("path: /tmp/test.txt");
+		expect(
+			extractToolParam({
+				name: "run_command",
+				parameters: { CommandLine: "bun test" },
+			}),
+		).toBe("command: bun test");
+		expect(
+			extractToolParam({
+				name: "replace_file_content",
+				parameters: { TargetFile: "/src/app.ts" },
+			}),
+		).toBe("path: /src/app.ts");
+		expect(
+			extractToolParam({
+				name: "find_by_name",
+				parameters: { Pattern: "*.ts" },
+			}),
+		).toBe("pattern: *.ts");
+	});
+});
 
 describe("unit: formatStepUpdate — readable progress lines", () => {
 	test("table: every contract row renders exactly one \\n-terminated line", () => {
@@ -420,6 +581,46 @@ describe("unit: formatStepUpdate — readable progress lines", () => {
 		} as unknown as Record<string, unknown>;
 		expect(() => formatStepUpdate(hostile)).not.toThrow();
 		expect(formatStepUpdate(hostile)).toBe("(step update)\n");
+	});
+
+	test("never throws: throwing getter on tool_info degrades to the placeholder", () => {
+		const hostile = {
+			step_type: "tool",
+			state: "ACTIVE",
+			tool_name: "bash",
+			get tool_info(): unknown {
+				throw new Error("tool_info boom");
+			},
+		} as unknown as Record<string, unknown>;
+		expect(() => formatStepUpdate(hostile)).not.toThrow();
+		expect(formatStepUpdate(hostile)).toBe("(step update)\n");
+	});
+
+	test("never throws: throwing getter on text_delta degrades to the placeholder", () => {
+		const hostile = {
+			step_type: "agent_response",
+			state: "ACTIVE",
+			get text_delta(): unknown {
+				throw new Error("text_delta boom");
+			},
+		} as unknown as Record<string, unknown>;
+		expect(() => formatStepUpdate(hostile)).not.toThrow();
+		expect(formatStepUpdate(hostile)).toBe("(step update)\n");
+	});
+
+	test("never throws: circular references in step degrade to the placeholder", () => {
+		const circular: Record<string, unknown> = { step_type: "mystery" };
+		circular.self = circular;
+		expect(() => formatStepUpdate(circular)).not.toThrow();
+		expect(formatStepUpdate(circular)).toBe("(step update)\n");
+	});
+
+	test("never throws: circular references in tool_info degrade gracefully without throwing", () => {
+		const circularInfo: Record<string, unknown> = {};
+		circularInfo.self = circularInfo;
+		const step = { step_type: "tool", state: "ACTIVE", tool_name: "bash", tool_info: circularInfo };
+		expect(() => formatStepUpdate(step)).not.toThrow();
+		expect(formatStepUpdate(step)).toBe("▸ tool bash…\n");
 	});
 });
 
@@ -540,3 +741,226 @@ describe("unit: normalizeResponseText — v1.1 CRLF + trailing-whitespace normal
 		expect(blankParts.map((p) => p["type"])).toEqual(["stream-start", "finish"]);
 	});
 });
+
+describe("unit: readSessionContext — session & worktree resolution (plugin + host shapes)", () => {
+	test("reads direct providerOptions.agy { sessionId, worktree }", () => {
+		expect(readSessionContext({ agy: { sessionId: "ses-1", worktree: "/wt/1" } })).toEqual({
+			sessionId: "ses-1",
+			worktree: "/wt/1",
+		});
+	});
+
+	test("reads opencode runtime double-nested providerOptions.agy.agy { sessionId, worktree }", () => {
+		expect(readSessionContext({ agy: { agy: { sessionId: "ses-2", worktree: "/wt/2" } } })).toEqual({
+			sessionId: "ses-2",
+			worktree: "/wt/2",
+		});
+	});
+
+	test("falls back to host headers when providerOptions has no session", () => {
+		expect(readSessionContext(undefined, { "x-session-id": "ses-hdr" })).toEqual({
+			sessionId: "ses-hdr",
+			worktree: undefined,
+		});
+		expect(readSessionContext(undefined, { "X-Session-Id": "ses-hdr-caps" })).toEqual({
+			sessionId: "ses-hdr-caps",
+			worktree: undefined,
+		});
+		expect(readSessionContext(undefined, { "x-session-affinity": "ses-affinity" })).toEqual({
+			sessionId: "ses-affinity",
+			worktree: undefined,
+		});
+	});
+
+	test("direct provider options takes priority over headers", () => {
+		expect(
+			readSessionContext(
+				{ agy: { sessionId: "ses-opts" } },
+				{ "x-session-id": "ses-hdr" },
+			),
+		).toEqual({
+			sessionId: "ses-opts",
+			worktree: undefined,
+		});
+	});
+
+	test("empty strings and non-string types degrade to undefined", () => {
+		expect(readSessionContext({ agy: { sessionId: "", worktree: 123 as unknown as string } })).toEqual({
+			sessionId: undefined,
+			worktree: undefined,
+		});
+		expect(readSessionContext({ agy: null } as unknown as Parameters<typeof readSessionContext>[0])).toEqual({
+			sessionId: undefined,
+			worktree: undefined,
+		});
+		expect(readSessionContext(undefined, { "x-session-id": "" })).toEqual({
+			sessionId: undefined,
+			worktree: undefined,
+		});
+	});
+});
+
+describe("unit: readVariant — effort-variant selection channel", () => {
+	test("reads providerOptions.agy.variant (direct plugin channel)", () => {
+		expect(readVariant({ providerOptions: { agy: { variant: "low" } } })).toBe("low");
+	});
+
+	test("reads nested providerOptions.agy.agy.variant (opencode runtime wrap)", () => {
+		expect(readVariant({ providerOptions: { agy: { agy: { variant: "medium" } } } })).toBe("medium");
+	});
+
+	test("reads a top-level options field named variant", () => {
+		expect(readVariant({ variant: "high" } as Parameters<typeof readVariant>[0])).toBe("high");
+	});
+
+	test("precedence: direct providerOptions > nested wrap > top-level field", () => {
+		expect(
+			readVariant({
+				providerOptions: { agy: { variant: "low", agy: { variant: "medium" } } },
+				variant: "high",
+			} as Parameters<typeof readVariant>[0]),
+		).toBe("low");
+		expect(
+			readVariant({ providerOptions: { agy: { agy: { variant: "medium" } } }, variant: "high" } as Parameters<
+				typeof readVariant
+			>[0]),
+		).toBe("medium");
+	});
+
+	test("non-string and empty values degrade to undefined", () => {
+		expect(readVariant({ providerOptions: { agy: { variant: 3 } } } as unknown as Parameters<
+			typeof readVariant
+		>[0])).toBeUndefined();
+		expect(readVariant({ providerOptions: { agy: { variant: "" } } })).toBeUndefined();
+		expect(readVariant({ providerOptions: { agy: null } } as unknown as Parameters<typeof readVariant>[0])).toBeUndefined();
+		expect(readVariant({ providerOptions: { agy: { variant: null } } } as unknown as Parameters<
+			typeof readVariant
+		>[0])).toBeUndefined();
+	});
+
+	test("undefined options degrade to undefined (never throws)", () => {
+		expect(readVariant(undefined)).toBeUndefined();
+		expect(readVariant({})).toBeUndefined();
+	});
+});
+
+describe("unit: language-model — per-call variant → modelArg resolution", () => {
+	/** Model on a collapsed base: registry modelArg fallback = highest effort. */
+	function makeVariantModel(
+		modelId: string,
+		run: FakeRun,
+	): { model: AgyLanguageModel; seen: Seen[] } {
+		const seen: Seen[] = [];
+		const model = new AgyLanguageModel({
+			provider: "agy",
+			modelId,
+			config: resolveConfig({ scratchRoot: "/tmp" }),
+			store: fakeStore().store,
+			run: async (deps, req) => {
+				seen.push({ deps, req });
+				return fakeRunner(run)(deps, req);
+			},
+		});
+		return { model, seen };
+	}
+
+	test("selected variant overrides the fallback modelArg at doStream time", async () => {
+		// agy/gemini-3.8-flash collapses; constructor fallback = "gemini-3.8-flash-high".
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { sessionId: "s", variant: "low" } });
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-low");
+	});
+
+	test("nested providerOptions.agy.agy.variant is honored end-to-end", async () => {
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { agy: { sessionId: "s", variant: "medium" } } });
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-medium");
+	});
+
+	test("top-level options.variant is honored end-to-end", async () => {
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		const { stream } = await model.doStream({
+			prompt: PROMPT,
+			variant: "low",
+		} as Parameters<AgyLanguageModel["doStream"]>[0]);
+		const reader = stream.getReader();
+		for (;;) {
+			const { done } = await reader.read();
+			if (done) break;
+		}
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-low");
+	});
+
+	test("UNKNOWN variant falls back to the documented default: highest discovered effort", async () => {
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { sessionId: "s", variant: "turbo" } });
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-high");
+	});
+
+	test("NO variant → collapsed base keeps its highest-effort fallback modelArg", async () => {
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { sessionId: "s" } });
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-high");
+	});
+
+	test("variant on a FLAT model never changes its modelArg", async () => {
+		const { model, seen } = makeVariantModel("agy/claude-sonnet-4-6", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { sessionId: "s", variant: "high" } });
+		expect(seen[0].req.modelArg).toBe("claude-sonnet-4-6");
+	});
+
+	test("variant on agy/default stays modelArg undefined (spawn WITHOUT --model)", async () => {
+		const { model, seen } = makeVariantModel("agy/default", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { sessionId: "s", variant: "high" } });
+		expect(seen[0].req.modelArg).toBeUndefined();
+	});
+
+	test("empty-string variant degrades to the fallback, not an override", async () => {
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { sessionId: "s", variant: "" } });
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-high");
+	});
+
+	test("legacy suffixed modelId keeps its direct modelArg with and without a variant", async () => {
+		// Backward compat: agy/gemini-3.8-flash-low selected directly still
+		// passes the FULL suffixed id; a variant cannot remap it (no variants
+		// on the passthrough entry).
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash-low", { envelope: OK_ENVELOPE });
+		await drain(model, { agy: { sessionId: "s" } });
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-low");
+		await drain(model, { agy: { sessionId: "s", variant: "high" } });
+		expect(seen[1].req.modelArg).toBe("gemini-3.8-flash-low");
+	});
+
+	test("loud fallback: collapsed base with NO selected variant warns on stream-start", async () => {
+		const { model } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		const parts = await drain(model, { agy: { sessionId: "s" } });
+		const start = parts.find((p) => p["type"] === "stream-start") as {
+			warnings?: Array<{ message: string }>;
+		};
+		const messages = (start.warnings ?? []).map((w) => w.message);
+		expect(messages.some((m) => m.includes("effort variants but none was selected"))).toBe(true);
+		expect(messages.some((m) => m.includes("gemini-3.8-flash-high"))).toBe(true);
+	});
+
+	test("loud fallback: UNKNOWN variant warns instead of silently falling back", async () => {
+		const { model } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		const parts = await drain(model, { agy: { sessionId: "s", variant: "banana" } });
+		const start = parts.find((p) => p["type"] === "stream-start") as {
+			warnings?: Array<{ message: string }>;
+		};
+		const messages = (start.warnings ?? []).map((w) => w.message);
+		expect(messages.some((m) => m.includes('unknown variant "banana"'))).toBe(true);
+	});
+
+	test("resolved variant emits no fallback warning (silent success)", async () => {
+		const { model } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		const parts = await drain(model, { agy: { sessionId: "s", variant: "medium" } });
+		const start = parts.find((p) => p["type"] === "stream-start") as {
+			warnings?: Array<{ message: string }>;
+		};
+		const messages = (start.warnings ?? []).map((w) => w.message);
+		expect(messages.some((m) => m.includes("variant"))).toBe(false);
+	});
+});
+

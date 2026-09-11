@@ -5,7 +5,8 @@ turns through the `agy` CLI. opencode keeps its UI and session flow; agy owns
 the conversation, tools, and permissions inside its workdir. Backed by
 `agy-bridge-engine` for spawn, classification, and error semantics. Live agent
 steps (tools, responses) stream into the reasoning panel as readable progress
-lines, e.g. `▸ tool view_file…`, `✓ view_file (0.3s)`.
+lines, e.g. `▸ tool view_file (path: src/index.ts)…`,
+`✓ view_file (path: src/index.ts) (0.3s)`.
 
 **Host pin:** implements `LanguageModelV3` for opencode `>=1.15.0 <2`
 (deps: `@opencode-ai/plugin` 1.18.30, `@ai-sdk/provider` 3.0.8). The provider
@@ -96,6 +97,33 @@ per-message hashes (first 16 hex of sha256 of each forwarded message, in
 
 Responses are CRLF-normalized ( `\r\n` → `\n` ) and trailing whitespace at the
 very end of a response is stripped before it reaches opencode.
+
+## Reasoning progress panel
+
+Live agent steps render as sanitized, single-line progress lines:
+
+- Tool ACTIVE → `▸ tool view_file (path: src/index.ts)…`
+- Tool DONE → `✓ view_file (path: src/index.ts) (0.3s)`
+- Tool ERROR → `✗ view_file (path: src/index.ts) failed`
+- Response ACTIVE with a text delta → `▸ response: <sanitized preview>`;
+  without one → `▸ response…`
+- Response DONE → `● response (10.0s)`
+
+Tool lines carry the first matching `tool_info` key by precedence (`path`,
+`AbsolutePath`, `command`, `pattern`, `query`, `url`, …), rendered as
+`key: value`; response previews collapse newlines and truncate to 60 chars
+(`sanitizePreview` / `extractToolParam`, both exported from
+`language-model.ts`). Rendering is strictly non-throwing: hostile getters,
+circular structures, or unexpected `tool_info` shapes degrade through a
+compact-JSON fallback and a final `(step update)` line — a bad payload can
+never crash the stream.
+
+One-way data flow: the panel is presentation-only. The bridge forwards only
+the last user message text (all opencode history — reasoning parts included —
+is dropped), and agy owns the conversation in its own SQLite history, resumed
+via the stored conversation id. Nothing the panel shows is ever sent back to
+agy, so the upstream KV-cache is unaffected; the only footprint is opencode's
+local session storage on disk, kept small by the truncated one-line format.
 
 ## Errors you will see
 

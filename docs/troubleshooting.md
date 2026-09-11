@@ -60,11 +60,30 @@ the provider id. Use `"default"`, `"gemini-3.8-flash-high"`, … — never
   plugin-registered extras appear once the provider has initialized in the
   session.
 
+## Progress shows blind `▸ response…` lines and tools without parameters
+
+Responses render as a static `▸ response…` per delta and tools as
+`▸ tool view_file…` with no arguments. Cause: the running server cached the
+pre-enrichment dist bundle (before parameterized tool lines and response
+previews shipped). Fix: rebuild (`bun run build` in
+`packages/opencode-adapter`) **and restart opencode** — a running session
+never picks up a rebuilt bundle, even with `dist/` already updated.
+
 ## Progress shows raw JSON instead of readable lines
 
 The running server cached the pre-`formatStepUpdate` module. Rebuild
 (`bun run build` in `packages/opencode-adapter`) and restart opencode —
 ESM caches `dist/provider.js` by URL per process.
+
+## Concerned the reasoning panel content reaches agy (cache/history impact)
+
+It does not; the flow is one-way. The bridge forwards only the last user
+message text (all opencode history, reasoning parts included, is dropped),
+and agy owns the conversation in its own SQLite history, resumed via the
+stored conversation id. The model's KV-cache depends exclusively on the bytes
+agy sends upstream, so panel content cannot break caching (~96% cache hits
+observed in a live resumed session); the only footprint is opencode's local
+session storage, kept small by the sanitized one-line format.
 
 ## The turn timed out (or agy was cut mid-generation)
 

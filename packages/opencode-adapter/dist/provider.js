@@ -607,7 +607,33 @@ function parseStreamLine(line) {
   return out;
 }
 function buildAgyArgs(opts, outputFormat = "json") {
-  const args = ["--print", opts.prompt, "--add-dir", opts.workdir, "--dangerously-skip-permissions"];
+  if (opts.promptViaStdin) {
+    const stdinArgs = [
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--add-dir",
+      opts.workdir,
+      "--dangerously-skip-permissions"
+    ];
+    if (opts.mode !== undefined)
+      stdinArgs.push("--mode", opts.mode);
+    if (opts.resumeConversationId)
+      stdinArgs.push("--conversation", opts.resumeConversationId);
+    if (opts.model)
+      stdinArgs.push("--model", opts.model);
+    return stdinArgs;
+  }
+  const args = [
+    "--print",
+    opts.prompt,
+    "--add-dir",
+    opts.workdir,
+    "--dangerously-skip-permissions"
+  ];
+  if (opts.mode !== undefined)
+    args.push("--mode", opts.mode);
   const secs = Math.max(1, Math.floor((opts.timeoutMs - 1e4) / 1000));
   args.push("--print-timeout", `${secs}s`);
   args.push("--output-format", outputFormat);
@@ -627,8 +653,13 @@ async function runAgyStream(opts) {
     const child = spawnFn(opts.bin, buildAgyArgs(opts, "stream-json"), {
       cwd: opts.workdir,
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: [opts.promptViaStdin ? "pipe" : "ignore", "pipe", "pipe"]
     });
+    if (opts.promptViaStdin) {
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: opts.prompt } }) + `
+`);
+    }
     const logFd = openSync2(opts.logPath ?? `${opts.workdir}/run.log`, "w");
     let log = "";
     let envelope;
@@ -885,10 +916,7 @@ function defaultRunner(bin, timeoutMs) {
     return { stdout: "", exitCode: null, spawnError: "spawn" };
   }
 }
-// src/turn.ts
-import { dirname as dirname2 } from "path";
-
-// src/messages.ts
+// ../engine/src/messages.ts
 import { createHash } from "crypto";
 var SEED_MAX_MESSAGES = 20;
 var SEED_MAX_CHARS = 4000;
@@ -940,12 +968,16 @@ function renderSeed(messages, k = SEED_MAX_MESSAGES) {
 ${body}
 ${SEED_FOOTER}`, warnings };
 }
-function mapMessages(messages, opts) {
+// src/turn.ts
+import { dirname as dirname2 } from "path";
+
+// src/messages.ts
+function mapMessages(messages2, opts) {
   const warnings = [];
-  const systemText = messages.filter((m) => m.role === "system").map((m) => typeof m.content === "string" ? m.content.trim() : "").filter((s) => s !== "").join(`
+  const systemText = messages2.filter((m) => m.role === "system").map((m) => typeof m.content === "string" ? m.content.trim() : "").filter((s) => s !== "").join(`
 
 `);
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const lastUser = [...messages2].reverse().find((m) => m.role === "user");
   let userText = "";
   if (typeof lastUser?.content === "string") {
     userText = lastUser.content;
@@ -1258,28 +1290,75 @@ var DEFAULT_LIMITS = { context: 128000, output: 8192 };
 function model(id, name14, modelArg) {
   return { id, name: name14, modelArg, limit: { ...DEFAULT_LIMITS }, pool: poolForModel(modelArg ?? "") };
 }
-var BUILTIN_MODELS = [
-  model("agy/default", "default"),
-  model("agy/gemini-3.8-flash-high", "gemini-3.8-flash-high", "gemini-3.8-flash-high"),
-  model("agy/gemini-3.8-flash-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-medium"),
-  model("agy/gemini-3.8-flash-low", "gemini-3.8-flash-low", "gemini-3.8-flash-low")
-];
+var EFFORT_SUFFIXES = ["high", "medium", "low"];
+function splitEffort(id) {
+  for (const effort of EFFORT_SUFFIXES) {
+    const suffix = `-${effort}`;
+    if (id.endsWith(suffix) && id.length > suffix.length) {
+      return { base: id.slice(0, -suffix.length), effort };
+    }
+  }
+  return null;
+}
 function normalize(id) {
   return id.startsWith("agy/") ? id.slice("agy/".length) : id;
 }
+var FALLBACK_DISCOVERY = [
+  { id: "gemini-3.8-flash-high", name: "gemini-3.8-flash-high" },
+  { id: "gemini-3.8-flash-medium", name: "gemini-3.8-flash-medium" },
+  { id: "gemini-3.8-flash-low", name: "gemini-3.8-flash-low" }
+];
 function baseRegistry(discovered) {
-  const base = discovered && discovered.length > 0 ? [
-    model("agy/default", "default"),
-    ...discovered.map((d) => model(`agy/${normalize(d.id)}`, d.name, normalize(d.id)))
-  ] : [...BUILTIN_MODELS];
+  const rows = discovered && discovered.length > 0 ? discovered : FALLBACK_DISCOVERY;
+  const registry = [model("agy/default", "default")];
+  const byId = new Map([["agy/default", registry[0]]]);
+  const effortsByBase = new Map;
+  for (const row of rows) {
+    const id = normalize(row.id);
+    if (id === "default" || byId.has(id))
+      continue;
+    const variant = splitEffort(id);
+    if (variant) {
+      const baseId = `agy/${variant.base}`;
+      let base = byId.get(baseId);
+      if (!base) {
+        base = model(baseId, row.name, id);
+        registry.push(base);
+        byId.set(baseId, base);
+      }
+      const efforts = effortsByBase.get(baseId) ?? {};
+      if (efforts[variant.effort] === undefined)
+        efforts[variant.effort] = id;
+      effortsByBase.set(baseId, efforts);
+    } else {
+      const flat = model(`agy/${id}`, row.name, id);
+      registry.push(flat);
+      byId.set(`agy/${id}`, flat);
+    }
+  }
+  for (const [baseId, efforts] of effortsByBase) {
+    const base = byId.get(baseId);
+    if (!base)
+      continue;
+    const fallback = efforts.high ?? efforts.medium ?? efforts.low;
+    if (fallback !== undefined)
+      base.modelArg = fallback;
+    base.pool = poolForModel(base.modelArg ?? "");
+    const variants = {};
+    for (const [effort, agyId] of Object.entries(efforts)) {
+      if (agyId !== undefined)
+        variants[effort] = { agyModelId: agyId };
+    }
+    base.variants = variants;
+  }
   const seen = new Set;
-  return base.filter((m) => seen.has(m.id) ? false : seen.add(m.id));
+  return registry.filter((m) => seen.has(m.id) ? false : seen.add(m.id));
 }
 function resolveRegistry(user = {}, discovered) {
   return applyConfig(baseRegistry(discovered), user);
 }
 function listModels(user = {}) {
-  return applyConfig([...BUILTIN_MODELS], user);
+  return applyConfig(baseRegistry(undefined), user);
 }
 function applyConfig(base, user) {
   const merged = base.map((m) => ({ ...m, limit: { ...m.limit } }));
@@ -1328,23 +1407,49 @@ function buildModelRecord(registry, providerId) {
       status: "active",
       options: {},
       headers: {},
-      release_date: ""
+      release_date: "",
+      ...entry.variants !== undefined ? { variants: entry.variants } : {}
     };
   }
   return record;
 }
 
 // src/language-model.ts
-function readSessionContext(providerOptions) {
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync5 } from "fs";
+import { join as join4 } from "path";
+function probeModel(event, payload) {
+  try {
+    const dir = resolveStateDir();
+    mkdirSync5(dir, { recursive: true });
+    appendFileSync2(join4(dir, "probe-session-context.log"), `${JSON.stringify({ at: new Date().toISOString(), event, payload })}
+`);
+  } catch {}
+}
+function readSessionContext(providerOptions, headers) {
   const agy = providerOptions?.["agy"];
-  if (typeof agy !== "object" || agy === null)
-    return {};
-  const sessionId = agy["sessionId"];
-  const worktree = agy["worktree"];
+  const rec = typeof agy === "object" && agy !== null ? agy : {};
+  const nested = typeof rec["agy"] === "object" && rec["agy"] !== null ? rec["agy"] : {};
+  const rawSessionId = rec["sessionId"] ?? nested["sessionId"] ?? headers?.["x-session-id"] ?? headers?.["X-Session-Id"] ?? headers?.["x-session-affinity"];
+  const rawWorktree = rec["worktree"] ?? nested["worktree"];
   return {
-    sessionId: typeof sessionId === "string" && sessionId !== "" ? sessionId : undefined,
-    worktree: typeof worktree === "string" && worktree !== "" ? worktree : undefined
+    sessionId: typeof rawSessionId === "string" && rawSessionId !== "" ? rawSessionId : undefined,
+    worktree: typeof rawWorktree === "string" && rawWorktree !== "" ? rawWorktree : undefined
   };
+}
+function readVariant(options) {
+  const rec = typeof options?.providerOptions?.["agy"] === "object" && options.providerOptions?.["agy"] !== null ? options.providerOptions["agy"] : {};
+  const nested = typeof rec["agy"] === "object" && rec["agy"] !== null ? rec["agy"] : {};
+  const raw = rec["variant"] ?? nested["variant"] ?? options?.["variant"];
+  return typeof raw === "string" && raw !== "" ? raw : undefined;
+}
+function resolveVariantModelArg(entry, variant) {
+  if (variant !== undefined) {
+    const payload = entry.variants?.[variant];
+    if (typeof payload?.agyModelId === "string" && payload.agyModelId !== "") {
+      return payload.agyModelId;
+    }
+  }
+  return entry.modelArg;
 }
 var EMPTY_USAGE = {
   inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
@@ -1410,6 +1515,58 @@ function fallbackSummary(step) {
 function duration1s(durationSeconds) {
   return `${durationSeconds.toFixed(1)}s`;
 }
+function sanitizePreview(text, maxLen = 60) {
+  const collapsed = text.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  if (maxLen !== undefined && collapsed.length > maxLen) {
+    return `${collapsed.slice(0, maxLen)}\u2026`;
+  }
+  return collapsed;
+}
+var CANDIDATE_ENTRIES = [
+  { key: "path", label: "path" },
+  { key: "AbsolutePath", label: "path" },
+  { key: "TargetFile", label: "path" },
+  { key: "file", label: "file" },
+  { key: "command", label: "command" },
+  { key: "CommandLine", label: "command" },
+  { key: "pattern", label: "pattern" },
+  { key: "Pattern", label: "pattern" },
+  { key: "query", label: "query" },
+  { key: "Query", label: "query" },
+  { key: "url", label: "url" },
+  { key: "Url", label: "url" }
+];
+function extractToolParam(toolInfo) {
+  if (typeof toolInfo !== "object" || toolInfo === null)
+    return;
+  try {
+    const rec = toolInfo;
+    const targets = [];
+    const params = rec["parameters"];
+    if (typeof params === "object" && params !== null && !Array.isArray(params)) {
+      targets.push(params);
+    }
+    const args = rec["args"] ?? rec["arguments"];
+    if (typeof args === "object" && args !== null && !Array.isArray(args)) {
+      targets.push(args);
+    }
+    targets.push(rec);
+    for (const target of targets) {
+      for (const { key, label } of CANDIDATE_ENTRIES) {
+        const val = target[key];
+        if (typeof val === "string") {
+          const preview = sanitizePreview(val);
+          if (preview.length > 0) {
+            return `${label}: ${preview}`;
+          }
+        }
+      }
+    }
+    return;
+  } catch {
+    return;
+  }
+}
 function formatStepUpdate(step) {
   try {
     const stepType = step["step_type"];
@@ -1420,15 +1577,18 @@ function formatStepUpdate(step) {
     if (stepType === "tool") {
       if (typeof toolName !== "string" || toolName === "")
         return fallbackSummary(step);
+      const param = extractToolParam(step["tool_info"]);
+      const paramStr = param !== undefined ? ` (${param})` : "";
       if (state === "ACTIVE")
-        return `\u25B8 tool ${toolName}\u2026
+        return `\u25B8 tool ${toolName}${paramStr}\u2026
 `;
-      if (state === "DONE")
-        return duration !== undefined ? `\u2713 ${toolName} (${duration1s(duration)})
-` : `\u2713 ${toolName}
+      if (state === "DONE") {
+        const durStr = duration !== undefined ? ` (${duration1s(duration)})` : "";
+        return `\u2713 ${toolName}${paramStr}${durStr}
 `;
+      }
       if (state === "ERROR")
-        return `\u2717 ${toolName} failed
+        return `\u2717 ${toolName}${paramStr} failed
 `;
       return fallbackSummary(step);
     }
@@ -1437,6 +1597,14 @@ function formatStepUpdate(step) {
         return duration !== undefined ? `\u25CF response (${duration1s(duration)})
 ` : `\u25CF response
 `;
+      const rawDelta = step["text_delta"];
+      if (typeof rawDelta === "string") {
+        const preview = sanitizePreview(rawDelta);
+        if (preview.length > 0) {
+          return `\u25B8 response: ${preview}
+`;
+        }
+      }
       return `\u25B8 response\u2026
 `;
     }
@@ -1472,27 +1640,62 @@ class AgyLanguageModel {
   provider;
   modelId;
   supportedUrls = {};
-  modelArg;
+  entry;
   deps;
   constructor(deps) {
     this.deps = deps;
     this.provider = deps.provider;
     const resolved = resolveModel(deps.modelId, deps.config.models);
     this.modelId = resolved.id;
-    this.modelArg = resolved.modelArg;
+    this.entry = resolved;
   }
   async doStream(options) {
-    const { deps, modelArg } = this;
-    const ctx = readSessionContext(options.providerOptions);
+    const { deps } = this;
+    const variant = readVariant(options);
+    const modelArg = resolveVariantModelArg(this.entry, variant);
+    const variantFallbackNotice = (() => {
+      if (this.entry.variants === undefined)
+        return;
+      if (variant === undefined) {
+        return `model "${this.entry.id}" has effort variants but none was selected; using "${modelArg ?? "agy default"}"`;
+      }
+      if (this.entry.variants[variant] === undefined) {
+        return `unknown variant "${variant}" for model "${this.entry.id}"; using "${modelArg ?? "agy default"}"`;
+      }
+      return;
+    })();
+    const ctx = readSessionContext(options.providerOptions, options.headers);
     const sessionId = ctx.sessionId ?? randomUUID2();
     const incoming = options.prompt;
     const hashes = messageHashes(incoming);
     const entry = await deps.store.getEntry(sessionId);
     const diverged = entry !== undefined && entry.hashes !== undefined && !hashesArePrefix(entry.hashes, hashes);
     const isNewConversation = entry === undefined || diverged;
+    probeModel("decision", {
+      sessionId,
+      usedFallbackUUID: ctx.sessionId === undefined,
+      caller: {
+        managedBy: options.providerOptions?.["agy"]?.["__managed_by"],
+        toolCount: Array.isArray(options.tools) ? options.tools.length : 0,
+        maxOutputTokens: options.maxOutputTokens
+      },
+      messageCount: incoming.length,
+      roles: incoming.map((m) => m?.role),
+      incomingHashes: hashes,
+      storedHashes: entry?.hashes ?? null,
+      storedConversationId: entry?.conversationId ?? null,
+      variant: variant ?? null,
+      modelArg: modelArg ?? null,
+      decision: entry === undefined ? "FRESH (no entry)" : diverged ? "FRESH (DIVERGED)" : "RESUME",
+      isNewConversation
+    });
     const seedInfo = diverged ? renderSeed(incoming) : undefined;
     const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
-    const warnings = [...seedInfo?.warnings ?? [], ...mapping.warnings].map((w) => ({
+    const warnings = [
+      ...seedInfo?.warnings ?? [],
+      ...mapping.warnings,
+      ...variantFallbackNotice !== undefined ? [variantFallbackNotice] : []
+    ].map((w) => ({
       type: "other",
       message: w
     }));

@@ -77,9 +77,11 @@ describe("unit: index — plugin entry and chat.params channel (D3/OQ1)", () => 
 		expect(typeof hooks["chat.params"]).toBe("function");
 	});
 
-	test("OQ1: chat.params returns void and MUTATES output.options.agy in place", async () => {
+	test("OQ1: chat.params returns void and MUTATES output.options in place", async () => {
 		const { result, output } = await chatParams("/wt/project", "sess-42", "agy");
 		expect(result).toBeUndefined();
+		expect(output.options.sessionId).toBe("sess-42");
+		expect(output.options.worktree).toBe("/wt/project");
 		expect(output.options.agy).toEqual({ sessionId: "sess-42", worktree: "/wt/project" });
 	});
 
@@ -88,7 +90,11 @@ describe("unit: index — plugin entry and chat.params channel (D3/OQ1)", () => 
 		expect(other.output.options).toEqual({});
 		const a = await chatParams("/wt/a", "sess-a", "agy");
 		const b = await chatParams("/wt/b", "sess-b", "agy");
+		expect(a.output.options.sessionId).toBe("sess-a");
+		expect(a.output.options.worktree).toBe("/wt/a");
 		expect(a.output.options.agy).toEqual({ sessionId: "sess-a", worktree: "/wt/a" });
+		expect(b.output.options.sessionId).toBe("sess-b");
+		expect(b.output.options.worktree).toBe("/wt/b");
 		expect(b.output.options.agy).toEqual({ sessionId: "sess-b", worktree: "/wt/b" });
 	});
 });
@@ -101,21 +107,20 @@ describe("unit: index — provider.models hook (dynamic discovery registration)"
 
 	test("hook returns the DISCOVERED registry: bare keys, default first, display names", async () => {
 		const record = await providerModels({ listAgyModels: async () => DISCOVERED_SAMPLE });
-		expect(Object.keys(record ?? {})).toEqual(["default", "gemini-3.8-flash-high", "claude-sonnet-4-6"]);
+		// Effort-variant collapse: the suffixed flash tier surfaces as its
+		// BASE id with a variants payload; the bare claude id stays flat.
+		expect(Object.keys(record ?? {})).toEqual(["default", "gemini-3.8-flash", "claude-sonnet-4-6"]);
 		const claude = record?.["claude-sonnet-4-6"];
 		expect(claude?.providerID).toBe("agy");
 		expect(claude?.name).toBe("Claude Sonnet 4.6");
 		expect(claude?.limit.context).toBe(128000);
+		expect(record?.["gemini-3.8-flash"].variants?.high?.agyModelId).toBe("gemini-3.8-flash-high");
 	});
 
 	test("discovery returning nothing falls back to the static builtin registry", async () => {
 		const record = await providerModels({ listAgyModels: async () => [] });
-		expect(Object.keys(record ?? {})).toEqual([
-			"default",
-			"gemini-3.8-flash-high",
-			"gemini-3.8-flash-medium",
-			"gemini-3.8-flash-low",
-		]);
+		// The static fallback collapses the same way as live discovery.
+		expect(Object.keys(record ?? {})).toEqual(["default", "gemini-3.8-flash"]);
 	});
 
 	test("discovery THROWING never rejects the hook — static fallback, error swallowed", async () => {
