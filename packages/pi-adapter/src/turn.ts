@@ -42,6 +42,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { DebugLogger } from "./debug";
 import type { BridgeState } from "./lifecycle";
 import { mapClassification, type ErrorMapping } from "./errors";
 import { mapPiPrompt, toPromptMessages } from "./messages";
@@ -113,6 +114,13 @@ export interface TurnDeps {
 	 * today's direct-store behavior (frozen suites).
 	 */
 	state?: BridgeState;
+	/**
+	 * Opt-in debug sink (v0.2 R11/D11): when present, id/code/duration facts
+	 * append to the unified bridge log. NEVER the prompt body — the log
+	 * carries session keys, conversation ids, classification codes, and
+	 * durations only. Absent → silent.
+	 */
+	debug?: DebugLogger;
 }
 
 /** Terminal turn failure carrying the mapped pi error semantics (errors.ts). */
@@ -226,6 +234,8 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 	const optionsCwd = (options as { cwd?: string } | undefined)?.cwd;
 	const cwd = optionsCwd ?? process.cwd();
 	const key = sessionKey(sid, cwd);
+	// Wall-clock origin for the debug duration facts (v0.2 R11).
+	const startedAt = Date.now();
 	// In-flight registration (R6): spans the whole turn, ends on every
 	// exit path; the identity token means an overlapped turn for the
 	// same key can never end its successor's registration.
@@ -255,10 +265,20 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		} else {
 			diverged = true; // edited/deleted/reordered history → fresh re-seed
 			req.onDiverged?.();
+			deps.debug?.log("diverged", { key });
 		}
 		const isNewConversation = entry === undefined || diverged;
 		const seedInfo = diverged ? renderSeed(incoming) : undefined;
 		const mapping = mapPiPrompt(req.context, { isNewConversation, seed: seedInfo?.seed });
+		// Turn-start fact line (R11): ids and codes only — never the prompt.
+		deps.debug?.log("turn_start", {
+			key,
+			workdir,
+			...(req.modelArg !== undefined ? { model: req.modelArg } : {}),
+			...(req.mode !== undefined ? { mode: req.mode } : {}),
+			resume: resumeId !== undefined,
+			diverged,
+		});
 		// Per-turn scratch dir keeps run.log out of the user's project.
 		const logPath = join(mkdtempSync(join(deps.logRoot ?? tmpdir(), "agy-run-")), "run.log");
 		const attempt = async (
@@ -291,12 +311,25 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				envelope: run.envelope,
 				expectArtifact: false,
 			});
-			return { classification, run, resumed, conversationId: run.conversationId ?? tap.conversationId };
+			const conversationId = run.conversationId ?? tap.conversationId;
+			deps.debug?.log("classified", {
+				key,
+				classification: classification.outcome,
+				resumed,
+				durationMs: Date.now() - startedAt,
+				...(conversationId !== undefined ? { conversationId } : {}),
+			});
+			return { classification, run, resumed, conversationId };
 		};
 		const resumeAttemptId = diverged ? undefined : entry?.conversationId;
 		let result = await attempt(resumeAttemptId, resumeAttemptId !== undefined);
 		note(result.conversationId);
 		const persistAndThrowAbort = async (conversationId: string | undefined): Promise<never> => {
+			deps.debug?.log("turn_aborted", {
+				key,
+				durationMs: Date.now() - startedAt,
+				...(conversationId !== undefined ? { conversationId } : {}),
+			});
 			if (conversationId !== undefined) {
 				await deps.store.bind(key, conversationId, hashes);
 				deps.state?.cacheBinding(key, { conversationId, hashes });
@@ -309,6 +342,7 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		const canResume =
 			result.classification.outcome === "timeout" && !result.resumed && result.conversationId !== undefined;
 		if (canResume) {
+			deps.debug?.log("resume", { key, ...(result.conversationId !== undefined ? { conversationId: result.conversationId } : {}) });
 			result = await attempt(result.conversationId, true);
 			note(result.conversationId);
 			if (signal?.aborted) await persistAndThrowAbort(result.conversationId);
@@ -318,6 +352,13 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				await deps.store.bind(key, result.conversationId, hashes);
 				deps.state?.cacheBinding(key, { conversationId: result.conversationId, hashes });
 			}
+			deps.debug?.log("turn_end", {
+				key,
+				classification: "success",
+				resumed: result.resumed,
+				durationMs: Date.now() - startedAt,
+				...(result.conversationId !== undefined ? { conversationId: result.conversationId } : {}),
+			});
 			return { ...result, diverged, logPath, prompt: mapping.prompt };
 		}
 		// Terminal failure: a failed resumed attempt rebinds so the next turn
@@ -326,6 +367,13 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			await deps.store.rebind(key);
 			deps.state?.dropBinding(key);
 		}
+		deps.debug?.log("turn_error", {
+			key,
+			classification: result.classification.outcome,
+			resumed: result.resumed,
+			durationMs: Date.now() - startedAt,
+			...(result.conversationId !== undefined ? { conversationId: result.conversationId } : {}),
+		});
 		throw new TurnError(
 			mapClassification(result.classification, {
 				logPath,

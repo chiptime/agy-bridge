@@ -37,6 +37,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { AgyConfigError } from "./config";
+import type { DebugLogger } from "./debug";
 import type { BridgeState } from "./lifecycle";
 import type { PiAgyModel } from "./models";
 import { formatStepUpdate } from "./progress";
@@ -178,6 +179,8 @@ export interface AskAgyDeps {
 	 * coherent — the same wiring the main turn path got in D3.
 	 */
 	state?: BridgeState;
+	/** Opt-in debug sink (v0.2 R11/D11): delegation facts + forwarded to runTurn (ids only, never the prompt). */
+	debug?: DebugLogger;
 	/** Skills catalog seam (pi exposes no skills API): rendered name/description lines. */
 	skillsCatalog?: () => string | undefined;
 	/** v0.2 R4: configured metadata overrides (name/label/description). */
@@ -322,6 +325,14 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 					: { signal }
 				: ({ cwd: ctx.cwd, ...(signal !== undefined ? { signal } : {}) } as SimpleStreamOptions);
 			const context: Context = { messages: [{ role: "user", content: prompt, timestamp: start }] };
+			// Delegation-start fact line (R11): mode/scope/model codes only.
+			deps.debug?.log("askagy_start", {
+				mode,
+				scope,
+				isolated,
+				...(params.model !== undefined ? { model: params.model } : {}),
+				...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
+			});
 			try {
 				const result = await runTurn(
 					{
@@ -333,6 +344,7 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 						...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 						...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
 						...(deps.state !== undefined ? { state: deps.state } : {}),
+						...(deps.debug !== undefined ? { debug: deps.debug } : {}),
 					},
 				{
 					context,
@@ -348,12 +360,18 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 				details.logPath = result.logPath;
 				details.durationMs = now() - start;
 				if (result.conversationId !== undefined) details.conversationId = result.conversationId;
+				deps.debug?.log("askagy_end", {
+					classification: result.classification.outcome,
+					durationMs: details.durationMs,
+					...(details.conversationId !== undefined ? { conversationId: details.conversationId } : {}),
+				});
 				return {
 					content: [{ type: "text", text: normalizeResponseText(result.run.envelope?.response ?? "") }],
 					details,
 				};
 			} catch (err) {
 				details.durationMs = now() - start;
+				deps.debug?.log("askagy_error", { durationMs: details.durationMs, aborted: err instanceof TurnAborted });
 				if (err instanceof TurnAborted) {
 					return { content: [{ type: "text", text: "agy delegation aborted before completing." }], details };
 				}

@@ -29,6 +29,7 @@ import { listAgyModels, type AgyModelsRunner } from "agy-bridge-engine";
 import { createAskAgyTool } from "../src/ask-tool";
 import { createAgyCommand } from "../src/commands";
 import { resolveConfig, type PiAdapterOptions } from "../src/config";
+import { createDebugLogger } from "../src/debug";
 import { loadFileConfig } from "../src/file-config";
 import { createBridgeState, createLifecycle } from "../src/lifecycle";
 import { resolveRegistry, toProviderModel, type DiscoveredEntry, type PiAgyModel } from "../src/models";
@@ -78,6 +79,11 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 	// R12: validation precedes every side effect — no registration, no store,
 	// no discovery probe, no spawn can happen on a bad config.
 	const config = resolveConfig(deps.options ?? {}, file);
+	// v0.2 R11/D11: the opt-in unified debug log — env-gated ONCE here; when
+	// AGY_BRIDGE_DEBUG is unset every log call below is a no-op, so the call
+	// sites stay dumb. All lines carry ids/codes/durations, never prompt text.
+	const debug = createDebugLogger({ env: deps.options?.env ?? process.env, stateDir: config.stateDir });
+	for (const warning of file.warnings) debug.log("config_warning", { warning });
 	// v0.2 R3: AskAgy registers ONLY when explicitly enabled. When the whole
 	// askAgy section is ABSENT (not merely enabled:false), the user gets a
 	// ONE-TIME startup notice on the first session_start — discoverability
@@ -116,15 +122,21 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 	// reachable when the state outlives this factory, e.g. hot reloads);
 	// ONLY non-empty rounds are cached — a failed or empty probe never
 	// poisons the cache, so the next reload can retry.
-	let rows: readonly DiscoveredEntry[] | undefined = state.discoverySnapshot(now())?.rows;
-	if (rows === undefined) {
+	const cachedRows = state.discoverySnapshot(now())?.rows;
+	let source: "cache" | "fresh" | "fallback" = "fallback";
+	let rows: readonly DiscoveredEntry[] | undefined = cachedRows;
+	if (cachedRows !== undefined) {
+		source = "cache";
+	} else {
 		const probed = await probe();
 		if (probed.length > 0) {
 			rows = probed;
 			state.setDiscovery(probed, now());
+			source = "fresh";
 		}
 	}
 	let registry: readonly PiAgyModel[] = resolveRegistry(config.models, rows);
+	debug.log("discovery", { source, models: registry.length });
 
 	// The streamSimple closure is built ONCE and reused across provider
 	// (re-)registrations — the transports and stores never change.
@@ -135,6 +147,7 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 		...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 		promptViaStdin: true,
 		state,
+		debug,
 	});
 
 	const registerModels = (models: readonly PiAgyModel[]): void => {
@@ -153,6 +166,7 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 	// resolved askAgy.enabled is true. The execute-time circular guard stays
 	// regardless (the model can change onto agy mid-session and pi tools
 	// cannot be unregistered, so the guard is the only recursion fence).
+	debug.log("askagy", { registered: config.askAgy.enabled });
 	if (config.askAgy.enabled) {
 		const { name, label, description } = config.askAgy;
 		pi.registerTool(
@@ -170,6 +184,7 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 				...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 				promptViaStdin: true,
 				state,
+				debug,
 				// v0.2 R4: configured metadata overrides + effective defaults
 				// (explicit caller params still win inside the tool).
 				...(name !== undefined || label !== undefined || description !== undefined
@@ -206,6 +221,7 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 
 	const lifecycle = createLifecycle({
 		state,
+		debug,
 		// v0.2 R3: the one-time "AskAgy is off" notice (only composed when the
 		// askAgy section is absent) fires on the first session_start.
 		...(startupNotice !== undefined ? { startupNotice } : {}),

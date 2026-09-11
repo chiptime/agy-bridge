@@ -16,7 +16,7 @@ import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import { mkdtemp } from "node:fs/promises";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type {
@@ -663,5 +663,77 @@ describe("integration: extensions/index — askAgy defaults reach the tool (v0.2
 		await withoutCatalog.load();
 		await runTool(withoutCatalog.calls, { prompt: "withheld", skills: true, isolated: true }, "/proj");
 		expect(stdinContent(withoutCatalog.spawn.spawns[0])).toBe("withheld"); // seam disabled by config
+	});
+});
+
+// --- v0.2 S4: opt-in unified debug log wiring (R11, D11, task 4.3) ---------------
+
+/** Parse the JSON lines of a debug log file. */
+function debugLines(path: string): Record<string, unknown>[] {
+	return readFileSync(path, "utf8")
+		.split("\n")
+		.filter((l) => l !== "")
+		.map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+describe("integration: extensions/index — factory debug wiring (v0.2 R11, task 4.3)", () => {
+	test("AGY_BRIDGE_DEBUG=1 → load + session lifecycle append discovery(fresh)/askagy(registered)/session_start/session_shutdown lines", async () => {
+		const env = await factoryEnv({
+			options: {
+				askAgy: { enabled: true },
+				env: { AGY_BRIDGE_DEBUG: "1" },
+			},
+		});
+		await env.load();
+		const notes: string[] = [];
+		await env.calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
+		await env.calls.handlers["session_shutdown"][0]({ type: "session_shutdown", reason: "quit" } as never);
+		const path = join(env.root, "debug.log"); // default: <stateDir>/debug.log
+		expect(existsSync(path)).toBe(true);
+		const lines = debugLines(path);
+		const events = lines.map((l) => l["event"]);
+		expect(events).toContain("discovery");
+		const discovery = lines.find((l) => l["event"] === "discovery");
+		expect(discovery?.["source"]).toBe("fresh"); // empty cache → live probe round cached
+		expect(typeof discovery?.["models"]).toBe("number");
+		expect(lines.find((l) => l["event"] === "askagy")?.["registered"]).toBe(true);
+		expect(lines.find((l) => l["event"] === "session_start")?.["reason"]).toBe("startup");
+		expect(lines.find((l) => l["event"] === "session_shutdown")?.["reason"]).toBe("quit");
+	});
+
+	test("askAgy section ABSENT → the askagy line reports registered:false (notice path unchanged)", async () => {
+		const env = await factoryEnv({ options: { env: { AGY_BRIDGE_DEBUG: "1" } } });
+		await env.load();
+		const lines = debugLines(join(env.root, "debug.log"));
+		expect(lines.find((l) => l["event"] === "askagy")?.["registered"]).toBe(false);
+	});
+
+	test("AGY_BRIDGE_DEBUG_PATH override is honored by the factory wiring", async () => {
+		const root = await mkdtemp(join(tmpdir(), "agy-pi-dbgpath-"));
+		const overridePath = join(root, "nested", "bridge-debug.log");
+		const env = await factoryEnv({ options: { env: { AGY_BRIDGE_DEBUG: "1", AGY_BRIDGE_DEBUG_PATH: overridePath } } });
+		await env.load();
+		expect(existsSync(join(env.root, "debug.log"))).toBe(false);
+		expect(debugLines(overridePath).length).toBeGreaterThan(0);
+	});
+
+	test("file-config warnings land as config_warning lines (the configured-section case, S2 leftover)", async () => {
+		const root = await mkdtemp(join(tmpdir(), "agy-pi-dbgwarn-"));
+		const overridePath = join(root, "debug.log");
+		const env = await fileFactoryEnv({ global: "{oops" }, { env: { AGY_BRIDGE_DEBUG: "1", AGY_BRIDGE_DEBUG_PATH: overridePath } });
+		await env.load();
+		const lines = debugLines(overridePath);
+		const warnings = lines.filter((l) => l["event"] === "config_warning");
+		expect(warnings.length).toBeGreaterThan(0);
+		expect(String(warnings[0]["warning"])).toContain("malformed");
+	});
+
+	test("AGY_BRIDGE_DEBUG unset → a full factory + session cycle writes NO debug.log", async () => {
+		const env = await factoryEnv({ options: { env: {} } });
+		await env.load();
+		const notes: string[] = [];
+		await env.calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
+		await env.calls.handlers["session_shutdown"][0]({ type: "session_shutdown", reason: "quit" } as never);
+		expect(existsSync(join(env.root, "debug.log"))).toBe(false);
 	});
 });

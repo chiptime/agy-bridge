@@ -15,12 +15,13 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Context, Message, SimpleStreamOptions, UserMessage } from "@earendil-works/pi-ai";
 import { messageHashes } from "agy-bridge-engine";
+import { createDebugLogger } from "../src/debug";
 import { DIVERGED_NOTICE, runTurn, TurnAborted, TurnError, type TurnDeps, type TurnRequest } from "../src/turn";
 import { openSessionStore } from "../src/session-store";
 
@@ -97,7 +98,7 @@ interface SpawnRecord {
 
 async function setup(
 	script?: (rec: SpawnRecord, call: number) => unknown,
-	depsOpts: { workdir?: string; promptViaStdin?: boolean } = {},
+	depsOpts: { workdir?: string; promptViaStdin?: boolean; debug?: import("../src/debug").DebugLogger } = {},
 ) {
 	const root = await mkdtemp(join(tmpdir(), "agy-pi-turn-"));
 	const store = openSessionStore(join(root, "pi-sessions.json"));
@@ -109,6 +110,7 @@ async function setup(
 		logRoot: root,
 		...(depsOpts.workdir !== undefined ? { workdir: depsOpts.workdir } : {}),
 		...(depsOpts.promptViaStdin !== undefined ? { promptViaStdin: depsOpts.promptViaStdin } : {}),
+		...(depsOpts.debug !== undefined ? { debug: depsOpts.debug } : {}),
 		spawnFn: ((bin: string, args: string[], io: { cwd: string }) => {
 			const rec: SpawnRecord = {
 				bin,
@@ -470,5 +472,67 @@ describe("unit: turn — mode passthrough (v0.2 R5, D4)", () => {
 		expect(spawns[0].child.killed).toBe(true);
 		expect(spawns[0].args[spawns[0].args.indexOf("--mode") + 1]).toBe("plan");
 		expect(await store.get("s-ab-mode")).toBe("conv-ab");
+	});
+});
+
+// --- v0.2 R11: opt-in debug facts (tasks 4.3/4.4, design D11) -------------------
+
+let debugFileSeq = 0;
+
+describe("v0.2 R11: turn debug facts (injected sink — ids, codes, durations only)", () => {
+	/** Fresh debug sink bound to a unique tmp file, handed to setup as a dep. */
+	function sink() {
+		const logPath = join(tmpdir(), `agy-pi-turn-dbg-${process.pid}-${debugFileSeq++}.log`);
+		const debug = createDebugLogger({
+			env: { AGY_BRIDGE_DEBUG: "1", AGY_BRIDGE_DEBUG_PATH: logPath },
+			stateDir: tmpdir(),
+		});
+		return { debug, logPath };
+	}
+
+	function parseLines(logPath: string): Record<string, unknown>[] {
+		return readFileSync(logPath, "utf8")
+			.split("\n")
+			.filter((l) => l !== "")
+			.map((l) => JSON.parse(l) as Record<string, unknown>);
+	}
+
+	test("debug-enabled turn appends turn_start/classified/turn_end with key, conversationId, classification, durationMs", async () => {
+		const { debug, logPath } = sink();
+		const { deps, req } = await setup(undefined, { debug });
+		await runTurn(deps, req({ messages: [userMsg("hi")] }, { sessionId: "s-dbg" }));
+		const lines = parseLines(logPath);
+		const events = lines.map((l) => l["event"]);
+		expect(events).toContain("turn_start");
+		expect(events).toContain("classified");
+		expect(events).toContain("turn_end");
+		const start = lines.find((l) => l["event"] === "turn_start");
+		expect(start?.["key"]).toBe("s-dbg");
+		const classified = lines.find((l) => l["event"] === "classified");
+		expect(classified?.["classification"]).toBe("success");
+		expect(classified?.["conversationId"]).toBe("conv-1");
+		expect(typeof classified?.["durationMs"]).toBe("number");
+		const end = lines.find((l) => l["event"] === "turn_end");
+		expect(end?.["classification"]).toBe("success");
+		expect(end?.["conversationId"]).toBe("conv-1");
+		expect(typeof end?.["durationMs"]).toBe("number");
+	});
+
+	test("the prompt body NEVER reaches the debug log (D11 hard rule, sentinel scan)", async () => {
+		const { debug, logPath } = sink();
+		const { deps, req } = await setup(undefined, { debug });
+		const sentinel = "SENTINEL-PROMPT-9f3ac2 top secret instructions";
+		await runTurn(deps, req({ messages: [userMsg(sentinel)] }, { sessionId: "s-sentinel" }));
+		const raw = readFileSync(logPath, "utf8");
+		expect(raw.length).toBeGreaterThan(0); // events WERE logged...
+		expect(raw).not.toContain("SENTINEL-PROMPT-9f3ac2"); // ...but never the prompt
+		expect(raw).not.toContain("top secret instructions");
+	});
+
+	test("debug disabled (env unset): a full turn produces zero debug writes", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "agy-pi-turn-dbg-off-"));
+		const { deps, req } = await setup(undefined, { debug: createDebugLogger({ env: {}, stateDir }) });
+		await runTurn(deps, req({ messages: [userMsg("hi")] }, { sessionId: "s-off" }));
+		expect(existsSync(join(stateDir, "debug.log"))).toBe(false);
 	});
 });

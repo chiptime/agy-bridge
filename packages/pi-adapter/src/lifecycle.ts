@@ -22,6 +22,7 @@
  * session_start fires the injected rebuildDiscovery seam.
  */
 import type { ExtensionContext, SessionShutdownEvent, SessionStartEvent } from "@earendil-works/pi-coding-agent";
+import type { DebugLogger } from "./debug";
 import type { DiscoveredEntry } from "./models";
 import type { SessionEntry, SessionStore } from "./session-store";
 
@@ -162,6 +163,11 @@ export interface LifecycleDeps {
 	 * first attempt (the lifecycle instance is built once per install).
 	 */
 	startupNotice?: string;
+	/**
+	 * v0.2 R11 additive: opt-in debug sink — session_start/session_shutdown
+	 * reasons append to the unified bridge log (reason codes only).
+	 */
+	debug?: DebugLogger;
 }
 
 export interface BridgeLifecycle {
@@ -181,16 +187,18 @@ export interface BridgeLifecycle {
 export function createLifecycle(deps: LifecycleDeps): BridgeLifecycle {
 	let startupNoticeShown = false;
 	return {
-		async onSessionStart(event, ctx) {
-			deps.state.recycle();
-			if (event.reason === "reload") await deps.rebuildDiscovery?.();
-			if (deps.startupNotice !== undefined && !startupNoticeShown) {
-				startupNoticeShown = true;
-				if (ctx?.hasUI === true) ctx.ui.notify(deps.startupNotice);
-			}
-		},
-		async onSessionShutdown() {
-			deps.state.recycle();
-		},
+	async onSessionStart(event, ctx) {
+		deps.debug?.log("session_start", { reason: event.reason });
+		deps.state.recycle();
+		if (event.reason === "reload") await deps.rebuildDiscovery?.();
+		if (deps.startupNotice !== undefined && !startupNoticeShown) {
+			startupNoticeShown = true;
+			if (ctx?.hasUI === true) ctx.ui.notify(deps.startupNotice);
+		}
+	},
+	async onSessionShutdown(event) {
+		deps.debug?.log("session_shutdown", { reason: event.reason });
+		deps.state.recycle();
+	},
 	};
 }
