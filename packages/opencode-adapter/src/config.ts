@@ -6,10 +6,24 @@
  */
 export type WorkdirMode = "scratch" | "session";
 
+/** Payload of one effort variant: the full agy id passed as --model.
+ * A type ALIAS (not an interface) so it stays assignable to the registry's
+ * index-signature AgyVariantPayload. */
+export type AgyVariantConfig = {
+	agyModelId: string;
+	[key: string]: unknown;
+};
+
 /** User-supplied per-model override/extension (R8 config merge). */
 export interface ModelConfig {
 	name?: string;
 	limit?: { context: number; output: number };
+	/** Effort variants for a collapsed base (config-fed registries): keyed by
+	 * effort name, each carrying the full effort-suffixed agy id. Config is
+	 * the picker channel AND the runtime channel — opencode does not consult
+	 * the plugin provider.models hook (verified 2026-09-11), so variants must
+	 * survive into applyConfig for variant resolution to work at all. */
+	variants?: Record<string, AgyVariantConfig>;
 }
 
 export interface AgyAdapterOptions {

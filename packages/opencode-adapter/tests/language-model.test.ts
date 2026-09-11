@@ -962,5 +962,26 @@ describe("unit: language-model — per-call variant → modelArg resolution", ()
 		const messages = (start.warnings ?? []).map((w) => w.message);
 		expect(messages.some((m) => m.includes("variant"))).toBe(false);
 	});
+
+	test("direct payload channel: agyModelId in providerOptions wins over the variant name", async () => {
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		await drain(model, {
+			agy: { sessionId: "s", variant: "low", agyModelId: "gemini-3.8-flash-high" },
+		});
+		// The direct payload is one step more concrete; it outranks names.
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-high");
+	});
+
+	test("direct payload channel: works alone, without any variant name", async () => {
+		const { model, seen } = makeVariantModel("agy/gemini-3.8-flash", { envelope: OK_ENVELOPE });
+		const parts = await drain(model, { agy: { sessionId: "s", agyModelId: "gemini-3.8-flash-low" } });
+		expect(seen[0].req.modelArg).toBe("gemini-3.8-flash-low");
+		// A delivered payload is a resolved choice: no fallback warning.
+		const start = parts.find((p) => p["type"] === "stream-start") as {
+			warnings?: Array<{ message: string }>;
+		};
+		const messages = (start.warnings ?? []).map((w) => w.message);
+		expect(messages.some((m) => m.includes("variant"))).toBe(false);
+	});
 });
 

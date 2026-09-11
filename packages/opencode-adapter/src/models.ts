@@ -115,8 +115,11 @@ function baseRegistry(discovered?: readonly DiscoveredEntry[]): AgyModel[] {
 			let base = byId.get(baseId);
 			if (!base) {
 				// First sighting: highest-effort modelArg is patched below once
-				// all efforts of this base are known.
-				base = model(baseId, row.name, id);
+				// all efforts of this base are known. The base is named after
+				// the BARE id — the first-discovered row's name carries the
+				// effort suffix ("... (High)"), which reads wrong in the picker
+				// for a model whose whole point is selectable effort.
+				base = model(baseId, variant.base, id);
 				registry.push(base);
 				byId.set(baseId, base);
 			}
@@ -178,12 +181,28 @@ function applyConfig(
 ): AgyModel[] {
 	const merged = base.map((m) => ({ ...m, limit: { ...m.limit } }));
 	for (const [id, cfg] of Object.entries(user)) {
-		const existing = merged.find((m) => m.id === id);
+		const existing = merged.find((m) => m.id === id || m.id === `agy/${normalize(id)}`);
 		if (existing) {
 			if (cfg?.name !== undefined) existing.name = cfg.name;
 			if (cfg?.limit !== undefined) existing.limit = { ...cfg.limit };
+			// Variant payloads ride config too: without them a config-fed base
+			// could not map a selected effort to its --model id at turn time.
+			if (cfg?.variants !== undefined) existing.variants = { ...cfg.variants };
 		} else {
-			merged.push(model(id, normalize(id), normalize(id)));
+			// Config keys may arrive bare ("gemini-3.7-flash") or namespaced;
+			// registry convention is the full "agy/<id>" form either way.
+			const fullId = `agy/${normalize(id)}`;
+			const variants = cfg?.variants;
+			// Fallback parity with the builtin collapse: a collapsed base must
+			// fall back to its HIGHEST discovered effort, never to the bare id
+			// (which does not exist in agy — spawning it would fail).
+			const fallbackArg =
+				variants?.["high"]?.agyModelId ??
+				Object.values(variants ?? {}).find((v) => typeof v?.agyModelId === "string")?.agyModelId;
+			const extended = model(fullId, cfg?.name ?? normalize(id), fallbackArg ?? normalize(id));
+			if (cfg?.limit !== undefined) extended.limit = { ...cfg.limit };
+			if (variants !== undefined) extended.variants = { ...variants };
+			merged.push(extended);
 		}
 	}
 	const seen = new Set<string>();

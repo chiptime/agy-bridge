@@ -128,6 +128,26 @@ export function readVariant(
 }
 
 /**
+ * Direct-payload channel: opencode may merge the SELECTED VARIANT'S PAYLOAD
+ * into the call options (the proven antigravity precedent merges
+ * thinkingConfig into the request) instead of delivering the variant NAME.
+ * A string `agyModelId` arriving this way IS the resolved --model argument;
+ * it outranks variant-name resolution because it is one step more concrete.
+ */
+export function readDirectModelId(
+	options?: Pick<LanguageModelV3CallOptions, "providerOptions"> & Record<string, unknown>,
+): string | undefined {
+	const rec = (
+		typeof options?.providerOptions?.["agy"] === "object" && options.providerOptions?.["agy"] !== null
+			? options.providerOptions["agy"]
+			: {}
+	) as Record<string, unknown>;
+	const nested = (typeof rec["agy"] === "object" && rec["agy"] !== null ? rec["agy"] : {}) as Record<string, unknown>;
+	const raw = rec["agyModelId"] ?? nested["agyModelId"];
+	return typeof raw === "string" && raw !== "" ? raw : undefined;
+}
+
+/**
  * Map a selected variant onto the --model argument via the registry entry's
  * variants payload ({ agyModelId }). Documented fallbacks, in order:
  * - UNKNOWN variant or no variant → the entry's own modelArg. For a
@@ -389,7 +409,10 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		// modelArg for THIS turn only; see resolveVariantModelArg for the
 		// fallback contract.
 		const variant = readVariant(options);
-		const modelArg = resolveVariantModelArg(this.entry, variant);
+		// Resolution order: direct payload (the merged variant payload, when
+		// opencode transports it that way) > variant name > entry fallback.
+		const directModelId = readDirectModelId(options);
+		const modelArg = directModelId ?? resolveVariantModelArg(this.entry, variant);
 		// Loud-fallback policy: for a collapsed base, an unresolved or unknown
 		// variant silently spawns the highest-effort agy id. That is a safe
 		// default but a silent misfire (the user DID pick an effort; the host
@@ -397,6 +420,7 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		// fallback as a V3 warning so the host can show it. Flat models and
 		// agy/default never fall back — they have no variants payload.
 		const variantFallbackNotice = (() => {
+			if (directModelId !== undefined) return undefined;
 			if (this.entry.variants === undefined) return undefined;
 			if (variant === undefined) {
 				return `model "${this.entry.id}" has effort variants but none was selected; using "${modelArg ?? "agy default"}"`;

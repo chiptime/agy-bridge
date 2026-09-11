@@ -99,13 +99,57 @@ describe("unit: models — dynamic registry via resolveRegistry (discovery merge
 			"agy/claude-sonnet-4-6",
 		]);
 		expect(reg[0].modelArg).toBeUndefined(); // agy/default → NO --model (R8.s2)
-		expect(reg[1].name).toBe("Gemini 3.8 Flash (High)");
+		// DELIBERATE CHANGE (loud base naming): the collapsed base is named
+		// after the BARE id, not the first-discovered row's name — that name
+		// carries the effort suffix ("... (High)"), which reads wrong for a
+		// model whose whole point is selectable effort.
+		expect(reg[1].name).toBe("gemini-3.8-flash");
 	});
 
 	test("undefined or empty discovery falls back to the static builtin list", () => {
 		const staticIds = listModels().map((m) => m.id);
 		expect(resolveRegistry({}).map((m) => m.id)).toEqual(staticIds);
 		expect(resolveRegistry({}, []).map((m) => m.id)).toEqual(staticIds);
+	});
+
+	test("config-fed variants ride into the registry (the runtime channel for collapsed bases)", () => {
+		// opencode does not consult the plugin provider.models hook, so the
+		// ONLY way a config-declared base resolves its effort at turn time is
+		// variants surviving applyConfig (provider.agy.options.models).
+		const reg = resolveRegistry(
+			{
+				"gemini-3.7-flash": {
+					name: "Gemini 3.7 Flash",
+					variants: {
+						high: { agyModelId: "gemini-3.7-flash-high" },
+						low: { agyModelId: "gemini-3.7-flash-low" },
+					},
+				},
+			},
+			[],
+		);
+		const entry = reg.find((m) => m.id === "agy/gemini-3.7-flash");
+		expect(entry).toBeDefined();
+		// DELIBERATE: bare config keys normalize to the full agy/<id> form.
+		expect(entry?.variants?.high?.agyModelId).toBe("gemini-3.7-flash-high");
+		expect(entry?.variants?.low?.agyModelId).toBe("gemini-3.7-flash-low");
+		// Fallback parity with the builtin collapse: highest effort, never the bare id.
+		expect(entry?.modelArg).toBe("gemini-3.7-flash-high");
+	});
+
+	test("config-fed variants override the payload of an existing builtin base in place", () => {
+		const reg = resolveRegistry(
+			{
+				"gemini-3.8-flash": {
+					variants: { high: { agyModelId: "gemini-3.8-flash-high" }, low: { agyModelId: "gemini-3.8-flash-low" } },
+				},
+			},
+			[],
+		);
+		const flash = reg.find((m) => m.id === "agy/gemini-3.8-flash");
+		expect(flash).toBeDefined();
+		expect(Object.keys(flash?.variants ?? {}).sort()).toEqual(["high", "low"]);
+		expect(flash?.name).toBe("gemini-3.8-flash"); // name/position preserved
 	});
 
 	test("config models override discovered entries IN PLACE (wins over discovery) and extend at the end", () => {
@@ -145,7 +189,9 @@ describe("unit: models — dynamic registry via resolveRegistry (discovery merge
 		expect(reg[0].name).toBe("default");
 		const flash = reg.filter((m) => m.id === "agy/gemini-3.8-flash");
 		expect(flash).toHaveLength(1);
-		expect(flash[0].name).toBe("A");
+		// DELIBERATE CHANGE (loud base naming): bare-id name, not "A" (the
+		// first row's effort-suffixed name).
+		expect(flash[0].name).toBe("gemini-3.8-flash");
 	});
 
 	test("pool hint still routes discovered ids through the engine's poolForModel", () => {
