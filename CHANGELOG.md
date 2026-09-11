@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (`0.x` = development line).
 
+## [Unreleased]
+
+### Added
+- **pi extension v0.2.0** (`agy-bridge-pi`, not yet published): live token
+  streaming with strict envelope reconciliation (streamed text is checked
+  against agy's final response; on mismatch the envelope wins and the
+  first-divergence offset is logged), `AskAgy` execution modes (`read`
+  default → agy plan mode, `none` → plan mode in a forced fresh scratch dir,
+  `full` → accept-edits, hideable via `allowFullMode: false`), layered file
+  config (`~/.pi/agent/agy-bridge.json` then project `.pi/agy-bridge.json`,
+  per-section merge, project wins per key; factory options > project >
+  global > env), opt-in `AskAgy` registration (`askAgy.enabled`, one-time
+  startup notice when unset) with name/label/description overrides, and an
+  opt-in unified debug log (`AGY_BRIDGE_DEBUG=1` →
+  `<stateDir>/agy-bridge/debug.log`, `AGY_BRIDGE_DEBUG_PATH` override,
+  prompt bodies never logged). Behavior changes vs 0.1.0: `AskAgy` is now
+  opt-in, and its default mode is `read` instead of always-full
+  (`askAgy.enabled: true` + `defaultMode: "full"` restores v0.1 delegation).
+
+## [0.3.0] — 2026-09-11
+
+### Changed
+- **Enriched reasoning progress** (opencode adapter): `formatStepUpdate`
+  now renders tool lines with the extracted parameter —
+  `▸ tool view_file (path: src/index.ts)…`,
+  `✓ view_file (path: src/index.ts) (0.3s)`,
+  `✗ view_file (path: src/index.ts) failed` — and response lines with a live
+  preview from `text_delta` (`▸ response: <sanitized preview>`,
+  `● response (10.0s)` on done) instead of the blind placeholders the
+  `formatStepUpdate` rewrite had introduced (static `▸ response…` per delta,
+  tools without arguments). New exported helpers: `sanitizePreview` (newlines
+  collapsed, trimmed, 60-char truncation with `…`) and `extractToolParam`
+  (key precedence: `path`, `AbsolutePath`, `command`, `pattern`, `query`,
+  `url`, …). Rendering is strictly non-throwing: hostile getters, circular
+  structures, and unexpected `tool_info` shapes degrade through a
+  compact-JSON fallback and a final `(step update)` line. 38 adapter unit
+  tests; workspace suite 482 green; 100% line/function coverage of
+  `language-model.ts`.
+
 ## [0.2.0] — 2026-09-09
 
 ### Added

@@ -68,10 +68,25 @@ What the extension registers:
   fallback catalog when discovery fails). `agy/default` maps to no `--model`.
   Effort-suffixed ids collapse into one model with thinking levels:
   `gemini-3.8-flash-{low,medium,high}` → `agy/gemini-3.8-flash:low|medium|high`.
-- **Tool `AskAgy`** — one contained agy run per call. Params: `prompt`,
+  New in v0.2: provider turns **stream agy's response tokens live** as they
+  arrive. After each run the streamed text is checked against agy's final
+  response envelope; on the (defect) mismatch the envelope's text wins and
+  the divergence is logged (see Diagnostics below).
+- **Tool `AskAgy`** — one contained agy run per call. **Opt-in since v0.2**:
+  it registers only when config sets `askAgy.enabled: true` (unset → no tool
+  plus a one-time startup notice explaining how to enable it; explicit
+  `false` → no tool, no notice). Params: `prompt`,
   `model?`, `thinking?`, `scope?` (`scratch` default | `worktree`),
+  `mode?` (`read` default | `none` | `full`),
   `isolated?` (no conversation continuity), `skills?` (inject the skills
-  catalog; off by default).
+  catalog; off by default). Modes: `read` runs agy in plan mode;
+  `none` is plan mode **plus a forced fresh-scratch workdir** (even when
+  `scope: "worktree"` was requested, the reported scope is `scratch`);
+  `full` runs accept-edits (today's v0.1 behavior) and disappears from the
+  accepted values when config sets `allowFullMode: false`. The tool's id,
+  label, and description are overridable via `askAgy.name` / `label` /
+  `description`. Partial agy output (narration + streamed text) flows into
+  the tool's live update as it arrives.
 - **Command `/agy`** — `status` (config, discovery cache, session binding,
   in-flight turn) and `clear` (drop this session's binding).
 
@@ -83,6 +98,17 @@ What the extension registers:
   worktree you can `git checkout -- .` away.
 - **`AskAgy` defaults to `scope: "scratch"`**: a fresh `agy-run-*` temp dir,
   never your cwd. Pass `scope: "worktree"` only when you want agy in the repo.
+- **`AskAgy` default mode is `read` (new in v0.2)**: agy runs with `--mode
+  plan`, live-probe-verified to refuse file writes AND shell commands
+  headless. One documented side effect: the answer may arrive as a plan
+  document + link instead of direct prose. `mode: "full"` (accept-edits) is
+  the only escalation, governed by `allowFullMode`. `--sandbox` is never
+  passed (incompatible with `--dangerously-skip-permissions`), and
+  `skipPermissions` is deliberately not configurable — agy runs headless;
+  a non-interactive accept-edits run would only hang waiting for shell
+  approval.
+- **Provider turns pass no mode** — agy's own default applies there (it may
+  edit files; see the first bullet). AskAgy is the contained path.
 - The prompt travels to agy as one `stream-json` NDJSON line on **stdin, never
   argv** (a bare `--print` is rejected by agy and raw stdin is ignored, so the
   argv is `--input-format stream-json --output-format stream-json`).
@@ -109,10 +135,30 @@ Factory options (for a wrapper extension calling `createAgyExtension`):
 map (same semantics as the opencode adapter). Relative paths throw before
 any spawn.
 
-### Not in v1
+File config (new in v0.2): `~/.pi/agent/agy-bridge.json` (global) then
+`.pi/agy-bridge.json` (project, relative to pi's cwd) merge per section with
+the project winning per key. Precedence: **factory options > project file >
+global file > environment/defaults**. Sections: `timeoutMs`, `stateDir`,
+`scratchRoot`, `models`, `askAgy` — the last gates the tool (`enabled`) and
+its defaults (`name`, `label`, `description`, `defaultMode`, `allowFullMode`,
+`defaultIsolated`, `appendSkills`). A missing file is silent; a malformed or
+unreadable one warns and is treated as absent while the other layer still
+applies; unknown keys are ignored.
 
-Tool passthrough, MCP, mid-run steering, token streaming (agy does emit
-`text_delta` — future work), ACP, OAuth, images.
+Diagnostics (new in v0.2): `AGY_BRIDGE_DEBUG=1` appends one JSON line per
+bridge event (spawns, classification, conversation ids, retries, durations,
+byte counts, reconciliation mismatches) to
+`<stateDir>/agy-bridge/debug.log` — override the path with
+`AGY_BRIDGE_DEBUG_PATH`; past 5 MB the log truncates fresh. Prompt bodies
+are never logged. If streamed text and agy's final response envelope ever
+disagree, the final message is the envelope's (envelope wins) and the
+first-divergence offset is logged.
+
+### Not in v0.2
+
+Tool passthrough, MCP, mid-run steering, ACP, OAuth, images. (Shipped since
+v0.1: live token streaming with envelope reconciliation, `AskAgy` execution
+modes, layered file config, opt-in tool registration with a startup notice.)
 
 ## Status & Roadmap
 
@@ -120,13 +166,16 @@ Tool passthrough, MCP, mid-run steering, token streaming (agy does emit
   hard cap), outcome taxonomy (three agy timeout signatures), quota preflight.
 - ✅ **v1 — opencode provider adapter** (`packages/opencode-adapter`):
   LanguageModelV3 provider + plugin, dynamic model discovery from
-  `agy models`, live agent progress, typed error mapping with resume-once,
-  session↔conversation persistence, divergence detection with history
-  re-seeding. Verified end-to-end against real agy (see its README).
+  `agy models`, live agent progress (parameterized tool lines and live
+  response previews; strictly presentation-only — the bridge forwards only
+  the last user message, so panel output never reaches agy or its KV-cache),
+  typed error mapping with resume-once, session↔conversation persistence,
+  divergence detection with history re-seeding. Verified end-to-end against
+  real agy (see its README).
 - ✅ **npm publication** —
-  [`agy-bridge-opencode@0.2.1`](https://www.npmjs.com/package/agy-bridge-opencode)
+  [`agy-bridge-opencode@0.3.0`](https://www.npmjs.com/package/agy-bridge-opencode)
   (registry form requires ≥0.2.1; 0.2.0's entrypoint lacked the `create*`
-  re-export — use 0.2.1 or the local `file://` form).
+  re-export — use ≥0.2.1 or the local `file://` form).
 - ✅ **pi extension adapter** (`packages/pi-adapter`, `agy-bridge-pi` v0.1.0):
   native pi provider `agy` with discovered models and thinking levels, the
   `AskAgy` contained delegation tool, `/agy status|clear`, session continuity
