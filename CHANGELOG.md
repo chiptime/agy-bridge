@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (`0.x` = development line).
 
+## [0.4.0] - 2026-09-12
+
+### Added
+- **Effort variants**: effort-suffixed agy ids (`-high/-medium/-low`)
+  collapse into base models with variants; opencode delivers the selection
+  as a merged payload (`agyModelId`) and the adapter resolves `--model`
+  per turn. Falls back LOUDLY (V3 warning) instead of silently picking the
+  highest effort. `scripts/export-config-models.ts` materializes the live
+  catalog into opencode config (the plugin `provider.models` hook does not
+  fire for npm providers).
+- **Session store v2**: one sessionID now holds a LIST of conversation
+  bindings (cap 3) with prefix-based routing, so side agents and
+  compaction under the same sessionID no longer overwrite the main
+  thread's baseline. v1 stores migrate automatically; divergence appends
+  a new binding; `rebind` drops only the failed binding.
+- **store.prune() wired** (30-day retention, fire-and-forget per turn).
+
+### Fixed
+- chat.params fixtures now mirror the real host request shape; the hook
+  tolerates opencode's null second invocation per turn.
+- prune() count bug (re-loaded through the implicit-prune path, always 0).
+
+### Removed
+- Temporary session-context diagnostic probes (both transport questions
+  closed with production evidence).
+
 ## [Unreleased]
 
 ### Added
