@@ -10,20 +10,22 @@
  * (binary, per-attempt timeout, state dir — the config surface holds
  * no credentials), the discovered model count with the discovery
  * cache's age and freshness, the current session's persisted binding
- * (conversation id + baseline size, or "none"), and whether a turn is
- * in flight for that session. /agy clear drops the current session's
- * PERSISTED binding row (R5 key `sessionId ?? cwd`, both read from the
- * command context) and its in-memory registry entry. Anything else —
- * including a bare /agy — prints usage help.
+ * (conversation id + baseline size, or "none"), the session's AskAgy
+ * thread binding (v0.3 R5 — `thread: <id> (resume-always)` or none),
+ * and whether a turn is in flight for that session. /agy clear drops
+ * the current session's PERSISTED binding rows — BOTH the session row
+ * and its `:ask` thread row (R5 key `sessionId ?? cwd`, both read from
+ * the command context) — and their in-memory registry entries.
+ * Anything else — including a bare /agy — prints usage help.
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { BridgeState } from "./lifecycle";
-import { sessionKey, type SessionStore } from "./session-store";
+import { askThreadKey, piSessionKey, type SessionStore } from "./session-store";
 
 export const AGY_USAGE_LINES: readonly string[] = [
 	"Usage: /agy <subcommand>",
-	"  status — show agy bridge state (config, models, session binding, in-flight turn)",
-	"  clear  — clear this session's persisted agy binding and in-memory state",
+	"  status — show agy bridge state (config, models, session + thread bindings, in-flight turn)",
+	"  clear  — clear this session's persisted agy bindings (session AND thread rows) and in-memory state",
 ];
 
 export interface AgyCommandDeps {
@@ -61,6 +63,11 @@ export async function buildStatusLines(deps: AgyCommandDeps, key: string): Promi
 		entry === undefined
 			? "session: none"
 			: `session: ${entry.conversationId} (${entry.hashes !== undefined ? `${entry.hashes.length} hashes` : "unknown baseline"})`;
+	// v0.3 R5/D5: the AskAgy thread binding (derived INSIDE from the same
+	// shared key — never forked). Thread rows are always hash-less, so the
+	// thread line never prints a hash count.
+	const threadEntry = await deps.state.lookupBinding(deps.store, askThreadKey(key));
+	const threadLine = threadEntry === undefined ? "thread: none" : `thread: ${threadEntry.conversationId} (resume-always)`;
 	const turn = deps.state.currentTurn(key);
 	const turnLine =
 		turn === undefined ? "turn: idle" : `turn: in flight (${formatAge(Math.max(0, now() - turn.startedAt))})`;
@@ -70,14 +77,14 @@ export async function buildStatusLines(deps: AgyCommandDeps, key: string): Promi
 		`  state: ${deps.stateDir}`,
 		`  ${modelsLine}`,
 		`  ${sessionLine}`,
+		`  ${threadLine}`,
 		`  ${turnLine}`,
 	];
 }
 
-/** The R5 session key at the command boundary: the session's id, else the project cwd. */
+/** The R5 session key at the command boundary: the session's id, else the project cwd (shared derivation, v0.3 D1). */
 function commandSessionKey(ctx: ExtensionCommandContext): string {
-	const id = ctx.sessionManager.getSessionId();
-	return sessionKey(id !== "" ? id : undefined, ctx.cwd);
+	return piSessionKey(ctx);
 }
 
 export interface AgyCommand {
@@ -98,13 +105,23 @@ export function createAgyCommand(deps: AgyCommandDeps): AgyCommand {
 			if (sub === "status") {
 				ctx.ui.notify((await buildStatusLines(deps, key)).join("\n"), "info");
 			} else if (sub === "clear") {
+				// v0.3 R5/D4: the session row AND its thread row share the
+				// session's fate — both persisted rows and both cache entries.
+				const askKey = askThreadKey(key);
 				const entry = await deps.store.getEntry(key);
+				const threadEntry = await deps.store.getEntry(askKey);
 				await deps.store.rebind(key);
+				await deps.store.rebind(askKey);
 				deps.state.dropBinding(key);
+				deps.state.dropBinding(askKey);
 				ctx.ui.notify(
-					entry !== undefined
-						? `agy binding cleared: conversation ${entry.conversationId}`
-						: "no agy binding for this session",
+					entry !== undefined && threadEntry !== undefined
+						? `agy bindings cleared: conversation ${entry.conversationId} (session) and thread conversation ${threadEntry.conversationId}`
+						: entry !== undefined
+							? `agy binding cleared: conversation ${entry.conversationId}`
+							: threadEntry !== undefined
+								? `agy binding cleared: thread conversation ${threadEntry.conversationId}`
+								: "no agy binding for this session",
 					"info",
 				);
 			} else {

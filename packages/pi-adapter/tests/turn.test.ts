@@ -579,3 +579,67 @@ describe("v0.2 R8: onRetry hook (D7)", () => {
 		expect(retries).toBe(0);
 	});
 });
+
+// --- v0.3 R2/D3: the resume-always thread branch ------------------------------------
+
+describe("unit: turn — resume-always thread branch (v0.3 R2, D3)", () => {
+	test("resumeAlways + stored hash-less entry: resumes via --conversation, NO onDiverged/seed/notice, NO baseline write-back", async () => {
+		const { store, spawns, turn, req, divergedCalls } = await setup();
+		await store.bind("s-thread", "conv-old"); // hash-less thread row (v0.3 :ask shape)
+		const result = await turn({ ...req({ messages: [userMsg("follow-up")] }, { sessionId: "s-thread" }), resumeAlways: true });
+		expect(result.diverged).toBe(false);
+		expect(divergedCalls()).toBe(0); // the divergence ladder NEVER runs on the thread path
+		expect(result.resumed).toBe(true);
+		expect(spawns[0].args[spawns[0].args.indexOf("--conversation") + 1]).toBe("conv-old");
+		// Last-user-turn prompt only — no divergence seed of the prior thread.
+		expect(result.prompt).toBe("follow-up");
+		// No baseline write-back: the rebound row stays hash-less.
+		expect(await store.getEntry("s-thread")).toEqual({ conversationId: "conv-1" });
+	});
+
+	test("resumeAlways + no entry: fresh conversation (no --conversation) bound hash-less", async () => {
+		const { store, spawns, turn, req, divergedCalls } = await setup();
+		const result = await turn({ ...req({ messages: [userMsg("first thread prompt")] }, { sessionId: "s-new-thread" }), resumeAlways: true });
+		expect(result.diverged).toBe(false);
+		expect(divergedCalls()).toBe(0);
+		expect(spawns[0].args).not.toContain("--conversation");
+		expect(result.prompt).toBe("first thread prompt");
+		expect(await store.getEntry("s-new-thread")).toEqual({ conversationId: "conv-1" }); // absent hashes field
+	});
+
+	test("resumeAlways + timeout: resume-once fires per attempt and the rebound conversationId persists hash-less", async () => {
+		let attempt = 0;
+		let retries = 0;
+		const { store, spawns, turn, req } = await setup(() =>
+			++attempt === 1
+				? fakeChild({ lines: [{ event: "init", conversation_id: "conv-1" }], exit: 124 })
+				: fakeChild({ lines: [{ event: "init", conversation_id: "conv-2" }, SUCCESS("conv-2")], stdin: true }),
+		);
+		const result = await turn({
+			...req({ messages: [userMsg("slow thread task")] }, { sessionId: "s-thread-timeout" }),
+			resumeAlways: true,
+			onRetry: () => retries++,
+		});
+		expect(spawns).toHaveLength(2);
+		expect(retries).toBe(1); // v0.1 R8 resume-once machinery unchanged, now on the thread row
+		expect(spawns[1].args[spawns[1].args.indexOf("--conversation") + 1]).toBe("conv-1");
+		expect(result.classification.outcome).toBe("success");
+		expect(result.conversationId).toBe("conv-2");
+		expect(await store.getEntry("s-thread-timeout")).toEqual({ conversationId: "conv-2" }); // hash-less
+	});
+
+	test("resumeAlways + abort mid-run: the binding survives (tapped conversation bound hash-less), TurnAborted thrown", async () => {
+		const controller = new AbortController();
+		const { store, spawns, turn, req } = await setup(() =>
+			fakeChild({ lines: [{ event: "init", conversation_id: "conv-thread-ab" }], hold: true, stdin: true }),
+		);
+		const p = turn({
+			...req({ messages: [userMsg("q")] }, { sessionId: "s-thread-ab", signal: controller.signal }),
+			resumeAlways: true,
+		});
+		setTimeout(() => controller.abort(), 25);
+		await expect(p).rejects.toBeInstanceOf(TurnAborted);
+		expect(spawns[0].child.killed).toBe(true);
+		expect(await store.getEntry("s-thread-ab")).toEqual({ conversationId: "conv-thread-ab" }); // hash-less, survives
+	});
+});

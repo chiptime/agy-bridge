@@ -17,7 +17,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openPiSessionStore, openSessionStore, SessionStoreBusyError, sessionKey } from "../src/session-store";
+import {
+	askThreadKey,
+	openPiSessionStore,
+	openSessionStore,
+	piSessionKey,
+	SessionStoreBusyError,
+	sessionKey,
+} from "../src/session-store";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
@@ -251,5 +258,58 @@ describe("unit: session-store — cross-process lockfile (read-modify-write mutu
 		expect(existsSync(`${path}.lock`)).toBe(false);
 		const raw = JSON.parse(readFileSync(path, "utf8")); // old state, still complete JSON
 		expect(Object.keys(raw.sessions)).toEqual(["key-keep"]);
+	});
+});
+
+// --- v0.3 R1/D1/D2: the :ask thread namespace ---------------------------------------
+
+describe("unit: session-store — v0.3 :ask thread namespace (R1, D1, D2)", () => {
+	test("askThreadKey: the thread key is `<sessionKey>:ask`", () => {
+		expect(askThreadKey("s1")).toBe("s1:ask");
+		expect(askThreadKey("/repo")).toBe("/repo:ask");
+	});
+
+	test("piSessionKey: the sessionManager id wins; an empty or absent id falls back to cwd", () => {
+		expect(piSessionKey({ sessionManager: { getSessionId: () => "sess-9" }, cwd: "/repo" })).toBe("sess-9");
+		expect(piSessionKey({ sessionManager: { getSessionId: () => "" }, cwd: "/repo" })).toBe("/repo");
+		expect(piSessionKey({ cwd: "/repo" })).toBe("/repo");
+	});
+
+	test("provider row and thread row coexist in one store (disjoint :ask namespace)", async () => {
+		const { store } = await setup();
+		await store.bind("s1", "conv-provider", ["h0"]);
+		await store.bind(askThreadKey("s1"), "conv-thread");
+		expect(await store.get("s1")).toBe("conv-provider");
+		expect(await store.get(askThreadKey("s1"))).toBe("conv-thread");
+		expect(await store.getEntry("s1")).toEqual({ conversationId: "conv-provider", hashes: ["h0"] });
+		expect(await store.getEntry(askThreadKey("s1"))).toEqual({ conversationId: "conv-thread" });
+	});
+
+	test("hash-less thread row round-trips via 2-arg bind: getEntry returns {conversationId} with NO hashes field", async () => {
+		const { path, store } = await setup();
+		await store.bind(askThreadKey("s1"), "conv-thread");
+		const entry = await store.getEntry(askThreadKey("s1"));
+		expect(entry).toEqual({ conversationId: "conv-thread" });
+		expect(entry?.hashes).toBeUndefined();
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		// The store's canonical hash-less form is the ABSENT field, not null.
+		expect("hashes" in raw.sessions["s1:ask"]).toBe(false);
+		expect(raw.sessions["s1:ask"].conversationId).toBe("conv-thread");
+	});
+
+	test(`hand-edited literal "hashes": null degrades to the hash-less unknown baseline`, async () => {
+		const dir = await mkdtemp("/tmp/agy-pi-store-nullhash-");
+		const path = join(dir, "pi-sessions.json");
+		writeFileSync(
+			path,
+			JSON.stringify({
+				version: 1,
+				sessions: { "s1:ask": { conversationId: "conv-t", hashes: null, updatedAt: iso(-DAY_MS) } },
+			}),
+		);
+		const store = openSessionStore(path);
+		const entry = await store.getEntry("s1:ask");
+		expect(entry).toEqual({ conversationId: "conv-t" });
+		expect(entry?.hashes).toBeUndefined();
 	});
 });

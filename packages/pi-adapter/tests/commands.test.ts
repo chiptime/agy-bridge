@@ -73,6 +73,7 @@ describe("/agy status", () => {
 		expect(lines.join("\n")).toContain(`state: ${deps.stateDir}`);
 		expect(lines.join("\n")).toContain("models: 3 discovered, cache 2.0s old (fresh)");
 		expect(lines.join("\n")).toContain("session: conv-7 (3 hashes)");
+		expect(lines.join("\n")).toContain("thread: none");
 		expect(lines.join("\n")).toContain("turn: idle");
 	});
 
@@ -81,6 +82,7 @@ describe("/agy status", () => {
 		deps.state.setDiscovery(ROWS);
 		const lines = await buildStatusLines(deps, "sess-1");
 		expect(lines.join("\n")).toContain("session: none");
+		expect(lines.join("\n")).toContain("thread: none");
 	});
 
 	test("hash-less binding reports an unknown baseline", async () => {
@@ -88,6 +90,7 @@ describe("/agy status", () => {
 		await deps.store.bind("sess-1", "conv-legacy");
 		const lines = await buildStatusLines(deps, "sess-1");
 		expect(lines.join("\n")).toContain("session: conv-legacy (unknown baseline)");
+		expect(lines.join("\n")).toContain("thread: none");
 	});
 
 	test("stale discovery cache and no cache are distinguishable", async () => {
@@ -116,43 +119,80 @@ describe("/agy status", () => {
 		await command.handler("status", ctx);
 		expect(notifications).toHaveLength(1);
 		expect(notifications[0]?.message).toContain("session: conv-7 (1 hashes)");
+		expect(notifications[0]?.message).toContain("thread: none");
 	});
 });
 
 // --- clear ------------------------------------------------------------------------
 
 describe("/agy clear", () => {
-	test("clears the persisted row for `sessionId ?? cwd` and the in-memory cache", async () => {
+	test("clears the persisted row for `sessionId ?? cwd` AND the thread row, plus both in-memory cache entries", async () => {
 		const { deps, ctx, state, notifications } = await setup({ sessionId: "sess-1" });
 		await deps.store.bind("sess-1", "conv-7", ["h1"]);
+		await deps.store.bind("sess-1:ask", "conv-thread"); // v0.3: the thread row shares the session's fate
 		await deps.store.bind("sess-other", "conv-9", ["h2"]); // sibling session must survive
 		state.cacheBinding("sess-1", { conversationId: "conv-7", hashes: ["h1"] });
+		state.cacheBinding("sess-1:ask", { conversationId: "conv-thread" });
 		await state.lookupBinding(deps.store, "sess-other");
 
 		await createAgyCommand(deps).handler("clear", ctx);
 
 		await expect(deps.store.getEntry("sess-1")).resolves.toBeUndefined();
+		await expect(deps.store.getEntry("sess-1:ask")).resolves.toBeUndefined();
 		await expect(deps.store.getEntry("sess-other")).resolves.toEqual({
 			conversationId: "conv-9",
 			hashes: ["h2"],
 		});
-		// sess-1's cache entry is dropped; the sibling session's entry survives.
+		// Only the sibling session's cache entry survives — BOTH sess-1 entries dropped.
 		expect(state.snapshot().cachedBindings).toBe(1);
 		await expect(state.lookupBinding(deps.store, "sess-1")).resolves.toBeUndefined();
+		// Notify names whichever existed — here, both.
 		expect(notifications[0]?.message).toContain("conv-7");
+		expect(notifications[0]?.message).toContain("conv-thread");
 	});
 
-	test("falls back to the cwd key when the session has no id", async () => {
+	test("falls back to the cwd key when the session has no id (thread row cleared too)", async () => {
 		const { deps, ctx } = await setup({ sessionId: "", cwd: "/proj" });
 		await deps.store.bind("/proj", "conv-cwd");
+		await deps.store.bind("/proj:ask", "conv-cwd-thread");
 		await createAgyCommand(deps).handler("clear", ctx);
 		await expect(deps.store.getEntry("/proj")).resolves.toBeUndefined();
+		await expect(deps.store.getEntry("/proj:ask")).resolves.toBeUndefined();
 	});
 
 	test("clearing an unbound session reports honestly and does not throw", async () => {
 		const { deps, ctx, notifications } = await setup();
 		await createAgyCommand(deps).handler("clear", ctx);
 		expect(notifications[0]?.message).toContain("no agy binding");
+	});
+});
+
+// --- v0.3 R5: thread binding visibility (D4/D5) -------------------------------------
+
+describe("v0.3 R5: thread binding visibility", () => {
+	test("status: bound thread shows `thread: <id> (resume-always)` between session and turn; never a hash count", async () => {
+		const { deps } = await setup();
+		await deps.store.bind("sess-1", "conv-7", ["h1"]);
+		await deps.store.bind("sess-1:ask", "conv-thread");
+		const lines = await buildStatusLines(deps, "sess-1");
+		const threadLine = lines.find((l) => l.includes("thread:"));
+		expect(threadLine).toBe("  thread: conv-thread (resume-always)"); // exact line, hash count impossible
+		const joined = lines.join("\n");
+		expect(joined).toContain("session: conv-7 (1 hashes)");
+		// Order: the thread line sits BETWEEN the session and turn lines.
+		expect(joined.indexOf("session: conv-7")).toBeLessThan(joined.indexOf("thread: conv-thread"));
+		expect(joined.indexOf("thread: conv-thread")).toBeLessThan(joined.indexOf("turn:"));
+	});
+
+	test("clear with ONLY a thread row: the thread binding is cleared and named (session untouched)", async () => {
+		const { deps, ctx, state, notifications } = await setup({ sessionId: "sess-1" });
+		await deps.store.bind("sess-1:ask", "conv-thread");
+		state.cacheBinding("sess-1:ask", { conversationId: "conv-thread" });
+		await createAgyCommand(deps).handler("clear", ctx);
+		await expect(deps.store.getEntry("sess-1:ask")).resolves.toBeUndefined();
+		await expect(deps.store.getEntry("sess-1")).resolves.toBeUndefined(); // never bound — still absent
+		expect(state.snapshot().cachedBindings).toBe(0);
+		expect(notifications[0]?.message).toContain("conv-thread");
 	});
 });
 

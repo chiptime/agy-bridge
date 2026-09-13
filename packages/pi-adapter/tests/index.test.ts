@@ -455,7 +455,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		expect(env.calls.providers).toHaveLength(1);
 	});
 
-	test("R6/R10: AskAgy's state wiring — an in-flight delegation is visible in /agy status, then clears (same cwd key)", async () => {
+	test("R6/R10: AskAgy's state wiring — a non-isolated delegation binds its thread row and /agy status returns to idle (v0.3: in-flight turns register under the :ask key, invisible to the session-keyed turn line by design)", async () => {
 		const { calls, spawn, load, root } = await factoryEnv({
 			options: { askAgy: { enabled: true } }, // v0.2 R3: the tool only exists when enabled
 			spawn: spawnSeam(() => fakeChild({ lines: DEFAULT_LINES, hold: true })),
@@ -470,16 +470,11 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 			undefined,
 			{ cwd: projDir, model: { provider: "other" } } as never,
 		);
-		// Wait until the turn registers in-flight (bounded poll on /agy status).
-		const notes: string[] = [];
-		let status = "";
-		for (let i = 0; i < 50 && !status.includes("in flight"); i++) {
-			notes.length = 0;
-			await calls.commands[0].handler("status", commandCtx(projDir, notes));
-			status = notes[0] ?? "";
-			if (!status.includes("in flight")) await new Promise((r) => setTimeout(r, 5));
+		// Bounded wait until the delegation spawns (the execute path awaits the
+		// store read before runAgyStream).
+		for (let i = 0; i < 50 && spawn.spawns.length === 0; i++) {
+			await new Promise((r) => setTimeout(r, 5));
 		}
-		expect(status).toContain("turn: in flight");
 		// The delegation rides the corrected stdin transport too.
 		expect(spawn.spawns.length).toBeGreaterThanOrEqual(1);
 		expect(stdinContent(spawn.spawns[0])).toBe("long sub-task");
@@ -489,7 +484,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		spawn.spawns[0].child.emit("close", 0, null);
 		const result = await pending;
 		expect((result as { content: { type: string; text: string }[] }).content[0].text).toBe("the delegated answer");
-		notes.length = 0;
+		const notes: string[] = [];
 		await calls.commands[0].handler("status", commandCtx(projDir, notes));
 		expect(notes[0]).toContain("turn: idle");
 	});
@@ -675,6 +670,24 @@ async function runTool(
 	)) as { content: { type: string; text: string }[]; details: { isolated: boolean; skillsInjected: boolean } };
 	return { text: result.content.map((c) => c.text).join(""), details: result.details };
 }
+
+describe("integration: extensions/index — thread continuity e2e (v0.3 R2)", () => {
+	test("two factory AskAgy non-isolated calls with DISTINCT prompts continue ONE thread (same conversationId)", async () => {
+		const env = await factoryEnv({ options: { askAgy: { enabled: true } } });
+		await env.load();
+		const projDir = join(env.root, "proj");
+		const first = await runTool(env.calls, { prompt: "first factory task" }, projDir);
+		const second = await runTool(env.calls, { prompt: "second factory task — distinct" }, projDir);
+		expect(env.spawn.spawns).toHaveLength(2);
+		// First call starts the thread; the second resumes the SAME conversation.
+		expect(env.spawn.spawns[0].args).not.toContain("--conversation");
+		expect(env.spawn.spawns[1].args[env.spawn.spawns[1].args.indexOf("--conversation") + 1]).toBe("conv-1");
+		expect(first.text).toBe("the delegated answer");
+		expect(second.text).toBe("the delegated answer");
+		expect((first.details as { conversationId?: string }).conversationId).toBe("conv-1");
+		expect((second.details as { conversationId?: string }).conversationId).toBe("conv-1");
+	});
+});
 
 describe("integration: extensions/index — askAgy defaults reach the tool (v0.2 R4)", () => {
 	test("R4: defaultIsolated becomes the tool's effective default; explicit isolated:false still wins", async () => {

@@ -97,6 +97,16 @@ export interface TurnRequest {
 	 * = accept-edits).
 	 */
 	mode?: "plan" | "accept-edits";
+	/**
+	 * v0.3 R2/D3: resume-always — set ONLY by the ask tool's non-isolated
+	 * execute (the tool prompt IS the whole input). Skips the R7 divergence
+	 * decision AND the hash-less adopt-once clause entirely: every call
+	 * resumes the stored thread conversation (fresh on the session's first
+	 * call) and binds hash-less. Provider turns pass NOTHING — the ladder
+	 * and bind sites stay byte-identical to v0.2 (R6); the flag never
+	 * reaches argv.
+	 */
+	resumeAlways?: boolean;
 }
 
 export interface TurnDeps {
@@ -270,7 +280,14 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		const entry = await (deps.state?.lookupBinding(deps.store, key) ?? deps.store.getEntry(key));
 		let diverged = false;
 		let resumeId: string | undefined;
-		if (entry === undefined) {
+		if (req.resumeAlways === true) {
+			// Thread path (v0.3 R2/D3): the tool prompt IS the whole input, so
+			// the divergence table never applies — always resume the stored
+			// thread conversation (undefined on the first call → fresh), no
+			// compare, no re-seed, no ⟲ notice, no adopt-once clause. The bind
+			// stays hash-less via the baseline below.
+			resumeId = entry?.conversationId;
+		} else if (entry === undefined) {
 			resumeId = undefined; // first turn: fresh, last-user-turn only
 		} else if (entry.hashes === undefined) {
 			resumeId = entry.conversationId; // unknown baseline: adopt once, then protected
@@ -282,6 +299,10 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			deps.debug?.log("diverged", { key });
 		}
 		const isNewConversation = entry === undefined || diverged;
+		// Baseline persisted at the bind/cache sites: thread turns bind
+		// hash-less (resume-always needs no protection); provider turns keep
+		// the incoming hashes byte-identical to v0.1/v0.2 (R6).
+		const baseline = req.resumeAlways === true ? undefined : hashes;
 		const seedInfo = diverged ? renderSeed(incoming) : undefined;
 		const mapping = mapPiPrompt(req.context, { isNewConversation, seed: seedInfo?.seed });
 		// Turn-start fact line (R11): ids and codes only — never the prompt.
@@ -345,8 +366,8 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				...(r.conversationId !== undefined ? { conversationId: r.conversationId } : {}),
 			});
 			if (r.conversationId !== undefined) {
-				await deps.store.bind(key, r.conversationId, hashes);
-				deps.state?.cacheBinding(key, { conversationId: r.conversationId, hashes });
+				await deps.store.bind(key, r.conversationId, baseline);
+				deps.state?.cacheBinding(key, { conversationId: r.conversationId, ...(baseline !== undefined ? { hashes: baseline } : {}) });
 			}
 			// Probe 2a: a graceful-flush abort still resolved a partial envelope.
 			throw new TurnAborted(r.run.envelope?.response);
@@ -367,8 +388,8 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		}
 		if (result.classification.outcome === "success") {
 			if (result.conversationId !== undefined) {
-				await deps.store.bind(key, result.conversationId, hashes);
-				deps.state?.cacheBinding(key, { conversationId: result.conversationId, hashes });
+				await deps.store.bind(key, result.conversationId, baseline);
+				deps.state?.cacheBinding(key, { conversationId: result.conversationId, ...(baseline !== undefined ? { hashes: baseline } : {}) });
 			}
 			deps.debug?.log("turn_end", {
 				key,

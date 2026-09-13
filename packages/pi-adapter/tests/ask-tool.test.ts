@@ -25,7 +25,7 @@ import { messageHashes } from "agy-bridge-engine";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAskAgyTool, type AskAgyDeps, type AskAgyParams } from "../src/ask-tool";
 import { AgyConfigError } from "../src/config";
-import { openSessionStore, type SessionStore } from "../src/session-store";
+import { askThreadKey, openSessionStore, type SessionStore } from "../src/session-store";
 import type { PiAgyModel } from "../src/models";
 
 // --- fixtures -----------------------------------------------------------------
@@ -35,9 +35,9 @@ const SUCCESS = (conversationId: string, response = "the answer") => ({
 	result: { conversation_id: conversationId, status: "SUCCESS", response },
 });
 
-/** Minimal ChildProcess stand-in: scripted NDJSON lines, stdin capture, exit/close. */
+/** Minimal ChildProcess stand-in: scripted NDJSON lines, stdin capture, exit/close. `hold:true` keeps it open (abort rows). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function fakeChild(opts: { lines?: unknown[]; exit?: number | null }) {
+function fakeChild(opts: { lines?: unknown[]; exit?: number | null; hold?: boolean }) {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const child: any = new EventEmitter();
 	child.stdout = new Readable({ read() {} });
@@ -59,7 +59,7 @@ function fakeChild(opts: { lines?: unknown[]; exit?: number | null }) {
 	for (const line of opts.lines ?? []) {
 		child.stdout.push(Buffer.from(`${JSON.stringify(line)}\n`));
 	}
-	setTimeout(() => child.emit("close", opts.exit ?? 0, null), 10);
+	if (!opts.hold) setTimeout(() => child.emit("close", opts.exit ?? 0, null), 10);
 	return child;
 }
 
@@ -124,12 +124,13 @@ async function setup(script?: (rec: SpawnRecord, call: number) => unknown, depsO
 	const run = (
 		params: AskAgyParams & Record<string, unknown>,
 		ctxOverrides: Partial<ExtensionContext> = {},
+		signal?: AbortSignal,
 	): Promise<{ text: string; details: unknown }> =>
 		tool
 			.execute(
 				"call-1",
 				params as never,
-				undefined,
+				signal,
 				(u) => {
 					const text = u.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 					if (text !== "") updates.push(text);
@@ -240,28 +241,29 @@ describe("unit: ask-tool — scope containment (R9, threat 'Git repository selec
 		expect(spy.calls).toEqual({ get: 0, getEntry: 0, bind: 0, rebind: 0, prune: 0 });
 	});
 
-	test("default keeps continuity keyed by the pi session (ctx.cwd): stored entry resumes via --conversation, success rebinds", async () => {
+	test("default keeps continuity keyed by the pi session thread (askThreadKey(ctx.cwd)): stored entry resumes via --conversation, success rebinds", async () => {
 		const { ctxDir, inner, spawns, run } = await setup();
 		const prompt = "same self-contained question";
-		await inner.bind(ctxDir, "conv-old", messageHashes([{ role: "user", content: prompt }]));
+		await inner.bind(askThreadKey(ctxDir), "conv-old", messageHashes([{ role: "user", content: prompt }]));
 		const { details } = await run({ prompt });
 		expect(spawns[0].args[spawns[0].args.indexOf("--conversation") + 1]).toBe("conv-old");
-		expect(await inner.get(ctxDir)).toBe("conv-1");
+		expect(await inner.get(askThreadKey(ctxDir))).toBe("conv-1");
 		expect((details as { conversationId?: string }).conversationId).toBe("conv-1");
 	});
 
-	test("successive different prompts in one session follow the R7 table: diverged → fresh seeded conversation, prior prompt never resent as-is", async () => {
+	test("successive different prompts in one session continue ONE thread (v0.3 R2): the stored conversation always resumes, no re-seed", async () => {
 		const { ctxDir, inner, spawns, run } = await setup();
 		await run({ prompt: "first task" });
-		expect(await inner.get(ctxDir)).toBe("conv-1");
+		expect(await inner.get(askThreadKey(ctxDir))).toBe("conv-1");
 		const { details } = await run({ prompt: "second task" });
-		// Non-prefix baseline (the new prompt replaced the old): the R7 table
-		// starts a FRESH conversation (no --conversation conv-1) seeded with
-		// the prior thread; the store rebinds to the new conversation.
-		expect(spawns[1].args.some((a) => a === "conv-1")).toBe(false);
-		expect(spawns[1].args).not.toContain("--conversation");
-		expect(await inner.get(ctxDir)).toBe("conv-1"); // fixture returns the same id
+		// v0.3 R2: the tool prompt IS the whole input — the divergence table
+		// does NOT apply to thread keys. The SAME conversation resumes via
+		// --conversation conv-1; no re-seed, no divergence seed of the prior
+		// thread in the forwarded prompt.
+		expect(spawns[1].args[spawns[1].args.indexOf("--conversation") + 1]).toBe("conv-1");
+		expect(await inner.get(askThreadKey(ctxDir))).toBe("conv-1");
 		expect((details as { conversationId?: string }).conversationId).toBe("conv-1");
+		expect(stdinContent(spawns[1])).toBe("second task");
 	});
 });
 
@@ -481,6 +483,68 @@ describe("unit: ask-tool — execution modes (v0.2 R5, D1)", () => {
 	test("allowFullMode default (unset): schema enum keeps all three modes", async () => {
 		const { tool } = await setup();
 		expect(modeEnumOf(tool)).toEqual(["read", "none", "full"]);
+	});
+});
+
+// --- v0.3 R1/R2/R4: thread continuity over the :ask namespace -----------------------
+
+describe("unit: ask-tool — thread continuity (v0.3 R1/R2, :ask namespace)", () => {
+	test("first non-isolated call binds a FRESH thread at askThreadKey(ctx.cwd): no --conversation, hash-less row", async () => {
+		const { ctxDir, inner, spawns, run } = await setup();
+		await run({ prompt: "first task" });
+		expect(spawns[0].args).not.toContain("--conversation");
+		expect(await inner.get(askThreadKey(ctxDir))).toBe("conv-1");
+		expect(await inner.getEntry(askThreadKey(ctxDir))).toEqual({ conversationId: "conv-1" }); // absent hashes
+		// The provider/session row (ctx.cwd itself) is never touched by AskAgy.
+		expect(await inner.getEntry(ctxDir)).toBeUndefined();
+	});
+
+	test("three distinct prompts → ONE thread conversationId; every call after the first resumes via --conversation", async () => {
+		const { ctxDir, inner, spawns, run } = await setup();
+		await run({ prompt: "task one" });
+		await run({ prompt: "task two — a different task" });
+		await run({ prompt: "task three — different again" });
+		expect(spawns).toHaveLength(3);
+		expect(spawns[0].args).not.toContain("--conversation");
+		expect(spawns[1].args[spawns[1].args.indexOf("--conversation") + 1]).toBe("conv-1");
+		expect(spawns[2].args[spawns[2].args.indexOf("--conversation") + 1]).toBe("conv-1");
+		expect(await inner.get(askThreadKey(ctxDir))).toBe("conv-1");
+	});
+
+	test("R1: a ctx WITH a sessionManager id keys the thread `<id>:ask`, never the cwd", async () => {
+		const { ctxDir, inner, run } = await setup();
+		await run({ prompt: "keyed by session id" }, {
+			sessionManager: { getSessionId: () => "sess-9" },
+		} as unknown as Partial<ExtensionContext>);
+		expect(await inner.get("sess-9:ask")).toBe("conv-1");
+		expect(await inner.getEntry(askThreadKey(ctxDir))).toBeUndefined(); // cwd NOT consulted
+	});
+
+	test("thread timeout: resume-once fires and the rebound conversationId persists hash-less on the thread row", async () => {
+		let attempt = 0;
+		const { ctxDir, inner, spawns, run } = await setup(() =>
+			++attempt === 1
+				? fakeChild({ lines: [{ event: "init", conversation_id: "conv-1" }], exit: 124 })
+				: fakeChild({ lines: [{ event: "init", conversation_id: "conv-2" }, SUCCESS("conv-2")] }),
+		);
+		const { details } = await run({ prompt: "slow task" });
+		expect(spawns).toHaveLength(2);
+		expect(spawns[1].args[spawns[1].args.indexOf("--conversation") + 1]).toBe("conv-1");
+		expect(await inner.getEntry(askThreadKey(ctxDir))).toEqual({ conversationId: "conv-2" });
+		expect((details as { conversationId?: string }).conversationId).toBe("conv-2");
+	});
+
+	test("thread abort: the binding SURVIVES (abort persist runs on the thread row) and the tool reports the abort", async () => {
+		const controller = new AbortController();
+		const { ctxDir, inner, spawns, run } = await setup(() =>
+			fakeChild({ lines: [{ event: "init", conversation_id: "conv-thread-ab" }], hold: true }),
+		);
+		const p = run({ prompt: "abort me" }, {}, controller.signal);
+		setTimeout(() => controller.abort(), 25);
+		const { text } = await p;
+		expect(text).toContain("aborted");
+		expect(spawns[0].child.killed).toBe(true);
+		expect(await inner.getEntry(askThreadKey(ctxDir))).toEqual({ conversationId: "conv-thread-ab" });
 	});
 });
 

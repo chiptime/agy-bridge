@@ -38,6 +38,16 @@
  * hashes (unknown baseline) are adopted as-is for one turn, then a
  * baseline is stored and protection is active.
  *
+ * Thread namespace (v0.3 R1): non-isolated AskAgy delegations key their
+ * conversation continuity at `askThreadKey(sessionKey)` = `<sessionKey>:ask`
+ * — a namespace disjoint from provider/session keys, which never contain
+ * `:ask`. Thread rows are written hash-less (2-arg bind), so they carry
+ * unknown baselines by construction; the resume decision for them is NOT
+ * made from the row shape but from an explicit request flag (turn.ts).
+ * `piSessionKey` is the shared pi-session derivation: the host session
+ * manager's id when available, else the cwd — the SAME derivation every
+ * consumer (turn via options.sessionId, /agy commands, the ask tool) uses.
+ *
  * R6 lifecycle note: pi fires session_start/session_shutdown on /new,
  * /resume, /fork and reload. The adapter's in-memory context recycles in
  * those hooks (later slices) — but THIS store is deliberately persistent:
@@ -78,6 +88,27 @@ export class SessionStoreBusyError extends Error {
 /** R5 key derivation: the turn's explicit `options.sessionId`, else the cwd. */
 export function sessionKey(sessionId: string | undefined, cwd: string): string {
 	return sessionId ?? cwd;
+}
+
+/**
+ * v0.3 R1 thread key: an AskAgy delegation's continuity row lives one
+ * namespace away from the provider/session row so both coexist for the
+ * same pi session. Provider/session keys never contain `:ask`.
+ */
+export function askThreadKey(key: string): string {
+	return `${key}:ask`;
+}
+
+/**
+ * The pi session identity at any host boundary (v0.3 D1, shared — never
+ * forked per consumer): the session manager's id when the host supplies
+ * one, else the cwd. Defensive boundary read, mirroring turn.ts's
+ * options handling: a missing manager or an empty id both fall back to
+ * the cwd.
+ */
+export function piSessionKey(ctx: { sessionManager?: { getSessionId(): string }; cwd: string }): string {
+	const id = ctx.sessionManager?.getSessionId() ?? "";
+	return sessionKey(id !== "" ? id : undefined, ctx.cwd);
 }
 
 export interface SessionEntry {

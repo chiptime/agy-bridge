@@ -10,9 +10,13 @@
  * in the prompt text can move the workdir: caller-supplied paths (extra
  * params, path-like prompt content) never reach the child's cwd or argv.
  *
- * Continuity: non-isolated calls keep conversation continuity keyed by
- * the pi session (ctx.cwd — pi exposes no session id at the tool
- * boundary, and runTurn derives the key as `options.sessionId ?? cwd`).
+ * Continuity (v0.3 R1/R2): non-isolated calls share ONE agy conversation
+ * per pi session — the thread key `askThreadKey(piSessionKey(ctx))` =
+ * `<sessionId || cwd>:ask` rides options.sessionId with resumeAlways, so
+ * runTurn ALWAYS resumes the stored thread and skips the divergence table
+ * (the tool prompt IS the whole input — nothing to hash or compare). The
+ * pi sessionManager id IS available at the tool boundary, so /new resets
+ * the thread and /resume restores it for free (host identity keys state).
  * isolated:true swaps in a throwaway in-memory store, so the persistent
  * pi-sessions.json is never read or written for that call and
  * --conversation is never passed (a one-shot by construction).
@@ -42,6 +46,7 @@ import type { BridgeState } from "./lifecycle";
 import type { PiAgyModel } from "./models";
 import { formatStepUpdate } from "./progress";
 import type { SessionStore } from "./session-store";
+import { askThreadKey, piSessionKey } from "./session-store";
 import { prepareScratchWorkdir } from "./scratch";
 import { normalizeResponseText, stepTextDelta } from "./stream-simple";
 import { runTurn, TurnAborted, TurnError } from "./turn";
@@ -315,15 +320,24 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 				params.skills === true && (deps.defaults?.appendSkills ?? true) ? (deps.skillsCatalog?.() ?? "") : "";
 			details.skillsInjected = catalog.trim() !== "";
 			const prompt = details.skillsInjected ? `Available skills:\n${catalog.trim()}\n\n${params.prompt}` : params.prompt;
-			// Non-isolated continuity is keyed by the pi session (ctx.cwd);
-			// isolated calls carry no session key at all. Boundary cast: pi
-			// supplies cwd on the options bag at runtime but does not declare
-			// it (same defensive read as turn.ts / the reference bridge).
+			// Non-isolated continuity (v0.3 R1/D1): the thread key is the pi
+			// session's `:ask` namespace — the host session id when supplied,
+			// else ctx.cwd (the SAME shared derivation /agy commands use). It
+			// rides options.sessionId (key derivation only, never argv) with
+			// resumeAlways (v0.3 R2/D3); options.cwd is unchanged — workdir
+			// authority stays scope-owned. Isolated calls carry no session
+			// key at all and never set the flag. Boundary cast: pi supplies
+			// cwd on the options bag at runtime but does not declare it (same
+			// defensive read as turn.ts / the reference bridge).
 			const options: SimpleStreamOptions | undefined = isolated
 				? signal === undefined
 					? undefined
 					: { signal }
-				: ({ cwd: ctx.cwd, ...(signal !== undefined ? { signal } : {}) } as SimpleStreamOptions);
+				: ({
+						sessionId: askThreadKey(piSessionKey(ctx)),
+						cwd: ctx.cwd,
+						...(signal !== undefined ? { signal } : {}),
+					} as SimpleStreamOptions);
 			const context: Context = { messages: [{ role: "user", content: prompt, timestamp: start }] };
 			// Delegation-start fact line (R11): mode/scope/model codes only.
 			deps.debug?.log("askagy_start", {
@@ -357,6 +371,10 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 					// commands verified blocked by Probe 1); full → --mode
 					// accept-edits (v0.1 behavior). --sandbox is never emitted.
 					mode: mode === "full" ? "accept-edits" : "plan",
+					// v0.3 R2/D3: resume-always on the thread key — non-isolated
+					// execute ONLY. Isolated calls keep fresh-conversation
+					// semantics through the throwaway store (R4).
+					...(isolated ? {} : { resumeAlways: true }),
 					onStep: (step) => {
 						const delta = stepTextDelta(step);
 						segments.push(delta !== undefined ? delta : formatStepUpdate(step));
