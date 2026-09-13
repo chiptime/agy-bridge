@@ -23,7 +23,7 @@ import {
 	readVariant,
 	sanitizePreview,
 } from "../src/language-model";
-import { messageHashes, type PromptMessage } from "../src/messages";
+import { hashesArePrefix, messageHashes, type PromptMessage } from "../src/messages";
 import { TurnError, type TurnDeps, type TurnRequest, type TurnResult } from "../src/turn";
 import type { SessionEntry, SessionStore } from "../src/session-store";
 import { resolveConfig, type AgyAdapterConfig } from "../src/config";
@@ -40,6 +40,12 @@ function fakeStore(entries: Record<string, SessionEntry> = {}): {
 		store: {
 			get: async (id) => entries[id]?.conversationId,
 			getEntry: async (id) => entries[id],
+			resolve: async (id, incoming) => {
+				const entry = entries[id];
+				if (!entry) return undefined;
+				if (entry.hashes) return hashesArePrefix(entry.hashes, incoming) ? entry : undefined;
+				return entry;
+			},
 			bind: async (id, conversationId, hashes) => {
 				bound.push({ sessionId: id, conversationId, hashes });
 				entries[id] = hashes ? { conversationId, hashes } : { conversationId };

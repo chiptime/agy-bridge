@@ -1,42 +1,21 @@
 /**
- * Session-map store (spec R7): opencode session id → agy conversation id in
- * `<state>/agy-bridge/opencode-sessions.json`. Every read-modify-write cycle
- * is serialized at three levels:
+ * Schema v2 (multi-conversation store): one opencode sessionID issues
+ * MULTIPLE model calls (side agents, compaction, future features), so each
+ * session maps to a LIST of conversation bindings instead of a single one.
+ * A binding is `{ conversationId, hashes?, updatedAt }`. v1 files migrate
+ * transparently: each old single entry loads wrapped as a one-element list;
+ * malformed entries degrade to an empty store (same tolerance as v1).
  *
- * 1. In-process mutexes — a global chain (file I/O) plus per-session keyed
- *    chains (same-session turns), unchanged from v1.
- * 2. A cross-process lockfile — each opencode instance is a SEPARATE OS
- *    process, so mutexes alone still let two read-modify-write cycles
- *    interleave (A reads, B reads, A writes, B writes → A's binding is
- *    lost). Before touching the file, the store takes `<state-file>.lock`
- *    via an exclusive create (`openSync(lockPath, "wx")`, i.e. O_EXCL) and
- *    releases it in a `finally` (close fd + unlink, tolerating ENOENT), so
- *    every op — pure reads included — reads and publishes a consistent
- *    whole-file view. O_EXCL is the arbiter because it is atomic across
- *    processes and needs no native flock dependency.
- * 3. Atomic temp-file + rename writes, so concurrent writers or a crash
- *    mid-write never leave partial JSON.
+ * Prefix routing (`resolve`): the incoming turn hashes pick WHICH binding
+ * this call continues — the binding whose baseline hashes are a prefix of
+ * the incoming ones (longest prefix wins); else a binding WITHOUT hashes
+ * (pre-upgrade adopt-once); else undefined → fresh conversation.
  *
- * Lock contract (bounded wait): acquisition retries every 20ms for at most
- * 3000ms; if the lock is still held, it throws `SessionStoreBusyError`
- * naming the lock path (failing a turn fast beats blocking it forever). A
- * lock whose mtime is older than 3000ms is STALE — its holder died before
- * releasing (e.g. SIGKILL) — so it is unlinked and taken over instead of
- * deadlocking the store for every future process. The 3000ms stale age is
- * safe because a locked section is read + stringify + write + rename —
- * milliseconds; a holder genuinely stuck longer could have its lock stolen,
- * and the atomic rename still prevents corruption (the residual race — a
- * stale holder later unlinking a successor's lock — is accepted: the next
- * acquirer re-creates the file and O_EXCL re-arbitrates).
- *
- * Entries older than 30 days are pruned on load and on bind; a missing or
- * corrupt file is treated as empty and replaced atomically.
- *
- * v1.1 divergence baseline: each entry optionally carries `hashes` — the
- * ordered per-message hashes of the opencode prompt array AS FORWARDED for
- * that conversation (messages.messageHashes). Entries written before v1.1
- * have no hashes (unknown baseline): the adapter adopts them as-is for one
- * turn, then stores a baseline and protection is active.
+ * Binding (`bind`): upsert semantics — same conversationId updates in
+ * place; a binding whose hashes are a prefix of the new hashes is
+ * REPLACED in place (a linear continuation rewrites its parent);
+ * otherwise the new binding is APPENDED. The list is capped at
+ * MAX_BINDINGS_PER_SESSION (3), evicting the oldest by updatedAt.
  */
 import {
 	closeSync,
@@ -51,6 +30,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { hashesArePrefix } from "./messages";
 
 export const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Total time spent waiting for the cross-process lock before giving up. */
@@ -59,6 +39,8 @@ export const LOCK_WAIT_MS = 3000;
 export const LOCK_STALE_MS = 3000;
 /** Poll interval while waiting for a fresh lock. */
 export const LOCK_POLL_MS = 20;
+/** Max conversation bindings kept per opencode session (oldest evicted). */
+export const MAX_BINDINGS_PER_SESSION = 3;
 
 /** Thrown when the cross-process lock could not be acquired within LOCK_WAIT_MS. */
 export class SessionStoreBusyError extends Error {
@@ -78,18 +60,29 @@ interface StoredEntry extends SessionEntry {
 	updatedAt: string;
 }
 interface StoreFile {
-	version: 1;
-	sessions: Record<string, StoredEntry>;
+	version: 2;
+	sessions: Record<string, StoredEntry[]>;
 }
 
 export interface SessionStore {
 	get(sessionId: string): Promise<string | undefined>;
-	/** Full entry including the v1.1 divergence baseline; undefined when unbound. */
+	/** Latest binding (by updatedAt) for the session; undefined when unbound. */
 	getEntry(sessionId: string): Promise<SessionEntry | undefined>;
+	/**
+	 * v2 prefix routing: the binding this incoming call continues — whose
+	 * hashes are a prefix of incomingHashes (longest prefix wins), else a
+	 * binding without hashes (adopt-once), else undefined (fresh conversation).
+	 */
+	resolve(sessionId: string, incomingHashes: string[]): Promise<SessionEntry | undefined>;
+	/**
+	 * v2 upsert: same conversationId updates in place; a binding whose
+	 * hashes prefix the new ones is replaced (linear continuation rewrites
+	 * its parent); otherwise appended. List capped at MAX_BINDINGS_PER_SESSION.
+	 */
 	bind(sessionId: string, conversationId: string, hashes?: string[]): Promise<void>;
-	/** Failed resume → drop the mapping so the next turn runs fresh. */
-	rebind(sessionId: string): Promise<void>;
-	/** Drop entries older than 30 days; returns the pruned count. */
+	/** Drop ONLY the named failed binding; without a conversationId, drop ALL bindings for the session. */
+	rebind(sessionId: string, conversationId?: string): Promise<void>;
+	/** Drop bindings older than 30 days; returns the pruned count. */
 	prune(now?: Date): Promise<number>;
 }
 
@@ -105,16 +98,38 @@ export interface SessionStoreOptions {
 	sleep?: (ms: number) => Promise<void>;
 }
 
+/** A stored binding is valid when it has a string conversationId; hashes and updatedAt are sanitized separately. */
+function validEntry(value: unknown): value is StoredEntry {
+	if (typeof value !== "object" || value === null) return false;
+	const rec = value as Record<string, unknown>;
+	return typeof rec["conversationId"] === "string";
+}
+
 function parseStore(raw: string): StoreFile {
+	const empty: StoreFile = { version: 2, sessions: {} };
 	try {
-		const parsed = JSON.parse(raw) as Partial<StoreFile>;
-		if (parsed?.version === 1 && typeof parsed.sessions === "object" && parsed.sessions !== null) {
-			return { version: 1, sessions: parsed.sessions };
+		const parsed = JSON.parse(raw) as Partial<StoreFile> & { sessions?: unknown };
+		if (typeof parsed?.sessions !== "object" || parsed.sessions === null) return empty;
+		const sessions: Record<string, StoredEntry[]> = {};
+		if (parsed.version === 2) {
+			for (const [id, list] of Object.entries(parsed.sessions as Record<string, unknown>)) {
+				if (!Array.isArray(list)) continue;
+				const kept = list.filter(validEntry);
+				if (kept.length > 0) sessions[id] = kept;
+			}
+			return { version: 2, sessions };
+		}
+		if (parsed.version === 1) {
+			// Migration v1→v2: each single entry wraps as a one-element list.
+			for (const [id, entry] of Object.entries(parsed.sessions as Record<string, unknown>)) {
+				if (validEntry(entry)) sessions[id] = [entry];
+			}
+			return { version: 2, sessions };
 		}
 	} catch {
 		/* corrupt → empty */
 	}
-	return { version: 1, sessions: {} };
+	return empty;
 }
 
 export function openSessionStore(path: string, options: SessionStoreOptions = {}): SessionStore {
@@ -139,14 +154,14 @@ export function openSessionStore(path: string, options: SessionStoreOptions = {}
 	};
 	// Every load prunes: stale entries are invisible to get AND dropped from
 	// the file by the next mutating op (bind persists the pruned view).
-	const load = (): StoreFile => {
+	const load = (withPrune = true): StoreFile => {
 		let file: StoreFile;
 		try {
 			file = parseStore(readFileSync(path, "utf8"));
 		} catch {
-			return { version: 1, sessions: {} };
+			return { version: 2, sessions: {} };
 		}
-		pruneInPlace(file, Date.now());
+		if (withPrune) pruneInPlace(file, Date.now());
 		return file;
 	};
 	const persist = (file: StoreFile): void => {
@@ -157,14 +172,34 @@ export function openSessionStore(path: string, options: SessionStoreOptions = {}
 	};
 	const pruneInPlace = (file: StoreFile, now: number): number => {
 		let pruned = 0;
-		for (const [id, entry] of Object.entries(file.sessions)) {
-			if (!entry?.updatedAt || new Date(entry.updatedAt).getTime() <= now - SESSION_MAX_AGE_MS) {
-				delete file.sessions[id];
-				pruned++;
-			}
+		for (const [id, list] of Object.entries(file.sessions)) {
+			const kept = list.filter((entry) => {
+				const stale = !entry?.updatedAt || new Date(entry.updatedAt).getTime() <= now - SESSION_MAX_AGE_MS;
+				if (stale) pruned++;
+				return !stale;
+			});
+			if (kept.length === 0) delete file.sessions[id];
+			else file.sessions[id] = kept;
 		}
 		return pruned;
 	};
+	// Sanitize a stored binding for the public surface: a non-array or
+	// non-string-element hashes field degrades to unknown baseline (thin
+	// defense against a hand-edited file).
+	const publicEntry = (entry: StoredEntry): SessionEntry => {
+		const hashes = Array.isArray(entry.hashes)
+			? entry.hashes.filter((h): h is string => typeof h === "string")
+			: undefined;
+		return hashes === undefined
+			? { conversationId: entry.conversationId }
+			: { conversationId: entry.conversationId, hashes };
+	};
+	/** Latest binding by updatedAt (iso strings sort chronologically). */
+	const latest = (list: StoredEntry[]): StoredEntry | undefined =>
+		list.reduce<StoredEntry | undefined>(
+			(best, e) => (!best || (e.updatedAt ?? "") >= (best.updatedAt ?? "") ? e : best),
+			undefined,
+		);
 	// Release must tolerate ENOENT: a stale takeover by another waiter may
 	// already have removed our aged-out lock file.
 	const releaseLock = (fd: number): void => {
@@ -242,20 +277,39 @@ export function openSessionStore(path: string, options: SessionStoreOptions = {}
 		}
 	};
 	return {
-		get: (sessionId) => chain(globalSlot, () => withFileLock(() => load().sessions[sessionId]?.conversationId)),
+		get: (sessionId) =>
+			chain(globalSlot, () => withFileLock(() => latest(load().sessions[sessionId] ?? [])?.conversationId)),
 		getEntry: (sessionId) =>
 			chain(globalSlot, () =>
 				withFileLock(() => {
-					const entry = load().sessions[sessionId];
-					if (!entry) return undefined;
-					// Thin defense against a hand-edited file: a non-array or
-					// non-string-element hashes field degrades to unknown baseline.
-					const hashes = Array.isArray(entry.hashes)
-						? entry.hashes.filter((h): h is string => typeof h === "string")
-						: undefined;
-					return hashes === undefined
-						? { conversationId: entry.conversationId }
-						: { conversationId: entry.conversationId, hashes };
+					const entry = latest(load().sessions[sessionId] ?? []);
+					return entry ? publicEntry(entry) : undefined;
+				}),
+			),
+		resolve: (sessionId, incomingHashes) =>
+			chain(globalSlot, () =>
+				withFileLock(() => {
+					const list = load().sessions[sessionId] ?? [];
+					// Longest strict-prefix baseline wins; a hashes-less binding is
+					// the adopt-once fallback; anything else is a fresh conversation.
+					let best: StoredEntry | undefined;
+					let bestLen = -1;
+					let adopt: StoredEntry | undefined;
+					for (const entry of list) {
+						const hashes = Array.isArray(entry.hashes)
+							? entry.hashes.filter((h): h is string => typeof h === "string")
+							: undefined;
+						if (hashes !== undefined && hashes.length > 0 && hashesArePrefix(hashes, incomingHashes)) {
+							if (hashes.length > bestLen) {
+								best = entry;
+								bestLen = hashes.length;
+							}
+						} else if (hashes === undefined && adopt === undefined) {
+							adopt = entry;
+						}
+					}
+					const pick = best ?? adopt;
+					return pick ? publicEntry(pick) : undefined;
 				}),
 			),
 		bind: (sessionId, conversationId, hashes) =>
@@ -263,21 +317,60 @@ export function openSessionStore(path: string, options: SessionStoreOptions = {}
 				chain(globalSlot, () =>
 					withFileLock(() => {
 						const file = load();
-						file.sessions[sessionId] = {
-							conversationId,
-							updatedAt: new Date().toISOString(),
-							...(hashes !== undefined ? { hashes } : {}),
-						};
+						const list = file.sessions[sessionId] ?? [];
+						const updatedAt = new Date().toISOString();
+						const next = hashes !== undefined ? { hashes } : {};
+						// Upsert-by-conversationId: same conversation updates in place.
+						const sameIdx = list.findIndex((e) => e.conversationId === conversationId);
+						if (sameIdx >= 0) {
+							list[sameIdx] = { conversationId, updatedAt, ...next };
+						} else {
+							// Linear continuation: a binding whose hashes prefix the new
+							// ones IS this conversation's parent — replace it in place.
+							const prefixIdx =
+								hashes !== undefined
+									? list.findIndex(
+											(e) =>
+											Array.isArray(e.hashes) &&
+											e.hashes.length > 0 &&
+											hashesArePrefix(e.hashes, hashes),
+										)
+									: -1;
+							if (prefixIdx >= 0) {
+								list[prefixIdx] = { conversationId, updatedAt, ...next };
+							} else {
+								list.push({ conversationId, updatedAt, ...next });
+							}
+						}
+						// Cap the list: evict oldest by updatedAt (never the just-bound one).
+						while (list.length > MAX_BINDINGS_PER_SESSION) {
+							let oldestIdx = 0;
+							for (let i = 1; i < list.length; i++) {
+								if ((list[i].updatedAt ?? "") < (list[oldestIdx].updatedAt ?? "")) oldestIdx = i;
+							}
+							list.splice(oldestIdx, 1);
+						}
+						file.sessions[sessionId] = list;
 						persist(file);
 					}),
 				),
 			),
-		rebind: (sessionId) =>
+		rebind: (sessionId, conversationId) =>
 			chain(keyedSlot(sessionId), () =>
 				chain(globalSlot, () =>
 					withFileLock(() => {
 						const file = load();
-						delete file.sessions[sessionId];
+						if (conversationId === undefined) {
+							if (file.sessions[sessionId] === undefined) return;
+							delete file.sessions[sessionId];
+						} else {
+							const list = file.sessions[sessionId];
+							if (!list) return;
+							const kept = list.filter((e) => e.conversationId !== conversationId);
+							if (kept.length === list.length) return; // nothing dropped
+							if (kept.length === 0) delete file.sessions[sessionId];
+							else file.sessions[sessionId] = kept;
+						}
 						persist(file);
 					}),
 				),
@@ -285,7 +378,9 @@ export function openSessionStore(path: string, options: SessionStoreOptions = {}
 		prune: (now = new Date()) =>
 			chain(globalSlot, () =>
 				withFileLock(() => {
-					const file = load();
+					// Load WITHOUT the implicit prune so this op can count what it
+					// removes itself, then persist the pruned view.
+					const file = load(false);
 					const pruned = pruneInPlace(file, now.getTime());
 					if (pruned > 0) persist(file);
 					return pruned;

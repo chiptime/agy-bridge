@@ -35,7 +35,6 @@ import {
 import type { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import type { AgyAdapterConfig } from "./config";
-import { hashesArePrefix } from "./messages";
 import type { SessionStore } from "./session-store";
 import { createTap } from "./stream-tap";
 import { prepareWorkdir, pruneScratch } from "./workdir";
@@ -127,21 +126,25 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		worktree: deps.worktree,
 	});
 	if (workdir.scratch) pruneScratch(dirname(workdir.dir));
+	// Fire-and-forget 30-day retention: never blocks or fails a turn.
+	void deps.store.prune().catch(() => {});
 	const logPath = `${workdir.dir}/run.log`;
-	// v1.1 divergence decision (see header comment): pick resume id vs
-	// fresh-and-seeded BEFORE any spawn. The timeout resume-once machinery
-	// below is unchanged and composes with both shapes.
-	const entry = await deps.store.getEntry(req.sessionId);
+	// v1.1 divergence decision, v2 multi-conversation edition (see header
+	// comment): resolve() picks WHICH stored binding this call continues —
+	// prefix baseline → linear resume; hashes-less binding → adopt-once; no
+	// match with bindings present → DIVERGED re-seed (a NEW binding is bound
+	// after success); no bindings at all → first turn, fresh. The timeout
+	// resume-once machinery below is unchanged and composes with all shapes.
+	const binding = await deps.store.resolve(req.sessionId, req.hashes);
+	const sessionKnown = binding !== undefined ? true : (await deps.store.get(req.sessionId)) !== undefined;
 	let diverged = false;
 	let resumeId: string | undefined;
-	if (entry === undefined) {
+	if (binding !== undefined) {
+		resumeId = binding.conversationId; // prefix match or adopt-once
+	} else if (!sessionKnown) {
 		resumeId = undefined; // first turn: fresh, last-user-turn only
-	} else if (entry.hashes === undefined) {
-		resumeId = entry.conversationId; // unknown baseline: adopt once, then protected
-	} else if (hashesArePrefix(entry.hashes, req.hashes)) {
-		resumeId = entry.conversationId; // linear continuation
 	} else {
-		diverged = true; // edited/deleted/reordered history → fresh re-seed
+		diverged = true; // edited/deleted/reordered history → fresh re-seed, NEW binding
 		req.onDiverged?.();
 	}
 	const prompt = diverged ? (req.seedPrompt ?? req.prompt) : req.prompt;
@@ -198,7 +201,9 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		if (result.conversationId) await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
 		return result;
 	}
-	if (result.resumed) await deps.store.rebind(req.sessionId);
+	// v2: drop ONLY the failed binding; without a captured id (defensive),
+	// rebind falls back to dropping the whole session.
+	if (result.resumed) await deps.store.rebind(req.sessionId, result.conversationId);
 	throw new TurnError(
 		mapClassification(result.classification, {
 			logPath,

@@ -103,7 +103,7 @@ describe("unit: provider — createAgyProvider factory contract (R3/R8)", () => 
 		// The store is the REAL session map, rooted at the configured stateDir.
 		await seen[0].deps.store.bind("sess-glue", "c1");
 		const mapFile = join(stateDir, "agy-bridge", "opencode-sessions.json");
-		expect(JSON.parse(readFileSync(mapFile, "utf8")).sessions["sess-glue"].conversationId).toBe("c1");
+		expect(JSON.parse(readFileSync(mapFile, "utf8")).sessions["sess-glue"][0].conversationId).toBe("c1");
 	});
 
 	test("runtime harness: full stack through a REAL spawned fake agy binary", async () => {
@@ -152,6 +152,6 @@ describe("unit: provider — createAgyProvider factory contract (R3/R8)", () => 
 		expect(finish.usage.inputTokens.total).toBe(3);
 		// The turn bound the conversation in the real session map.
 		const mapFile = join(stateDir, "agy-bridge", "opencode-sessions.json");
-		expect(JSON.parse(readFileSync(mapFile, "utf8")).sessions["sess-rt"].conversationId).toBe("conv-rt");
+		expect(JSON.parse(readFileSync(mapFile, "utf8")).sessions["sess-rt"][0].conversationId).toBe("conv-rt");
 	});
 });

@@ -46,7 +46,20 @@ async function providerModels(options: Record<string, unknown> = {}) {
 	return hook?.models?.(fakeProvider, {});
 }
 
-async function chatParams(worktree: string, sessionID: string, providerID: string) {
+/**
+ * Real host contract (captured 2026-09-11): chat.params receives
+ * { sessionID, agent, model, provider, message } and output.options is
+ * ALREADY POPULATED by other plugins — the hook must merge in place. The
+ * host also invokes the hook a SECOND time per turn with null req/output.
+ */
+const MANAGED_OPTIONS = { __managed_by: "other-plugin", thinking: { type: "enabled" }, effort: "high" };
+
+async function chatParams(
+	worktree: string,
+	sessionID: string,
+	providerID: string,
+	options: Record<string, unknown> = { ...MANAGED_OPTIONS },
+) {
 	const hooks = await agyPlugin.server(pluginInput(worktree));
 	const hook = hooks["chat.params"];
 	if (!hook) throw new Error("chat.params hook missing");
@@ -55,12 +68,10 @@ async function chatParams(worktree: string, sessionID: string, providerID: strin
 		topP: 1,
 		topK: 1,
 		maxOutputTokens: undefined,
-		options: {} as Record<string, unknown>,
+		options: options as Record<string, unknown>,
 	};
-	const result = await hook(
-		{ sessionID, providerID, model: { providerID } } as never,
-		output as never,
-	);
+	const req = { sessionID, agent: "build", provider: providerID, model: { providerID }, message: [] };
+	const result = await hook(req as never, output as never);
 	return { result, output };
 }
 
@@ -85,9 +96,25 @@ describe("unit: index — plugin entry and chat.params channel (D3/OQ1)", () => 
 		expect(output.options.agy).toEqual({ sessionId: "sess-42", worktree: "/wt/project" });
 	});
 
+	test("host contract: pre-populated options from other plugins are PRESERVED after the hook mutates", async () => {
+		const { output } = await chatParams("/wt/project", "sess-42", "agy");
+		expect(output.options.__managed_by).toBe("other-plugin");
+		expect(output.options.thinking).toEqual({ type: "enabled" });
+		expect(output.options.effort).toBe("high");
+	});
+
+	test("host contract: a null req/output invocation (second call per turn) does not throw", async () => {
+		const hooks = await agyPlugin.server(pluginInput("/wt"));
+		const hook = hooks["chat.params"]!;
+		await expect(hook(null as never, null as never)).resolves.toBeUndefined();
+	});
+
 	test("non-agy providers are left untouched; per-request scoping, no module state", async () => {
 		const other = await chatParams("/wt/project", "sess-42", "openai");
-		expect(other.output.options).toEqual({});
+		expect(other.output.options.sessionId).toBeUndefined();
+		expect(other.output.options.worktree).toBeUndefined();
+		expect(other.output.options.agy).toBeUndefined();
+		expect(other.output.options.__managed_by).toBe("other-plugin"); // untouched
 		const a = await chatParams("/wt/a", "sess-a", "agy");
 		const b = await chatParams("/wt/b", "sess-b", "agy");
 		expect(a.output.options.sessionId).toBe("sess-a");

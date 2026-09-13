@@ -31,7 +31,7 @@ import type { AgyUsage } from "agy-bridge-engine";
 import { runTurn, TurnError, type TurnDeps, type TurnRequest, type TurnResult } from "./turn";
 import type { AgyAdapterConfig } from "./config";
 import type { SessionStore } from "./session-store";
-import { hashesArePrefix, mapMessages, messageHashes, renderSeed, type PromptMessage } from "./messages";
+import { mapMessages, messageHashes, renderSeed, type PromptMessage } from "./messages";
 import { resolveModel, type AgyModel } from "./models";
 
 /** Injectable turn runner — tests fake this to pin the mapping in isolation. */
@@ -416,10 +416,13 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		// role/content/part.type and validates shapes at runtime.
 		const incoming = options.prompt as unknown as PromptMessage[];
 		const hashes = messageHashes(incoming);
-		const entry = await deps.store.getEntry(sessionId);
+		// v2 prefix routing mirrors turn.ts: resolve() picks the binding this
+		// call continues; no match with bindings present means the visible
+		// thread diverged → seeded re-render on a FRESH conversation.
+		const binding = await deps.store.resolve(sessionId, hashes);
 		const diverged =
-			entry !== undefined && entry.hashes !== undefined && !hashesArePrefix(entry.hashes, hashes);
-		const isNewConversation = entry === undefined || diverged;
+			binding === undefined && (await deps.store.get(sessionId)) !== undefined;
+		const isNewConversation = binding === undefined || diverged;
 		// TEMPORARY DIAGNOSTIC PROBE — remove once the session-key question is
 		// resolved. Shape only: roles and hashes, never prompt content.
 		const seedInfo = diverged ? renderSeed(incoming) : undefined;

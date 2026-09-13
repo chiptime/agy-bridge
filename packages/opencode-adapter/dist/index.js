@@ -376,205 +376,21 @@ function resolveConfig(options = {}) {
 
 // src/session-store.ts
 import {
-  closeSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
+  closeSync as closeSync2,
+  mkdirSync as mkdirSync3,
+  openSync as openSync2,
+  readFileSync as readFileSync2,
   renameSync,
-  statSync,
+  statSync as statSync2,
   unlinkSync,
-  writeFileSync,
+  writeFileSync as writeFileSync2,
   writeSync
 } from "fs";
 import { dirname, join } from "path";
 import { randomUUID } from "crypto";
-var SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-var LOCK_WAIT_MS = 3000;
-var LOCK_STALE_MS = 3000;
-var LOCK_POLL_MS = 20;
-
-class SessionStoreBusyError extends Error {
-  lockPath;
-  constructor(lockPath) {
-    super(`session store busy: lock not acquired within ${LOCK_WAIT_MS}ms: ${lockPath}`);
-    this.lockPath = lockPath;
-    this.name = "SessionStoreBusyError";
-  }
-}
-function parseStore(raw) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed?.version === 1 && typeof parsed.sessions === "object" && parsed.sessions !== null) {
-      return { version: 1, sessions: parsed.sessions };
-    }
-  } catch {}
-  return { version: 1, sessions: {} };
-}
-function openSessionStore(path, options = {}) {
-  const lockPath = `${path}.lock`;
-  const lockWaitMs = options.lockWaitMs ?? LOCK_WAIT_MS;
-  const lockStaleMs = options.lockStaleMs ?? LOCK_STALE_MS;
-  const nowMs = options.now ?? Date.now;
-  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const globalSlot = { current: Promise.resolve() };
-  const keyed = new Map;
-  const chain = (slot, fn) => {
-    const run = slot.current.then(fn, fn);
-    slot.current = run.then(() => {
-      return;
-    }, () => {
-      return;
-    });
-    return run;
-  };
-  const load = () => {
-    let file;
-    try {
-      file = parseStore(readFileSync(path, "utf8"));
-    } catch {
-      return { version: 1, sessions: {} };
-    }
-    pruneInPlace(file, Date.now());
-    return file;
-  };
-  const persist = (file) => {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = join(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
-    writeFileSync(tmp, `${JSON.stringify(file, null, "\t")}
-`);
-    renameSync(tmp, path);
-  };
-  const pruneInPlace = (file, now) => {
-    let pruned = 0;
-    for (const [id, entry] of Object.entries(file.sessions)) {
-      if (!entry?.updatedAt || new Date(entry.updatedAt).getTime() <= now - SESSION_MAX_AGE_MS) {
-        delete file.sessions[id];
-        pruned++;
-      }
-    }
-    return pruned;
-  };
-  const releaseLock = (fd) => {
-    closeSync(fd);
-    try {
-      unlinkSync(lockPath);
-    } catch (err) {
-      if (err?.code !== "ENOENT")
-        throw err;
-    }
-  };
-  const acquireLock = async () => {
-    const deadline = nowMs() + lockWaitMs;
-    for (;; ) {
-      mkdirSync(dirname(path), { recursive: true });
-      let fd;
-      try {
-        fd = openSync(lockPath, "wx");
-      } catch (err) {
-        if (err?.code !== "EEXIST")
-          throw err;
-      }
-      if (fd !== undefined) {
-        try {
-          writeSync(fd, `${process.pid}
-`);
-          return fd;
-        } catch (err) {
-          try {
-            releaseLock(fd);
-          } catch {}
-          throw err;
-        }
-      }
-      let fresh;
-      try {
-        fresh = nowMs() - statSync(lockPath).mtimeMs <= lockStaleMs;
-      } catch {
-        if (nowMs() >= deadline)
-          throw new SessionStoreBusyError(lockPath);
-        continue;
-      }
-      if (!fresh) {
-        try {
-          unlinkSync(lockPath);
-        } catch {}
-        continue;
-      }
-      if (nowMs() >= deadline)
-        throw new SessionStoreBusyError(lockPath);
-      await sleep(LOCK_POLL_MS);
-    }
-  };
-  const withFileLock = async (fn) => {
-    const fd = await acquireLock();
-    try {
-      return fn();
-    } finally {
-      releaseLock(fd);
-    }
-  };
-  return {
-    get: (sessionId) => chain(globalSlot, () => withFileLock(() => load().sessions[sessionId]?.conversationId)),
-    getEntry: (sessionId) => chain(globalSlot, () => withFileLock(() => {
-      const entry = load().sessions[sessionId];
-      if (!entry)
-        return;
-      const hashes = Array.isArray(entry.hashes) ? entry.hashes.filter((h) => typeof h === "string") : undefined;
-      return hashes === undefined ? { conversationId: entry.conversationId } : { conversationId: entry.conversationId, hashes };
-    })),
-    bind: (sessionId, conversationId, hashes) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => withFileLock(() => {
-      const file = load();
-      file.sessions[sessionId] = {
-        conversationId,
-        updatedAt: new Date().toISOString(),
-        ...hashes !== undefined ? { hashes } : {}
-      };
-      persist(file);
-    }))),
-    rebind: (sessionId) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => withFileLock(() => {
-      const file = load();
-      delete file.sessions[sessionId];
-      persist(file);
-    }))),
-    prune: (now = new Date) => chain(globalSlot, () => withFileLock(() => {
-      const file = load();
-      const pruned = pruneInPlace(file, now.getTime());
-      if (pruned > 0)
-        persist(file);
-      return pruned;
-    }))
-  };
-  function keyedSlot(sessionId) {
-    let slot = keyed.get(sessionId);
-    if (!slot)
-      keyed.set(sessionId, slot = { current: Promise.resolve() });
-    return slot;
-  }
-}
-
-// src/paths.ts
-import { homedir, tmpdir } from "os";
-import { isAbsolute, join as join2 } from "path";
-function resolveStateDir(opts = {}) {
-  const root = opts.override ?? xdgStateRoot(opts.env ?? process.env);
-  return join2(root, "agy-bridge");
-}
-function xdgStateRoot(env) {
-  const xdg = env["XDG_STATE_HOME"];
-  if (xdg && isAbsolute(xdg))
-    return xdg;
-  const home = env["HOME"] || homedir();
-  return join2(home, ".local", "state");
-}
-function sessionMapPath(opts = {}) {
-  return join2(resolveStateDir(opts), "opencode-sessions.json");
-}
-
-// src/language-model.ts
-import { randomUUID as randomUUID2 } from "crypto";
 
 // ../engine/src/spawn.ts
-import { mkdirSync as mkdirSync2, readdirSync, statSync as statSync2, openSync as openSync2, closeSync as closeSync2, appendFileSync } from "fs";
+import { mkdirSync, readdirSync, statSync, openSync, closeSync, appendFileSync } from "fs";
 import { spawn } from "child_process";
 import { createInterface } from "readline";
 function asAgyEnvelope(raw) {
@@ -645,7 +461,7 @@ function buildAgyArgs(opts, outputFormat = "json") {
 }
 var DEFAULT_STALL_MS = 600000;
 async function runAgyStream(opts) {
-  mkdirSync2(opts.workdir, { recursive: true });
+  mkdirSync(opts.workdir, { recursive: true });
   const start = Date.now();
   const stallMs = opts.stallMs ?? DEFAULT_STALL_MS;
   return new Promise((resolve) => {
@@ -660,7 +476,7 @@ async function runAgyStream(opts) {
       child.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: opts.prompt } }) + `
 `);
     }
-    const logFd = openSync2(opts.logPath ?? `${opts.workdir}/run.log`, "w");
+    const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, "w");
     let log = "";
     let envelope;
     let conversationId;
@@ -702,7 +518,7 @@ async function runAgyStream(opts) {
       child.stdout?.destroy();
       child.stderr?.destroy();
       try {
-        closeSync2(logFd);
+        closeSync(logFd);
       } catch {}
       resolve({
         exitCode,
@@ -792,7 +608,7 @@ function classifyRun(signal) {
   return { outcome: "success", reason: "ok" };
 }
 // ../engine/src/quota.ts
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
+import { mkdirSync as mkdirSync2, readFileSync, writeFileSync } from "fs";
 var DEFAULT_THRESHOLD = 0.05;
 function num(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
@@ -825,7 +641,7 @@ function parseSnapshotDir(dir) {
   for (const { file, pool, window: win } of SNAPSHOT_V2_FILES) {
     let w = null;
     try {
-      const o = safeJson(readFileSync2(`${dir}/${file}`, "utf8"));
+      const o = safeJson(readFileSync(`${dir}/${file}`, "utf8"));
       w = typeof o === "object" && o !== null ? o : null;
     } catch {
       w = null;
@@ -968,9 +784,6 @@ function renderSeed(messages, k = SEED_MAX_MESSAGES) {
 ${body}
 ${SEED_FOOTER}`, warnings };
 }
-// src/turn.ts
-import { dirname as dirname2 } from "path";
-
 // src/messages.ts
 function mapMessages(messages2, opts) {
   const warnings = [];
@@ -1005,6 +818,281 @@ function mapMessages(messages2, opts) {
 
 `), warnings };
 }
+
+// src/session-store.ts
+var SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+var LOCK_WAIT_MS = 3000;
+var LOCK_STALE_MS = 3000;
+var LOCK_POLL_MS = 20;
+var MAX_BINDINGS_PER_SESSION = 3;
+
+class SessionStoreBusyError extends Error {
+  lockPath;
+  constructor(lockPath) {
+    super(`session store busy: lock not acquired within ${LOCK_WAIT_MS}ms: ${lockPath}`);
+    this.lockPath = lockPath;
+    this.name = "SessionStoreBusyError";
+  }
+}
+function validEntry(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const rec = value;
+  return typeof rec["conversationId"] === "string";
+}
+function parseStore(raw) {
+  const empty = { version: 2, sessions: {} };
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.sessions !== "object" || parsed.sessions === null)
+      return empty;
+    const sessions = {};
+    if (parsed.version === 2) {
+      for (const [id, list] of Object.entries(parsed.sessions)) {
+        if (!Array.isArray(list))
+          continue;
+        const kept = list.filter(validEntry);
+        if (kept.length > 0)
+          sessions[id] = kept;
+      }
+      return { version: 2, sessions };
+    }
+    if (parsed.version === 1) {
+      for (const [id, entry] of Object.entries(parsed.sessions)) {
+        if (validEntry(entry))
+          sessions[id] = [entry];
+      }
+      return { version: 2, sessions };
+    }
+  } catch {}
+  return empty;
+}
+function openSessionStore(path, options = {}) {
+  const lockPath = `${path}.lock`;
+  const lockWaitMs = options.lockWaitMs ?? LOCK_WAIT_MS;
+  const lockStaleMs = options.lockStaleMs ?? LOCK_STALE_MS;
+  const nowMs = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const globalSlot = { current: Promise.resolve() };
+  const keyed = new Map;
+  const chain = (slot, fn) => {
+    const run = slot.current.then(fn, fn);
+    slot.current = run.then(() => {
+      return;
+    }, () => {
+      return;
+    });
+    return run;
+  };
+  const load = (withPrune = true) => {
+    let file;
+    try {
+      file = parseStore(readFileSync2(path, "utf8"));
+    } catch {
+      return { version: 2, sessions: {} };
+    }
+    if (withPrune)
+      pruneInPlace(file, Date.now());
+    return file;
+  };
+  const persist = (file) => {
+    mkdirSync3(dirname(path), { recursive: true });
+    const tmp = join(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
+    writeFileSync2(tmp, `${JSON.stringify(file, null, "\t")}
+`);
+    renameSync(tmp, path);
+  };
+  const pruneInPlace = (file, now) => {
+    let pruned = 0;
+    for (const [id, list] of Object.entries(file.sessions)) {
+      const kept = list.filter((entry) => {
+        const stale = !entry?.updatedAt || new Date(entry.updatedAt).getTime() <= now - SESSION_MAX_AGE_MS;
+        if (stale)
+          pruned++;
+        return !stale;
+      });
+      if (kept.length === 0)
+        delete file.sessions[id];
+      else
+        file.sessions[id] = kept;
+    }
+    return pruned;
+  };
+  const publicEntry = (entry) => {
+    const hashes = Array.isArray(entry.hashes) ? entry.hashes.filter((h) => typeof h === "string") : undefined;
+    return hashes === undefined ? { conversationId: entry.conversationId } : { conversationId: entry.conversationId, hashes };
+  };
+  const latest = (list) => list.reduce((best, e) => !best || (e.updatedAt ?? "") >= (best.updatedAt ?? "") ? e : best, undefined);
+  const releaseLock = (fd) => {
+    closeSync2(fd);
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      if (err?.code !== "ENOENT")
+        throw err;
+    }
+  };
+  const acquireLock = async () => {
+    const deadline = nowMs() + lockWaitMs;
+    for (;; ) {
+      mkdirSync3(dirname(path), { recursive: true });
+      let fd;
+      try {
+        fd = openSync2(lockPath, "wx");
+      } catch (err) {
+        if (err?.code !== "EEXIST")
+          throw err;
+      }
+      if (fd !== undefined) {
+        try {
+          writeSync(fd, `${process.pid}
+`);
+          return fd;
+        } catch (err) {
+          try {
+            releaseLock(fd);
+          } catch {}
+          throw err;
+        }
+      }
+      let fresh;
+      try {
+        fresh = nowMs() - statSync2(lockPath).mtimeMs <= lockStaleMs;
+      } catch {
+        if (nowMs() >= deadline)
+          throw new SessionStoreBusyError(lockPath);
+        continue;
+      }
+      if (!fresh) {
+        try {
+          unlinkSync(lockPath);
+        } catch {}
+        continue;
+      }
+      if (nowMs() >= deadline)
+        throw new SessionStoreBusyError(lockPath);
+      await sleep(LOCK_POLL_MS);
+    }
+  };
+  const withFileLock = async (fn) => {
+    const fd = await acquireLock();
+    try {
+      return fn();
+    } finally {
+      releaseLock(fd);
+    }
+  };
+  return {
+    get: (sessionId) => chain(globalSlot, () => withFileLock(() => latest(load().sessions[sessionId] ?? [])?.conversationId)),
+    getEntry: (sessionId) => chain(globalSlot, () => withFileLock(() => {
+      const entry = latest(load().sessions[sessionId] ?? []);
+      return entry ? publicEntry(entry) : undefined;
+    })),
+    resolve: (sessionId, incomingHashes) => chain(globalSlot, () => withFileLock(() => {
+      const list = load().sessions[sessionId] ?? [];
+      let best;
+      let bestLen = -1;
+      let adopt;
+      for (const entry of list) {
+        const hashes = Array.isArray(entry.hashes) ? entry.hashes.filter((h) => typeof h === "string") : undefined;
+        if (hashes !== undefined && hashes.length > 0 && hashesArePrefix(hashes, incomingHashes)) {
+          if (hashes.length > bestLen) {
+            best = entry;
+            bestLen = hashes.length;
+          }
+        } else if (hashes === undefined && adopt === undefined) {
+          adopt = entry;
+        }
+      }
+      const pick = best ?? adopt;
+      return pick ? publicEntry(pick) : undefined;
+    })),
+    bind: (sessionId, conversationId, hashes) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => withFileLock(() => {
+      const file = load();
+      const list = file.sessions[sessionId] ?? [];
+      const updatedAt = new Date().toISOString();
+      const next = hashes !== undefined ? { hashes } : {};
+      const sameIdx = list.findIndex((e) => e.conversationId === conversationId);
+      if (sameIdx >= 0) {
+        list[sameIdx] = { conversationId, updatedAt, ...next };
+      } else {
+        const prefixIdx = hashes !== undefined ? list.findIndex((e) => Array.isArray(e.hashes) && e.hashes.length > 0 && hashesArePrefix(e.hashes, hashes)) : -1;
+        if (prefixIdx >= 0) {
+          list[prefixIdx] = { conversationId, updatedAt, ...next };
+        } else {
+          list.push({ conversationId, updatedAt, ...next });
+        }
+      }
+      while (list.length > MAX_BINDINGS_PER_SESSION) {
+        let oldestIdx = 0;
+        for (let i = 1;i < list.length; i++) {
+          if ((list[i].updatedAt ?? "") < (list[oldestIdx].updatedAt ?? ""))
+            oldestIdx = i;
+        }
+        list.splice(oldestIdx, 1);
+      }
+      file.sessions[sessionId] = list;
+      persist(file);
+    }))),
+    rebind: (sessionId, conversationId) => chain(keyedSlot(sessionId), () => chain(globalSlot, () => withFileLock(() => {
+      const file = load();
+      if (conversationId === undefined) {
+        if (file.sessions[sessionId] === undefined)
+          return;
+        delete file.sessions[sessionId];
+      } else {
+        const list = file.sessions[sessionId];
+        if (!list)
+          return;
+        const kept = list.filter((e) => e.conversationId !== conversationId);
+        if (kept.length === list.length)
+          return;
+        if (kept.length === 0)
+          delete file.sessions[sessionId];
+        else
+          file.sessions[sessionId] = kept;
+      }
+      persist(file);
+    }))),
+    prune: (now = new Date) => chain(globalSlot, () => withFileLock(() => {
+      const file = load(false);
+      const pruned = pruneInPlace(file, now.getTime());
+      if (pruned > 0)
+        persist(file);
+      return pruned;
+    }))
+  };
+  function keyedSlot(sessionId) {
+    let slot = keyed.get(sessionId);
+    if (!slot)
+      keyed.set(sessionId, slot = { current: Promise.resolve() });
+    return slot;
+  }
+}
+
+// src/paths.ts
+import { homedir, tmpdir } from "os";
+import { isAbsolute, join as join2 } from "path";
+function resolveStateDir(opts = {}) {
+  const root = opts.override ?? xdgStateRoot(opts.env ?? process.env);
+  return join2(root, "agy-bridge");
+}
+function xdgStateRoot(env) {
+  const xdg = env["XDG_STATE_HOME"];
+  if (xdg && isAbsolute(xdg))
+    return xdg;
+  const home = env["HOME"] || homedir();
+  return join2(home, ".local", "state");
+}
+function sessionMapPath(opts = {}) {
+  return join2(resolveStateDir(opts), "opencode-sessions.json");
+}
+
+// src/language-model.ts
+import { randomUUID as randomUUID2 } from "crypto";
+
+// src/turn.ts
+import { dirname as dirname2 } from "path";
 
 // src/stream-tap.ts
 import { spawn as spawn3 } from "child_process";
@@ -1210,16 +1298,16 @@ async function runTurn(deps, req) {
   });
   if (workdir.scratch)
     pruneScratch(dirname2(workdir.dir));
+  deps.store.prune().catch(() => {});
   const logPath = `${workdir.dir}/run.log`;
-  const entry = await deps.store.getEntry(req.sessionId);
+  const binding = await deps.store.resolve(req.sessionId, req.hashes);
+  const sessionKnown = binding !== undefined ? true : await deps.store.get(req.sessionId) !== undefined;
   let diverged = false;
   let resumeId;
-  if (entry === undefined) {
+  if (binding !== undefined) {
+    resumeId = binding.conversationId;
+  } else if (!sessionKnown) {
     resumeId = undefined;
-  } else if (entry.hashes === undefined) {
-    resumeId = entry.conversationId;
-  } else if (hashesArePrefix(entry.hashes, req.hashes)) {
-    resumeId = entry.conversationId;
   } else {
     diverged = true;
     req.onDiverged?.();
@@ -1276,7 +1364,7 @@ async function runTurn(deps, req) {
     return result;
   }
   if (result.resumed)
-    await deps.store.rebind(req.sessionId);
+    await deps.store.rebind(req.sessionId, result.conversationId);
   throw new TurnError(mapClassification(result.classification, {
     logPath,
     conversationId: result.conversationId,
@@ -1677,9 +1765,9 @@ class AgyLanguageModel {
     const sessionId = ctx.sessionId ?? randomUUID2();
     const incoming = options.prompt;
     const hashes = messageHashes(incoming);
-    const entry = await deps.store.getEntry(sessionId);
-    const diverged = entry !== undefined && entry.hashes !== undefined && !hashesArePrefix(entry.hashes, hashes);
-    const isNewConversation = entry === undefined || diverged;
+    const binding = await deps.store.resolve(sessionId, hashes);
+    const diverged = binding === undefined && await deps.store.get(sessionId) !== undefined;
+    const isNewConversation = binding === undefined || diverged;
     const seedInfo = diverged ? renderSeed(incoming) : undefined;
     const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
     const warnings = [
@@ -1942,7 +2030,7 @@ var server = async (input, options) => {
   };
   const hooks = {
     "chat.params": async (req, output) => {
-      if (req.model.providerID !== AGY_PROVIDER_ID)
+      if (req?.model?.providerID !== AGY_PROVIDER_ID || !output?.options)
         return;
       output.options.sessionId = req.sessionID;
       output.options.worktree = worktree;

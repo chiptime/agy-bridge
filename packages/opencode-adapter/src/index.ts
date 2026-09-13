@@ -70,12 +70,16 @@ const server: Plugin = async (input, options) => {
 		return registry;
 	};
 	const hooks: Hooks = {
-		"chat.params": async (req, output) => {
-			if (req.model.providerID !== AGY_PROVIDER_ID) return;
-			output.options.sessionId = req.sessionID;
-			output.options.worktree = worktree;
-			output.options.agy = { sessionId: req.sessionID, worktree };
-		},
+	"chat.params": async (req, output) => {
+		// Live host contract (2026-09-11): opencode invokes chat.params a
+		// SECOND time per turn with null req/output — never throw on it.
+		// output.options may already carry keys from other plugins; we only
+		// ADD our own (merge-in-place, never clobber the rest).
+		if (req?.model?.providerID !== AGY_PROVIDER_ID || !output?.options) return;
+		output.options.sessionId = req.sessionID;
+		output.options.worktree = worktree;
+		output.options.agy = { sessionId: req.sessionID, worktree };
+	},
 		provider: {
 			id: AGY_PROVIDER_ID,
 			models: async (provider) => buildModelRecord(await getRegistry(), provider.id),

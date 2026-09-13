@@ -61,13 +61,14 @@ function recordingStore(path: string): { store: SessionStore; calls: string[] } 
 		store: {
 			get: (id) => real.get(id),
 			getEntry: (id) => real.getEntry(id),
+			resolve: (id, hashes) => real.resolve(id, hashes),
 			bind: (id, conv, hashes) => {
 				calls.push(`bind:${conv}`);
 				return real.bind(id, conv, hashes);
 			},
-			rebind: (id) => {
+			rebind: (id, conversationId) => {
 				calls.push("rebind");
-				return real.rebind(id);
+				return real.rebind(id, conversationId);
 			},
 			prune: (now) => real.prune(now),
 		},
@@ -329,5 +330,54 @@ describe("unit: turn — v1.1 divergence policy (resume vs fresh re-seed)", () =
 			conversationId: "conv-seed-2",
 			hashes: ["h0", "EDITED"],
 		});
+	});
+
+	test("v2 multi-conversation: a diverged turn APPENDS a new binding instead of overwriting the old one", async () => {
+		const { store, deps } = await setup(() =>
+			fakeChild({ lines: [{ event: "init", conversation_id: "conv-side" }, SUCCESS("conv-side")], exit: 0 }),
+		);
+		await store.bind("sess-side", "conv-main", ["m0", "m1"]);
+		const result = await runTurn(deps, {
+			prompt: "side task",
+			seedPrompt: "SEEDED SIDE",
+			hashes: ["s0", "s1"],
+			sessionId: "sess-side",
+		});
+		expect(result.diverged).toBe(true);
+		// Both bindings survive: the main thread keeps its baseline, the side
+		// conversation got its own entry.
+		expect((await store.resolve("sess-side", ["m0", "m1", "m2"]))?.conversationId).toBe("conv-main");
+		expect((await store.resolve("sess-side", ["s0", "s1", "s2"]))?.conversationId).toBe("conv-side");
+	});
+
+	test("v2 wiring: the turn fires store.prune() fire-and-forget next to pruneScratch", async () => {
+		const root = await mkdtemp("/tmp/agy-turn-prune-");
+		let pruned = 0;
+		const real = openSessionStore(join(root, "sessions.json"));
+		const store: SessionStore = {
+			get: (id) => real.get(id),
+			getEntry: (id) => real.getEntry(id),
+			resolve: (id, hashes) => real.resolve(id, hashes),
+			bind: (id, conv, hashes) => real.bind(id, conv, hashes),
+			rebind: (id, conversationId) => real.rebind(id, conversationId),
+			prune: (now) => {
+				pruned++;
+				return real.prune(now);
+			},
+		};
+		const deps: TurnDeps = {
+			bin: "agy",
+			config: resolveConfig({ scratchRoot: root, timeoutMs: 30_000 }),
+			store,
+			spawnFn: (() =>
+				fakeChild({ lines: [{ event: "init", conversation_id: "conv-p" }, SUCCESS("conv-p")], exit: 0 })) as never,
+		};
+		const result = await runTurn(deps, {
+			prompt: "p",
+			hashes: H1,
+			sessionId: "sess-prune",
+		});
+		expect(result.classification.outcome).toBe("success");
+		expect(pruned).toBe(1);
 	});
 });

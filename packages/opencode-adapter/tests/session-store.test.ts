@@ -32,9 +32,9 @@ describe("unit: session-store — R7 bind/get/rebind, atomic concurrent writes, 
 		const { path, store } = await setup();
 		await store.bind("sess-1", "conv-1");
 		const raw = JSON.parse(readFileSync(path, "utf8"));
-		expect(raw.version).toBe(1);
-		expect(raw.sessions["sess-1"].conversationId).toBe("conv-1");
-		expect(typeof raw.sessions["sess-1"].updatedAt).toBe("string");
+		expect(raw.version).toBe(2);
+		expect(raw.sessions["sess-1"][0].conversationId).toBe("conv-1");
+		expect(typeof raw.sessions["sess-1"][0].updatedAt).toBe("string");
 		expect(await store.get("sess-1")).toBe("conv-1");
 	});
 
@@ -54,7 +54,6 @@ describe("unit: session-store — R7 bind/get/rebind, atomic concurrent writes, 
 		expect(await store.get("sess-3")).toBeUndefined();
 		expect(JSON.parse(readFileSync(path, "utf8")).sessions["sess-3"]).toBeUndefined();
 	});
-
 	test("R7.s4 50 concurrent Promise.all writes: file is always complete JSON with all entries", async () => {
 		const { path, store } = await setup();
 		await Promise.all(
@@ -94,7 +93,7 @@ describe("unit: session-store — R7 bind/get/rebind, atomic concurrent writes, 
 		const store = openSessionStore(path);
 		expect(await store.get("any")).toBeUndefined();
 		await store.bind("sess-x", "conv-x");
-		expect(JSON.parse(readFileSync(path, "utf8")).sessions["sess-x"].conversationId).toBe("conv-x");
+		expect(JSON.parse(readFileSync(path, "utf8")).sessions["sess-x"][0].conversationId).toBe("conv-x");
 	});
 });
 
@@ -103,7 +102,7 @@ describe("unit: session-store — v1.1 divergence baseline (hashes)", () => {
 		const { path, store } = await setup();
 		await store.bind("sess-h", "conv-h", ["aa", "bb"]);
 		const raw = JSON.parse(readFileSync(path, "utf8"));
-		expect(raw.sessions["sess-h"].hashes).toEqual(["aa", "bb"]);
+		expect(raw.sessions["sess-h"][0].hashes).toEqual(["aa", "bb"]);
 		expect(await store.getEntry("sess-h")).toEqual({ conversationId: "conv-h", hashes: ["aa", "bb"] });
 		expect(await store.get("sess-h")).toBe("conv-h");
 	});
@@ -136,6 +135,163 @@ describe("unit: session-store — v1.1 divergence baseline (hashes)", () => {
 	});
 });
 
+describe("unit: session-store — schema v2 multi-conversation bindings", () => {
+	/** Store with an advancing clock so updatedAt ordering is deterministic. */
+	async function setupClock(): Promise<{ path: string; store: ReturnType<typeof openSessionStore>; tick: () => void }> {
+		const dir = await mkdtemp("/tmp/agy-store-v2-");
+		const path = join(dir, "opencode-sessions.json");
+		let t = Date.now();
+		const store = openSessionStore(path, { now: () => t });
+		return { path, store, tick: () => (t += 1000) };
+	}
+
+	test("migration v1→v2: a v1 file loads wrapped as a single-element list; next write persists version 2", async () => {
+		const dir = await mkdtemp("/tmp/agy-store-mig-");
+		const path = join(dir, "opencode-sessions.json");
+		writeFileSync(
+			path,
+			JSON.stringify({
+				version: 1,
+				sessions: {
+					"sess-m": { conversationId: "conv-m", updatedAt: iso(-DAY_MS) },
+					"sess-hm": { conversationId: "conv-hm", hashes: ["h0"], updatedAt: iso(-DAY_MS) },
+				},
+			}),
+		);
+		const store = openSessionStore(path);
+		const plain = await store.getEntry("sess-m");
+		expect(plain?.conversationId).toBe("conv-m");
+		expect(plain?.hashes).toBeUndefined();
+		const hashed = await store.getEntry("sess-hm");
+		expect(hashed).toEqual({ conversationId: "conv-hm", hashes: ["h0"] });
+		expect(await store.get("sess-m")).toBe("conv-m");
+		await store.bind("sess-new", "conv-new");
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		expect(raw.version).toBe(2);
+		expect(raw.sessions["sess-m"]).toEqual([{ conversationId: "conv-m", updatedAt: iso(-DAY_MS) }]);
+	});
+
+	test("migration tolerance: malformed entries degrade to an empty store; unknown version too", async () => {
+		const dir = await mkdtemp("/tmp/agy-store-migbad-");
+		const path = join(dir, "opencode-sessions.json");
+		writeFileSync(path, JSON.stringify({ version: 1, sessions: { bad: { nope: true }, ok: { conversationId: 42 } } }));
+		const store = openSessionStore(path);
+		expect(await store.get("bad")).toBeUndefined();
+		expect(await store.get("ok")).toBeUndefined();
+		writeFileSync(path, JSON.stringify({ version: 99, sessions: { x: [] } }));
+		expect(await store.get("x")).toBeUndefined();
+	});
+
+	test("resolve: exact-prefix pick — the binding whose hashes are a prefix of incoming wins", async () => {
+		const { store } = await setup();
+		await store.bind("sess-r", "conv-main", ["h0", "h1", "h2"]);
+		await store.bind("sess-r", "conv-side", ["s0", "s1"]);
+		const hit = await store.resolve("sess-r", ["h0", "h1", "h2", "h3"]);
+		expect(hit?.conversationId).toBe("conv-main");
+		const side = await store.resolve("sess-r", ["s0", "s1", "s2"]);
+		expect(side?.conversationId).toBe("conv-side");
+	});
+
+	test("resolve: adopt-once — a binding without hashes matches when no prefix does", async () => {
+		const { store } = await setup();
+		await store.bind("sess-a", "conv-legacy");
+		await store.bind("sess-a", "conv-other", ["x0"]);
+		const hit = await store.resolve("sess-a", ["unrelated"]);
+		expect(hit).toEqual({ conversationId: "conv-legacy" });
+	});
+
+	test("resolve: no match → undefined (fresh conversation)", async () => {
+		const { store } = await setup();
+		expect(await store.resolve("sess-empty", ["h0"])).toBeUndefined();
+		await store.bind("sess-nomatch", "conv-1", ["a0"]);
+		await store.bind("sess-nomatch", "conv-2", ["b0"]);
+		expect(await store.resolve("sess-nomatch", ["zz"])).toBeUndefined();
+	});
+
+	test("bind upsert-by-conversationId updates the binding in place (list length unchanged)", async () => {
+		const { path, store, tick } = await setupClock();
+		await store.bind("sess-u", "conv-1", ["h0"]);
+		tick();
+		await store.bind("sess-u", "conv-1", ["h0", "h1"]);
+		tick();
+		await store.bind("sess-u", "conv-1");
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		expect(raw.sessions["sess-u"]).toHaveLength(1);
+		expect(await store.getEntry("sess-u")).toEqual({ conversationId: "conv-1" });
+	});
+
+	test("bind linear continuation: a binding whose hashes are a prefix of the new ones is REPLACED, not appended", async () => {
+		const { path, store, tick } = await setupClock();
+		await store.bind("sess-lin", "conv-parent", ["h0", "h1"]);
+		tick();
+		await store.bind("sess-lin", "conv-child", ["h0", "h1", "h2"]);
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		expect(raw.sessions["sess-lin"]).toHaveLength(1);
+		expect(await store.getEntry("sess-lin")).toEqual({ conversationId: "conv-child", hashes: ["h0", "h1", "h2"] });
+	});
+
+	test("bind unrelated conversation APPENDS a second binding; the first is untouched", async () => {
+		const { store } = await setup();
+		await store.bind("sess-multi", "conv-main", ["h0", "h1"]);
+		await store.bind("sess-multi", "conv-side", ["s0"]);
+		expect(await store.getEntry("sess-multi")).toEqual({ conversationId: "conv-side", hashes: ["s0"] });
+		expect((await store.resolve("sess-multi", ["h0", "h1", "h2"]))?.conversationId).toBe("conv-main");
+	});
+
+	test("bind caps the list at 3 per session, evicting the oldest by updatedAt", async () => {
+		const { path, store, tick } = await setupClock();
+		await store.bind("sess-cap", "conv-1", ["a0"]);
+		tick();
+		await store.bind("sess-cap", "conv-2", ["b0"]);
+		tick();
+		await store.bind("sess-cap", "conv-3", ["c0"]);
+		tick();
+		await store.bind("sess-cap", "conv-4", ["d0"]);
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		expect(raw.sessions["sess-cap"]).toHaveLength(3);
+		const ids = raw.sessions["sess-cap"].map((e: { conversationId: string }) => e.conversationId);
+		expect(ids).toEqual(["conv-2", "conv-3", "conv-4"]);
+		expect(await store.resolve("sess-cap", ["a0", "a1"])).toBeUndefined(); // evicted
+		expect((await store.resolve("sess-cap", ["d0", "d1"]))?.conversationId).toBe("conv-4");
+	});
+
+	test("rebind with a conversationId drops ONLY that binding", async () => {
+		const { store } = await setup();
+		await store.bind("sess-rb", "conv-main", ["h0", "h1"]);
+		await store.bind("sess-rb", "conv-side", ["s0"]);
+		await store.rebind("sess-rb", "conv-side");
+		expect(await store.resolve("sess-rb", ["s0", "s1"])).toBeUndefined();
+		expect((await store.resolve("sess-rb", ["h0", "h1", "h2"]))?.conversationId).toBe("conv-main");
+		await store.rebind("sess-rb", "conv-never-existed"); // no-op, no throw
+		expect(await store.get("sess-rb")).toBe("conv-main");
+	});
+
+	test("prune on v2: stale bindings are dropped per-binding and emptied sessions removed", async () => {
+		const dir = await mkdtemp("/tmp/agy-store-prune2-");
+		const path = join(dir, "opencode-sessions.json");
+		writeFileSync(
+			path,
+			JSON.stringify({
+				version: 2,
+				sessions: {
+					"sess-p1": [
+						{ conversationId: "conv-old", hashes: ["h0"], updatedAt: iso(-31 * DAY_MS) },
+						{ conversationId: "conv-fresh", hashes: ["h1"], updatedAt: iso(-DAY_MS) },
+					],
+					"sess-p2": [{ conversationId: "conv-ancient", updatedAt: iso(-40 * DAY_MS) }],
+				},
+			}),
+		);
+		const store = openSessionStore(path);
+		const pruned = await store.prune();
+		expect(pruned).toBe(2);
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		expect(raw.sessions["sess-p1"]).toHaveLength(1);
+		expect(raw.sessions["sess-p1"][0].conversationId).toBe("conv-fresh");
+		expect(raw.sessions["sess-p2"]).toBeUndefined();
+	});
+});
+
 describe("unit: session-store — cross-process lockfile (read-modify-write mutual exclusion)", () => {
 	test("two store instances on the same file (simulated processes): concurrent binds of different sessions both land", async () => {
 		const dir = await mkdtemp("/tmp/agy-store-xproc-");
@@ -144,8 +300,8 @@ describe("unit: session-store — cross-process lockfile (read-modify-write mutu
 		const second = openSessionStore(path);
 		await Promise.all([first.bind("sess-a", "conv-a"), second.bind("sess-b", "conv-b")]);
 		const raw = JSON.parse(readFileSync(path, "utf8"));
-		expect(raw.sessions["sess-a"].conversationId).toBe("conv-a");
-		expect(raw.sessions["sess-b"].conversationId).toBe("conv-b");
+		expect(raw.sessions["sess-a"][0].conversationId).toBe("conv-a");
+		expect(raw.sessions["sess-b"][0].conversationId).toBe("conv-b");
 		expect(existsSync(`${path}.lock`)).toBe(false);
 	});
 
