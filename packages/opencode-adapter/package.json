@@ -1,6 +1,6 @@
 {
   "name": "agy-bridge-opencode",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "scripts": {
     "build": "bun build src/index.ts src/provider.ts --outdir dist --target bun"

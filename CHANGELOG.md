@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (`0.x` = development line).
 
+## [0.4.1] - 2026-09-13
+
+### Changed
+- **Docs-only release** (opencode adapter): the package README and the
+  troubleshooting guide now document the 0.4.0 behavior — effort variants
+  (collapse of `-high/-medium/-low` ids, loud V3-warning fallback,
+  `scripts/export-config-models.ts` because the plugin `provider.models`
+  hook does not fire for npm providers), session store v2 (multi-binding
+  per sessionID, cap 3, longest-prefix routing, v1 auto-migration,
+  divergence appends a new binding) and the wired 30-day prune — and fix
+  the stale "discovery runs at plugin init" claim (discovery is lazy and
+  memoized on first `provider.models` use). No code changes; published so
+  npm serves the updated README for the 0.4.x line.
+
 ## [0.4.0] - 2026-09-12
 
 ### Added
