@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **pi extension v0.2.0** (`agy-bridge-pi`, not yet published): live token
+- **pi extension v0.2.0** (`agy-bridge-pi`, never published): live token
   streaming with strict envelope reconciliation (streamed text is checked
   against agy's final response; on mismatch the envelope wins and the
   first-divergence offset is logged), `AskAgy` execution modes (`read`
@@ -52,8 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`askAgy.enabled: true` + `defaultMode: "full"` restores v0.1 delegation).
 
 ### Changed
-- **pi extension v0.3.0** (`agy-bridge-pi`, not yet published): `AskAgy`
-  non-isolated calls now have **thread memory** — successive DISTINCT
+- **pi extension v0.3.0** (`agy-bridge-pi`, published to npm 2026-09-13):
+  `AskAgy` non-isolated calls now have **thread memory** — successive DISTINCT
   prompts in the same pi session continue ONE agy conversation (keyed
   `<sessionKey>:ask` in pi-sessions.json, resumed with `--conversation`
   every call; the divergence re-seed table no longer applies because the
@@ -64,7 +64,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-out**: v0.2's fresh-conversation-per-distinct-prompt behavior is
   gone. Provider turns are unchanged (hashes + divergence byte-identical).
   Note: provider turns already see pi skills through the system prompt —
-  no skills-forwarding seam exists or is needed.
+  no skills-forwarding seam exists or is needed. 0.3.0 is the first
+  published version — 0.1.0 and 0.2.0 were skipped (never published), so
+  `pi install npm:agy-bridge-pi` delivers both entries above in one
+  release.
+
+### Documentation
+- Root README "Hard limits discovered about agy" extended with the verified
+  stream-json stdin contract (bare `--print` rejected, raw stdin ignored,
+  output shape identical to `--print --output-format stream-json`), the
+  graceful SIGTERM mid-run partial flush, `result.response` as the
+  concatenation of all `agent_response` `text_delta` chunks across steps,
+  plan-mode headless write/command blocking (plan file + link output), and
+  the `--sandbox` / `--dangerously-skip-permissions` incompatibility.
 
 ## [0.3.0] — 2026-09-11
 

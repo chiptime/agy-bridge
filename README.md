@@ -24,7 +24,9 @@ legacy CLI ────────┘   (spawn / classify /
   `dotfiles/ai/opencode-router` `src/agy/*`. Zero host imports.
 - **adapters**: **opencode provider — shipped** (`packages/opencode-adapter`,
   published as [`agy-bridge-opencode`](https://www.npmjs.com/package/agy-bridge-opencode)).
-  Pending: pi extension, legacy CLI.
+  **pi extension — shipped** (`packages/pi-adapter`, published as
+  [`agy-bridge-pi`](https://www.npmjs.com/package/agy-bridge-pi)).
+  Pending: legacy CLI.
 
 ## Install (opencode)
 
@@ -52,9 +54,18 @@ policy, local `file://` development form — in the
 
 ## Install (pi)
 
-Requires pi `>=0.85` and an authenticated `agy`. Until the npm release, load
-the package straight from a checkout — pi's jiti loader runs the TypeScript
-source, there is no build step:
+Requires pi `>=0.85` and an authenticated `agy`. The extension is published
+on npm as [`agy-bridge-pi`](https://www.npmjs.com/package/agy-bridge-pi) —
+`0.3.0` is the first published version (0.1.0 and 0.2.0 were never
+published). The package ships TypeScript source: pi's jiti loader runs it
+directly, there is no build step.
+
+```sh
+pi install npm:agy-bridge-pi
+```
+
+For development against a checkout, load the package straight from the repo
+instead:
 
 ```sh
 bun install                                   # once, at the repo root
@@ -96,7 +107,8 @@ What the extension registers:
   skills-forwarding support: provider turns already see pi skills through
   the system prompt.
 - **Command `/agy`** — `status` (config, discovery cache, session binding,
-  thread binding, in-flight turn) and `clear` (drop this session's session
+  thread binding, in-flight provider turn; in-flight thread delegations do
+  not appear on the turn line) and `clear` (drop this session's session
   AND thread rows).
 
 ### Safety wall — read before pointing it at a real repository
@@ -201,11 +213,16 @@ default-on, no opt-out.)
   [`agy-bridge-opencode@0.3.0`](https://www.npmjs.com/package/agy-bridge-opencode)
   (registry form requires ≥0.2.1; 0.2.0's entrypoint lacked the `create*`
   re-export — use ≥0.2.1 or the local `file://` form).
-- ✅ **pi extension adapter** (`packages/pi-adapter`, `agy-bridge-pi` v0.1.0):
-  native pi provider `agy` with discovered models and thinking levels, the
-  `AskAgy` contained delegation tool, `/agy status|clear`, session continuity
-  with divergence re-seeding. Verified end-to-end against real pi 0.85 + agy
-  (see [Install (pi)](#install-pi)). Not yet published to npm.
+- ✅ **pi extension adapter** (`packages/pi-adapter`,
+  [`agy-bridge-pi@0.3.0`](https://www.npmjs.com/package/agy-bridge-pi)):
+  native pi provider `agy` with discovered models and thinking levels, live
+  token streaming with envelope reconciliation, the `AskAgy` contained
+  delegation tool (opt-in, execution modes), `/agy status|clear`, session
+  continuity with divergence re-seeding, and AskAgy thread memory (one agy
+  conversation per pi session). Verified end-to-end against real pi 0.85 +
+  agy (see [Install (pi)](#install-pi)). Published to npm on 2026-09-13 —
+  0.1.0 and 0.2.0 were skipped (never published), so 0.3.0 is the first
+  published version.
 - ⬜ **CLI adapter** for the transition period, then deprecate the dotfiles
   router (`ai/opencode-router`).
 - `metrics.ts` is intentionally not ported yet — port once the engine's
@@ -233,8 +250,35 @@ against them:
   2. exit 0 + `status: "ERROR"` envelope whose error is the same
      `timeout waiting for response` (mid-turn cut);
   3. exit 0 + `status: "SUCCESS"` + empty response + stderr marker
-     `[agy] print timeout after Ns with turn in progress` (mid-turn cut,
-     artifact never lands).
+      `[agy] print timeout after Ns with turn in progress` (mid-turn cut,
+      artifact never lands).
+- **Bare `--print` is rejected; raw stdin text is never read in print
+  mode.** `--print` requires a value (`--print=-` sends the literal `-` as
+  the prompt), and plain text piped to stdin is ignored. The only stdin
+  prompt route is `--input-format stream-json --output-format stream-json`:
+  one NDJSON message per line,
+  `{"event":"user","message":{"role":"user","content":"<prompt>"}}`. The
+  child runs one turn per line and exits on stdin EOF after the `result`
+  event. The output NDJSON shape is identical to
+  `--print --output-format stream-json`.
+- **SIGTERM mid-run flushes gracefully.** agy emits `result` with
+  `status: "SUCCESS"` and the PARTIAL response accumulated so far, then
+  exits; the deltas already streamed are a prefix of that flushed response.
+  Design consequence: the engine always receives an envelope, even on
+  abort.
+- **`result.response` is the concatenation of ALL `agent_response`
+  `text_delta` chunks across steps.** Verified on a multi-step run with a
+  tool call in the middle: text blocks interleave with tool steps, deltas
+  split mid-word, and the final DONE `step_update` carries the last delta.
+- **`--mode plan` headless blocks writes AND commands.** A prompt demanding
+  file creation plus shell execution produced no file, the command tool
+  step ended in tool ERROR, and agy answered with an implementation plan —
+  a markdown file in its own brain dir, linked in the response, NOT prose
+  in the workdir. Plan-mode output may therefore be a plan file + link
+  instead of direct text.
+- **`--sandbox` must never be combined with
+  `--dangerously-skip-permissions`.** Known antigravity-cli issue; the
+  bridge never emits `--sandbox`.
 
 ## Models (opencode adapter)
 

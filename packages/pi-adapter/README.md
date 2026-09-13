@@ -1,7 +1,24 @@
 # agy-bridge-pi
 
 pi extension exposing the agy CLI as provider `agy`, the `AskAgy` tool, and
-`/agy`. Full install, safety wall, continuity, and configuration docs: see the
+`/agy`.
+
+## Install
+
+Published on npm as
+[`agy-bridge-pi`](https://www.npmjs.com/package/agy-bridge-pi) — `0.3.0` is
+the first published version (0.1.0 and 0.2.0 were never published):
+
+```sh
+pi install npm:agy-bridge-pi
+```
+
+The package ships TypeScript source: pi's jiti loader runs it directly,
+there is no build step. For development against a checkout, load it
+straight from the repo instead (`bun install` once at the repo root, then
+`pi -e ./packages/pi-adapter`).
+
+Full install, safety wall, continuity, and configuration docs: see the
 [repository README, "Install (pi)"](../../README.md#install-pi).
 
 ## Surface (v0.3)
@@ -17,7 +34,8 @@ pi extension exposing the agy CLI as provider `agy`, the `AskAgy` tool, and
   Successive non-isolated calls continue **one agy thread per pi session**
   (new in v0.3); `isolated: true` stays a one-shot.
 - **Command `/agy`** — `status` (config, session binding, thread binding,
-  in-flight turn) and `clear` (drops BOTH the session and thread rows).
+  in-flight provider turn; in-flight thread delegations are not shown on
+  the turn line) and `clear` (drops BOTH the session and thread rows).
 - **File config** — `~/.pi/agent/agy-bridge.json` then project
   `.pi/agy-bridge.json`; precedence factory options > project > global >
   env. `askAgy` section: `enabled`, `name`, `label`, `description`,
