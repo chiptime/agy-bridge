@@ -48,17 +48,49 @@ the provider id. Use `"default"`, `"gemini-3.8-flash-high"`, … — never
 
 ## A model is missing from `/model`
 
-- Models are **discovered dynamically** from `agy models` and registered by
-  the plugin, with a 24h cache at
-  `~/.local/state/agy-bridge/models-cache.json` (honors `XDG_STATE_HOME` and
-  the `stateDir` option). Delete the cache file and restart to force a
-  refresh.
-- Discovery runs at plugin init; if `agy models` fails at startup the static
-  fallback list (`agy/default` + `gemini-3.8-flash-*` tiers) is used.
-- Models must also be **declared in the config `models` map** to be
-  selectable before the provider initializes (host lookup ordering). The
-  plugin-registered extras appear once the provider has initialized in the
-  session.
+- The `/model` picker renders `provider.<id>.models` from **config** — that
+  is the reliable channel. The plugin's `provider.models` hook (dynamic
+  registration from `agy models`) is NOT consulted by opencode for
+  providers declared via `provider.<id>.npm` (verified on 1.18.30: the
+  hook never fires and the discovery cache is never written). Generate the
+  live catalog and merge it into config:
+
+  ```bash
+  cd packages/opencode-adapter
+  bun run scripts/export-config-models.ts   # optional: --bin /path/to/agy
+  ```
+
+  Paste the printed JSON fragment under `provider.agy.models`, then
+  restart opencode.
+- On host forms that DO consult the hook, discovery is lazy (first hook
+  call, memoized per server — not at plugin init) and cache-first: 24h
+  cache at `~/.local/state/agy-bridge/models-cache.json` (honors
+  `XDG_STATE_HOME` and the `stateDir` option). Delete the cache file and
+  restart to force a refresh. If `agy models` fails, the static fallback
+  registry is used (`agy/default` plus a collapsed `gemini-3.8-flash` base
+  with three effort variants).
+- Models must be **declared in the config `models` map** to be selectable
+  before the provider initializes (host lookup ordering). Effort-suffixed
+  ids collapse into their base: pick the base entry and choose the effort
+  variant; a suffixed id like `gemini-3.8-flash-high` in config still
+  works as a flat pass-through.
+
+## Turns run at the wrong effort, with a warning about variants
+
+**Symptom**: a provider warning like
+`model "agy/<base>" has effort variants but none was selected; using …` or
+`unknown variant "<name>" for model "agy/<base>"; using …` — and the turn
+runs at a different effort than the one you picked.
+
+**Cause**: the adapter resolves `--model` per turn from the selected
+variant; when the selection does not reach it (config fragment missing or
+stale `variants` payload, or a variant name the base does not carry), it
+falls back to the base's default — the highest discovered effort — and
+reports it loudly instead of guessing silently.
+
+**Fix**: regenerate the config fragment (`bun run
+scripts/export-config-models.ts` in `packages/opencode-adapter`), merge it
+under `provider.agy.models`, restart opencode, and reselect the effort.
 
 ## Progress shows blind `▸ response…` lines and tools without parameters
 
@@ -85,6 +117,22 @@ agy sends upstream, so panel content cannot break caching (~96% cache hits
 observed in a live resumed session); the only footprint is opencode's local
 session storage, kept small by the sanitized one-line format.
 
+## You see "Thinking..." but cannot open the reasoning text
+
+The reasoning content IS delivered and persisted (check `type: "reasoning"`
+rows in opencode's session store — the text is there). opencode **hides
+finished thinking blocks by default**: while the part streams you see it
+live, but once it ends the client filters it out unless the thinking
+visibility toggle is on.
+
+- TUI: run `/thinking` (alias `/toggle-thinking`) to expand/collapse thinking
+  blocks. The `display_thinking` keybind exists but defaults to unbound —
+  bind it in `opencode.json` if you want a key.
+- Web UI: Settings → General → enable **"Show reasoning summaries"**
+  (persisted per browser as `settings.v3 → general.showReasoningSummaries`,
+  off by default; verified on 1.18.x). The TUI `/thinking` command does not
+  exist in the web build. Raw stream always available in `run.log`.
+
 ## The turn timed out (or agy was cut mid-generation)
 
 Timeouts are **recoverable by design** — agy has three distinct timeout exit
@@ -110,8 +158,12 @@ detects the mismatch (per-message hash baseline) and starts a **fresh agy
 conversation seeded with your visible thread**, so the model answers from
 what your screen shows. One reconciliation turn (re-sends context, no cache
 warm-up), then normal operation. Sessions are mapped per opencode session id
-in `~/.local/state/agy-bridge/opencode-sessions.json` — delete an entry to
-force a completely fresh conversation.
+in `~/.local/state/agy-bridge/opencode-sessions.json` as a **list of
+conversation bindings** (cap 3, oldest evicted): each divergence appends a
+new binding instead of overwriting the previous one. Delete ONE binding to
+force a fresh conversation for that thread; delete the whole session key to
+reset every thread under that sessionID. Bindings older than 30 days are
+pruned automatically.
 
 ## Tool errors like `✗ view_file failed` in the progress panel
 

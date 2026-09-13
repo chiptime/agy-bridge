@@ -28,7 +28,14 @@ opencode's loader looks for):
       "options": { "workdirMode": "session", "timeoutMs": 600000 },
       "models": {
         "default": { "name": "Agy Default" },
-        "gemini-3.8-flash-high": { "name": "Gemini 3.8 Flash (High)" }
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "variants": {
+            "high": { "agyModelId": "gemini-3.8-flash-high" },
+            "medium": { "agyModelId": "gemini-3.8-flash-medium" },
+            "low": { "agyModelId": "gemini-3.8-flash-low" }
+          }
+        }
       }
     }
   }
@@ -57,8 +64,14 @@ entry file are imported directly:
 - Rebuild after source changes (`bun run build` in the package) — the host
   imports `dist/`, and the module is cached per server process (restart
   opencode to pick up a rebuild).
-- `models` is optional: the plugin registers everything `agy models` reports
-  (24h cache). Config entries override names/limits or add pass-through ids.
+- `models` in config is what the `/model` picker renders — and the reliable
+  channel on verified hosts: opencode does NOT consult the plugin's
+  `provider.models` hook for providers declared via `provider.<id>.npm`
+  (verified on 1.18.30), so materialize the live `agy models` catalog into
+  config with `scripts/export-config-models.ts` (see
+  [Effort variants](#effort-variants)). Legacy flat keys (e.g.
+  `gemini-3.8-flash-high`) still work as pass-through ids; config entries
+  override names/limits.
 - ⚠️ **0.2.0 is broken in the registry form** (missing `create*` re-export on
   the entrypoint) — use ≥0.2.1, or the local `file://` form above.
 
@@ -70,6 +83,51 @@ entry file are imported directly:
 - `session`: the turn runs directly in the opencode worktree (requires an
   absolute, existing worktree — config error otherwise).
 
+## Effort variants
+
+agy encodes the reasoning effort in model ids as a `-high`/`-medium`/`-low`
+suffix. The adapter collapses those suffixed ids into their **base model**:
+the `/model` picker shows ONE entry (e.g. `agy/gemini-3.8-flash`) whose
+variants (`high`, `medium`, `low`) carry the full agy id passed as
+`--model` at turn time. Switching effort mid-session takes effect on the
+next turn — `--model` is resolved per call, including on resumed
+conversations.
+
+Per turn, the `--model` value is resolved in this order:
+
+1. **Merged payload** — opencode merges the selected variant's `agyModelId`
+   into the call options (`providerOptions.agy`).
+2. **Variant name** — the selected variant key
+   (`providerOptions.agy.variant`).
+3. **Fallback** — the base model's own default: the HIGHEST discovered
+   effort (a collapsed base has no exact bare agy id to spawn).
+
+Fallbacks are LOUD, not silent: when a base has variants but none was
+selected (or the variant name is unknown), the adapter emits a provider
+warning, e.g. `model "agy/gemini-3.8-flash" has effort variants but none
+was selected; using "gemini-3.8-flash-high"`.
+
+Directly selecting a suffixed id (`agy/gemini-3.8-flash-high`) still works
+for legacy pinned configs and existing sessions — it passes through as a
+flat model whose `--model` is the full id.
+
+### Materializing the catalog into config
+
+The dynamic registry (plugin `provider.models` hook, backed by
+`agy models` with a 24h cache) only applies on hosts that consult that
+hook — verified opencode versions do not for providers declared via
+`provider.<id>.npm`. The reliable path is to regenerate the config
+fragment and merge it under `provider.agy.models`:
+
+```bash
+cd packages/opencode-adapter
+bun run scripts/export-config-models.ts   # optional: --bin /path/to/agy
+```
+
+The script prints a JSON fragment to stdout (bare model ids as keys;
+collapsed bases carry `name` + `variants`; `default` stays flat). Merge it
+into your `opencode.json` and restart opencode.
+
 ## History divergence (re-seeding)
 
 agy owns the conversation: each turn forwards only the last user message and
@@ -78,22 +136,30 @@ array every turn, and if you **edit, delete, or reorder earlier messages** in
 the client, the visible thread no longer matches agy's server-side history —
 agy would answer with stale context silently.
 
-The adapter detects this by keeping a per-session baseline of ordered
+The adapter detects this by keeping per-session baselines of ordered
 per-message hashes (first 16 hex of sha256 of each forwarded message, in
-`opencode-sessions.json`) and comparing it against the incoming array:
+`opencode-sessions.json`) and comparing them against the incoming array.
+Since 0.4.0, one opencode sessionID maps to a **list of conversation
+bindings** (each `{ conversationId, hashes?, updatedAt }`, capped at 3 —
+oldest evicted). opencode issues several model calls under one sessionID
+(side agents, compaction), and each call continues the binding whose
+baseline is the **longest prefix** of the incoming hashes instead of
+overwriting one shared baseline:
 
-- **Linear continuation** (baseline is a prefix of the incoming hashes) or no
-  baseline yet → resume as usual.
-- **Unknown baseline** (session mapped before this feature shipped) → adopted
-  as-is for one turn (resuming preserves agy's context), then protection is
-  active from the stored hashes onward.
-- **Divergence** (baseline not a prefix — earlier messages changed) → a fresh
-  agy conversation is started and the prompt becomes a bounded re-seed: the
-  last **20** text-bearing messages rendered as `User: …` / `Assistant: …`
-  inside a guarded block, each text truncated to **4000** chars, followed by
-  your actual message. The reasoning panel shows
-  `⟲ history diverged — new agy conversation seeded`. The new conversation id
-  becomes the stored baseline.
+- **Linear continuation** (a binding's baseline is a prefix of the incoming
+  hashes; longest prefix wins) or no baseline yet → resume as usual.
+- **Unknown baseline** (a binding stored without hashes — sessions mapped
+  before this feature shipped; v1 single-entry files migrate automatically
+  on load) → adopted as-is for one turn (resuming preserves agy's context),
+  then protection is active from the stored hashes onward.
+- **Divergence** (no binding baseline is a prefix — earlier messages
+  changed) → a fresh agy conversation is started and the prompt becomes a
+  bounded re-seed: the last **20** text-bearing messages rendered as
+  `User: …` / `Assistant: …` inside a guarded block, each text truncated to
+  **4000** chars, followed by your actual message. The reasoning panel shows
+  `⟲ history diverged — new agy conversation seeded`. The new conversation
+  id + incoming hashes are appended as a NEW binding — the other bindings
+  (e.g. the main thread's) are untouched.
 
 Responses are CRLF-normalized ( `\r\n` → `\n` ) and trailing whitespace at the
 very end of a response is stripped before it reaches opencode.
@@ -144,5 +210,10 @@ e.g. `"small_model": "google/gemini-2.5-flash"`.
 
 Every attempt writes `run.log` next to its workdir: scratch mode →
 `<scratchRoot>/agy-run-*/run.log`; session mode → `<worktree>/run.log`.
-The session↔conversation map lives at
-`${XDG_STATE_HOME ?? ~/.local/state}/agy-bridge/opencode-sessions.json`.
+The session↔conversation store lives at
+`${XDG_STATE_HOME ?? ~/.local/state}/agy-bridge/opencode-sessions.json`:
+`{ version: 2, sessions: { [sessionID]: [binding, …] } }` with each binding
+`{ conversationId, hashes?, updatedAt }` (v1 single-entry files migrate on
+load). Bindings older than 30 days are pruned automatically — a
+fire-and-forget sweep runs next to the scratch prune every turn, so the
+store no longer grows unbounded.
