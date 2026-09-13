@@ -25,6 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-in, and its default mode is `read` instead of always-full
   (`askAgy.enabled: true` + `defaultMode: "full"` restores v0.1 delegation).
 
+### Changed
+- **pi extension v0.3.0** (`agy-bridge-pi`, not yet published): `AskAgy`
+  non-isolated calls now have **thread memory** — successive DISTINCT
+  prompts in the same pi session continue ONE agy conversation (keyed
+  `<sessionKey>:ask` in pi-sessions.json, resumed with `--conversation`
+  every call; the divergence re-seed table no longer applies because the
+  tool prompt is the whole input). pi `/new` starts a fresh thread,
+  `/resume` restores it, `isolated: true` stays a one-shot, and
+  `/agy clear` clears the session and thread rows together (`/agy status`
+  reports the thread binding). This is a clean break vs 0.2.0 with **no
+  opt-out**: v0.2's fresh-conversation-per-distinct-prompt behavior is
+  gone. Provider turns are unchanged (hashes + divergence byte-identical).
+  Note: provider turns already see pi skills through the system prompt —
+  no skills-forwarding seam exists or is needed.
+
 ## [0.3.0] — 2026-09-11
 
 ### Changed

@@ -87,8 +87,17 @@ What the extension registers:
   label, and description are overridable via `askAgy.name` / `label` /
   `description`. Partial agy output (narration + streamed text) flows into
   the tool's live update as it arrives.
+  **New in v0.3 — thread memory**: successive non-isolated `AskAgy` calls
+  with DIFFERENT prompts continue **one agy conversation per pi session**
+  (v0.2 opened a fresh conversation whenever the prompt changed). This is
+  default-on with **no opt-out** — `isolated: true` stays the one-shot
+  escape hatch, `/agy clear` resets the thread, and pi `/new` starts a
+  fresh thread (`/resume` restores it). The driving model needs no
+  skills-forwarding support: provider turns already see pi skills through
+  the system prompt.
 - **Command `/agy`** — `status` (config, discovery cache, session binding,
-  in-flight turn) and `clear` (drop this session's binding).
+  thread binding, in-flight turn) and `clear` (drop this session's session
+  AND thread rows).
 
 ### Safety wall — read before pointing it at a real repository
 
@@ -127,6 +136,20 @@ transcript (20 messages / 4000 chars) and emits `⟲ history diverged`.
 `/new`, `/resume`, `/fork`, and `/reload` recycle all in-memory state; the
 file survives (30-day prune).
 
+**Provider-turn continuity (v0.3, unchanged in behavior)**: the table above
+applies to provider turns exactly as before — hashes, divergence detection,
+and re-seed are byte-identical to v0.2.
+
+**AskAgy thread continuity (new in v0.3)**: non-isolated `AskAgy` calls key
+a SECOND row per session at `<sessionKey>:ask` and resume it on EVERY call —
+no hash comparison, no divergence table (the tool prompt IS the whole input,
+so there is nothing to diverge). First call starts the thread; every later
+call — distinct prompt included — continues it. pi `/new` rotates the
+session id and therefore starts a fresh thread; `/resume` restores the old
+one. `isolated: true` bypasses the store entirely (fresh per call), and
+`/agy clear` wipes the session row and the thread row together. Thread rows
+are hash-less and age out with the same 30-day prune.
+
 ### Configuration
 
 Environment: `AGY_BIN` (binary override), `XDG_STATE_HOME` (state root).
@@ -154,11 +177,13 @@ are never logged. If streamed text and agy's final response envelope ever
 disagree, the final message is the envelope's (envelope wins) and the
 first-divergence offset is logged.
 
-### Not in v0.2
+### Not in v0.3
 
 Tool passthrough, MCP, mid-run steering, ACP, OAuth, images. (Shipped since
 v0.1: live token streaming with envelope reconciliation, `AskAgy` execution
-modes, layered file config, opt-in tool registration with a startup notice.)
+modes, layered file config, opt-in tool registration with a startup notice.
+Shipped in v0.3: AskAgy thread memory — one agy conversation per pi session,
+default-on, no opt-out.)
 
 ## Status & Roadmap
 
