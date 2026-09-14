@@ -83,6 +83,43 @@ entry file are imported directly:
 - `session`: the turn runs directly in the opencode worktree (requires an
   absolute, existing worktree — config error otherwise).
 
+## Image input (opt-in)
+
+The agy CLI ingests text only, but its agent can inspect on-disk images via
+`view_file`. When image input is enabled, the adapter bridges the gap:
+
+- Extracts image parts from the last user turn (all-or-nothing).
+- Stages them under `<workdir>/.agy-attachments/<sha16>.<ext>`.
+- Prepends a directive telling the agent to inspect each staged image via
+  `view_file` before responding.
+- Emits a notice when a staged image was not inspected.
+
+Enable it by setting `imageInput: true` in the adapter options AND declaring
+image support on every model:
+
+```jsonc
+{
+  "provider": {
+    "agy": {
+      "options": { "imageInput": true },
+      "models": {
+        "gemini-3.8-flash": {
+          "name": "gemini-3.8-flash",
+          "modalities": { "input": ["text", "image"], "output": ["text"] }
+          // ...variants
+        }
+      }
+    }
+  }
+}
+```
+
+When `imageInput` is false (default), image input stays undeclared and attaching
+an image surfaces an actionable error naming this opt-in and the text
+alternative. E2E: with it on, pasting an image stages the file and the agent
+answers about it via `view_file`; with it off, pasting an image errors and stages
+nothing.
+
 ## Effort variants
 
 agy encodes the reasoning effort in model ids as a `-high`/`-medium`/`-low`
