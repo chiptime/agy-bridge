@@ -18,7 +18,8 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { mkdtemp, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { runTurn, TurnError, type TurnDeps } from "../src/turn";
@@ -427,3 +428,189 @@ describe("unit: turn — prompt transport (promptViaStdin)", () => {
 	});
 });
 
+
+describe("unit: turn — image attachment bridge (spec image-input R2/R3/R6, design D1/D4/D7)", () => {
+	// PR 3: runTurn stages TurnRequest.attachments under the turn workdir
+	// (fake spawnFn integration — the runtime harness for this slice),
+	// deterministically prepends the inspection directive to the spawned
+	// prompt, taps view_file step lines to flip attachmentsInspected, and
+	// (session mode) prunes stale hash-named entries alongside staging.
+	const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+	const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 9]);
+	const GIF_BYTES = new Uint8Array([0x47, 0x49, 0x46, 8]);
+	const hashOf = (bytes: Uint8Array): string =>
+		createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+	/** Realistic envelope-shaped tool step_update line object (fakeChild JSON-encodes it). */
+	const toolStep = (tool: string, path: string) => ({
+		event: "step_update",
+		step_update: { step_type: "tool", state: "ACTIVE", tool_name: tool, tool_info: { path } },
+	});
+
+	test("stages one image under <workdir>/.agy-attachments and prepends the deterministic directive (stdin transport)", async () => {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		let lastChild: any;
+		const spawns: Array<{ args: string[]; cwd: string }> = [];
+		const { deps } = await setup((_bin: string, args: string[], opts: { cwd: string }) => {
+			spawns.push({ args, cwd: opts.cwd });
+			lastChild = fakeChild({ lines: [{ event: "init", conversation_id: "c-img" }, SUCCESS("c-img")], exit: 0 });
+			return lastChild;
+		});
+		const result = await runTurn(deps, {
+			prompt: "what is this",
+			hashes: H1,
+			sessionId: "s-img",
+			attachments: [{ data: PNG_BYTES, mediaType: "image/png" }],
+		});
+		expect(result.classification.outcome).toBe("success");
+		const rel = `.agy-attachments/${hashOf(PNG_BYTES)}.png`;
+		// Exactly one staged file, on disk, inside the scratch workdir the
+		// child also ran in (the --add-dir exposure).
+		expect(result.stagedAttachments).toEqual([rel]);
+		expect(existsSync(join(spawns[0].cwd, rel))).toBe(true);
+		// No view_file ran: the turn reports NOT inspected.
+		expect(result.attachmentsInspected).toBe(false);
+		// Deterministic directive (D1): fixed literal + staged relative path,
+		// prepended to the prompt body riding stdin.
+		const sent = JSON.parse(lastChild.stdinText().trim());
+		expect(sent.message.content).toBe(
+			`[Attached user image: ${rel}]\nPlease inspect each attached image above with view_file before responding.\n\nwhat is this`,
+		);
+	});
+
+	test("three images stage with distinct references and all three ride the directive (spec R2 multi-image)", async () => {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		let lastChild: any;
+		const spawns: Array<{ cwd: string }> = [];
+		const { deps } = await setup((_bin: string, _args: string[], opts: { cwd: string }) => {
+			spawns.push({ cwd: opts.cwd });
+			lastChild = fakeChild({ lines: [{ event: "init", conversation_id: "c-multi" }, SUCCESS("c-multi")], exit: 0 });
+			return lastChild;
+		});
+		const result = await runTurn(deps, {
+			prompt: "compare these",
+			hashes: H1,
+			sessionId: "s-multi",
+			attachments: [
+				{ data: PNG_BYTES, mediaType: "image/png" },
+				{ data: JPEG_BYTES, mediaType: "image/jpeg" },
+				{ data: GIF_BYTES, mediaType: "image/gif" },
+			],
+		});
+		expect(result.classification.outcome).toBe("success");
+		const rels = [
+			`.agy-attachments/${hashOf(PNG_BYTES)}.png`,
+			`.agy-attachments/${hashOf(JPEG_BYTES)}.jpg`,
+			`.agy-attachments/${hashOf(GIF_BYTES)}.gif`,
+		];
+		expect(result.stagedAttachments).toEqual(rels);
+		expect(new Set(result.stagedAttachments).size).toBe(3);
+		for (const rel of rels) expect(existsSync(join(spawns[0].cwd, rel))).toBe(true);
+		const content = JSON.parse(lastChild.stdinText().trim()).message.content as string;
+		for (const rel of rels) expect(content).toContain(`[Attached user image: ${rel}]`);
+		expect(content.endsWith("\n\ncompare these")).toBe(true);
+	});
+
+	test("a view_file step referencing the staged filename flips attachmentsInspected; other tools or paths do not", async () => {
+		const pngRel = `.agy-attachments/${hashOf(PNG_BYTES)}.png`;
+		const cases: Array<{ name: string; lines: unknown[]; want: boolean }> = [
+			{
+				name: "bash step never flips",
+				lines: [{ event: "init", conversation_id: "c" }, toolStep("bash", "ls"), SUCCESS("c")],
+				want: false,
+			},
+			{
+				name: "view_file on an UNRELATED path never flips",
+				lines: [{ event: "init", conversation_id: "c" }, toolStep("view_file", "src/other.ts"), SUCCESS("c")],
+				want: false,
+			},
+			{
+				name: "view_file referencing the staged basename flips",
+				lines: [{ event: "init", conversation_id: "c" }, toolStep("view_file", pngRel), SUCCESS("c")],
+				want: true,
+			},
+		];
+		for (const c of cases) {
+			const { deps } = await setup(() => fakeChild({ lines: c.lines, exit: 0 }));
+			const result = await runTurn(deps, {
+				prompt: "p",
+				hashes: H1,
+				sessionId: `s-flip-${c.name.replace(/\W+/g, "-")}`,
+				attachments: [{ data: PNG_BYTES, mediaType: "image/png" }],
+			});
+			expect(result.classification.outcome, c.name).toBe("success");
+			expect(result.attachmentsInspected, c.name).toBe(c.want);
+		}
+	});
+
+	test("turns without attachments: no staged paths reported and inspection vacuously true", async () => {
+		const { deps } = await setup(() => fakeChild({ lines: [{ event: "init", conversation_id: "c" }, SUCCESS("c")], exit: 0 }));
+		const result = await runTurn(deps, { prompt: "p", hashes: H1, sessionId: "s-plain" });
+		expect(result.classification.outcome).toBe("success");
+		expect(result.stagedAttachments).toBeUndefined();
+		expect(result.attachmentsInspected).toBe(true);
+	});
+
+	test("session mode: stale hash-named entries are pruned while the freshly staged file survives (spec R6 lifecycle)", async () => {
+		const worktree = await mkdtemp("/tmp/agy-turn-att-");
+		mkdirSync(join(worktree, ".agy-attachments"), { recursive: true });
+		const staleRel = ".agy-attachments/deadbeefdeadbeef.png";
+		writeFileSync(join(worktree, staleRel), "old");
+		const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+		await utimes(join(worktree, staleRel), old, old);
+		const { deps } = await setup((_bin: string, _args: string[], _opts: { cwd: string }) =>
+			fakeChild({ lines: [{ event: "init", conversation_id: "c-live" }, SUCCESS("c-live")], exit: 0 }),
+		);
+		deps.config = resolveConfig({ workdirMode: "session", timeoutMs: 30_000 });
+		const result = await runTurn({ ...deps, worktree }, {
+			prompt: "p",
+			hashes: H1,
+			sessionId: "s-live",
+			attachments: [{ data: PNG_BYTES, mediaType: "image/png" }],
+		});
+		expect(result.classification.outcome).toBe("success");
+		expect(existsSync(join(worktree, staleRel))).toBe(false);
+		expect(existsSync(join(worktree, ".agy-attachments", `${hashOf(PNG_BYTES)}.png`))).toBe(true);
+	});
+
+	test("argv transport (--print): the directive rides the prompt value, never stdin", async () => {
+		const spawns: string[][] = [];
+		const { deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [{ event: "init", conversation_id: "c-argv2" }, SUCCESS("c-argv2")], exit: 0 });
+		}, { promptViaStdin: false });
+		const rel = `.agy-attachments/${hashOf(PNG_BYTES)}.png`;
+		await runTurn(deps, {
+			prompt: "what is this",
+			hashes: H1,
+			sessionId: "s-argv2",
+			attachments: [{ data: PNG_BYTES, mediaType: "image/png" }],
+		});
+		expect(spawns[0]).toContain("--print");
+		expect(spawns[0][spawns[0].indexOf("--print") + 1]).toBe(
+			`[Attached user image: ${rel}]\nPlease inspect each attached image above with view_file before responding.\n\nwhat is this`,
+		);
+	});
+
+	test("divergence re-seed: the directive precedes the seedPrompt body (D1 — always delivered)", async () => {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		let lastChild: any;
+		const { store, deps } = await setup(() => {
+			lastChild = fakeChild({ lines: [{ event: "init", conversation_id: "c-seedy" }, SUCCESS("c-seedy")], exit: 0 });
+			return lastChild;
+		});
+		await store.bind("s-seedy", "conv-stale", ["h0", "h1"]);
+		const rel = `.agy-attachments/${hashOf(PNG_BYTES)}.png`;
+		const result = await runTurn(deps, {
+			prompt: "new turn",
+			seedPrompt: "--- Previous conversation ---\nUser: old\n--- End ---\n\nnew turn",
+			hashes: ["h0", "EDITED"],
+			sessionId: "s-seedy",
+			attachments: [{ data: PNG_BYTES, mediaType: "image/png" }],
+		});
+		expect(result.diverged).toBe(true);
+		const content = JSON.parse(lastChild.stdinText().trim()).message.content as string;
+		expect(content.startsWith(`[Attached user image: ${rel}]`)).toBe(true);
+		expect(content).toContain("--- Previous conversation ---");
+		expect(content.endsWith("\n\nnew turn")).toBe(true);
+	});
+});

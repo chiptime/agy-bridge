@@ -9,6 +9,14 @@
  * Abort kills the child through the stream tap, persists the tapped
  * conversation id, then rejects with an AbortError (D2).
  *
+ * Image bridge (spec image-input R2/R3/R6, design D1/D4/D7): decoded
+ * attachments from TurnRequest stage under <workdir>/.agy-attachments
+ * after prepareWorkdir, a deterministic inspection directive is PREPENDED
+ * to the effective prompt (rebuilt every turn — unlike a system prefix,
+ * it survives ongoing sessions), the line tap watches for view_file steps
+ * referencing staged filenames, and session-mode workdirs prune stale
+ * entries with the same 7-day policy as scratch.
+ *
  * v1.1 divergence policy — decided BEFORE the timeout-resume machinery:
  * - no stored entry → first turn: fresh agy conversation, last-user-turn
  *   prompt (unchanged behavior);
@@ -33,8 +41,10 @@ import {
 	type SpawnRun,
 } from "agy-bridge-engine";
 import type { spawn } from "node:child_process";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import type { AgyAdapterConfig } from "./config";
+import type { ExtractedImage } from "./attachments";
+import { pruneAttachments, stageAttachments } from "./attachments";
 import type { SessionStore } from "./session-store";
 import { createTap } from "./stream-tap";
 import { prepareWorkdir, pruneScratch } from "./workdir";
@@ -51,6 +61,10 @@ export interface TurnResult {
 	diverged: boolean;
 	logPath: string;
 	conversationId?: string;
+	/** Relative paths (agent-cwd-relative) of staged attachment files; unset when nothing staged. */
+	stagedAttachments?: string[];
+	/** True when every staged image was inspected via view_file (vacuously true when nothing staged). */
+	attachmentsInspected?: boolean;
 }
 
 export interface TurnRequest {
@@ -64,6 +78,12 @@ export interface TurnRequest {
 	hashes: string[];
 	/** v1.1: seeded prompt used INSTEAD of prompt when divergence is detected. */
 	seedPrompt?: string;
+	/**
+	 * Image attachments (design D3/D4, spec image-input R2): decoded images
+	 * extracted from the last user turn; staged under
+	 * <workdir>/.agy-attachments after prepareWorkdir.
+	 */
+	attachments?: ExtractedImage[];
 	/** Resolved --model value; undefined means agy picks its own default. */
 	modelArg?: string;
 	sessionId: string;
@@ -102,6 +122,21 @@ export class TurnError extends Error {
 
 const NO_LOG = "(no run log; the run was rejected before spawn)";
 
+/**
+ * D1 inspection directive (spec image-input R3): fixed literal + staged
+ * relative paths, deterministically PREPENDED to the per-turn prompt.
+ * The per-turn prompt is rebuilt every turn, so the directive is always
+ * delivered — unlike a system prefix, which mapMessages drops on
+ * continuing conversations exactly when users paste images mid-session.
+ */
+export function attachmentDirective(staged: string[]): string | undefined {
+	if (staged.length === 0) return undefined;
+	return [
+		...staged.map((rel) => `[Attached user image: ${rel}]`),
+		"Please inspect each attached image above with view_file before responding.",
+	].join("\n");
+}
+
 function abortError(): Error {
 	const err = new Error("agy turn aborted by the caller");
 	err.name = "AbortError";
@@ -132,6 +167,16 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		worktree: deps.worktree,
 	});
 	if (workdir.scratch) pruneScratch(dirname(workdir.dir));
+	// D4 staging (spec image-input R2): decoded attachments land under
+	// <workdir>/.agy-attachments AFTER prepareWorkdir resolves the turn
+	// workdir (the mkdtemp happens above; language-model cannot know it).
+	// An empty/absent batch stages nothing — no filesystem trace.
+	const staged = req.attachments === undefined ? [] : stageAttachments(workdir.dir, req.attachments);
+	// D4 lifecycle (spec image-input R6): session-mode workdirs are the
+	// user's worktree, so staged entries join the 7-day prune explicitly;
+	// scratch mode is already covered by pruneScratch above (only run.log
+	// survives an aged scratch dir).
+	if (!workdir.scratch) pruneAttachments(workdir.dir);
 	// Fire-and-forget 30-day retention: never blocks or fails a turn.
 	void deps.store.prune().catch(() => {});
 	const logPath = `${workdir.dir}/run.log`;
@@ -153,13 +198,28 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		diverged = true; // edited/deleted/reordered history → fresh re-seed, NEW binding
 		req.onDiverged?.();
 	}
-	const prompt = diverged ? (req.seedPrompt ?? req.prompt) : req.prompt;
+	// D1 directive: deterministically prepended to the effective prompt
+	// (prompt OR seedPrompt) whenever anything staged.
+	const directive = attachmentDirective(staged);
+	// D7 inspection tap (spec image-input R3): a step line naming
+	// view_file AND a staged filename marks the images inspected. Shape-
+	// tolerant on purpose — only step_update lines carry tool names.
+	let attachmentsInspected = staged.length === 0;
+	const stagedNames = staged.map((rel) => basename(rel));
+	const inspectingOnLine = (line: string): void => {
+		if (!attachmentsInspected && line.includes("view_file") && stagedNames.some((name) => line.includes(name))) {
+			attachmentsInspected = true;
+		}
+		req.onLine?.(line);
+	};
+	const prompt =
+		(directive !== undefined ? `${directive}\n\n` : "") + (diverged ? (req.seedPrompt ?? req.prompt) : req.prompt);
 	const attempt = async (
 		resumeConversationId: string | undefined,
 		resumed: boolean,
 		turnPrompt: string,
 	): Promise<TurnResult> => {
-		const tap = createTap(req.onLine, { signal: req.signal, spawnFn: deps.spawnFn });
+		const tap = createTap(inspectingOnLine, { signal: req.signal, spawnFn: deps.spawnFn });
 		const run = await runAgyStream({
 			bin: deps.bin,
 			prompt: turnPrompt,
@@ -187,6 +247,8 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			diverged,
 			logPath,
 			conversationId: run.conversationId ?? tap.conversationId,
+			stagedAttachments: staged.length > 0 ? staged : undefined,
+			attachmentsInspected,
 		};
 	};
 	let result = await attempt(resumeId, resumeId !== undefined, prompt);

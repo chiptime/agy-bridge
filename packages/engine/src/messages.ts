@@ -38,8 +38,26 @@ export const SEED_MAX_CHARS = 4000;
 const SEED_HEADER = "--- Previous conversation (context restored after edits in the client) ---";
 const SEED_FOOTER = "--- End of previous conversation ---";
 
+/**
+ * Compact placeholder for image parts in seeded history (spec image-input
+ * R5, design D6): prior image context must be represented so it is not
+ * silently dropped, but NEVER re-embedded as raw payloads.
+ */
+const IMAGE_SEED_PLACEHOLDER = "[user attached an image — not re-embedded]";
+
 export function isTextPart(p: PromptPart): p is PromptTextPart {
 	return p.type === "text" && typeof p["text"] === "string";
+}
+
+/**
+ * Shape-tolerant image detection for seeded history (design D6): a part is
+ * an image when its type says so OR its mediaType starts with "image/" —
+ * hosts deliver slightly different part shapes for the same attachment.
+ */
+function isImagePart(p: PromptPart): boolean {
+	if (p.type === "image" || p.type === "image-url") return true;
+	const mt = p["mediaType"];
+	return typeof mt === "string" && mt.toLowerCase().startsWith("image/");
 }
 
 /**
@@ -68,9 +86,11 @@ export function hashesArePrefix(stored: string[], incoming: string[]): boolean {
  * (default SEED_MAX_MESSAGES) text-bearing user/assistant messages as
  * "User: …"/"Assistant: …" lines inside a guarded block, each text truncated
  * to SEED_MAX_CHARS. System and tool messages are skipped (the host prepends
- * the system text separately); non-text parts are dropped with a warning,
- * pointed at the seeded history. Returns an empty seed when no history
- * message carries text.
+ * the system text separately). Image parts render the compact placeholder
+ * (design D6, spec image-input R5) — the placeholder counts as content, so
+ * an image-only turn still appears in the seed; other non-text parts are
+ * dropped with a warning, pointed at the seeded history. Returns an empty
+ * seed when no history message carries text or an image.
  */
 export function renderSeed(
 	messages: PromptMessage[],
@@ -86,6 +106,7 @@ export function renderSeed(
 		} else if (Array.isArray(m.content)) {
 			for (const part of m.content) {
 				if (isTextPart(part)) texts.push(part.text);
+				else if (isImagePart(part)) texts.push(IMAGE_SEED_PLACEHOLDER);
 				else warnings.push(`dropped non-text part (type: ${String(part?.type)}) from a seeded history message`);
 			}
 		}

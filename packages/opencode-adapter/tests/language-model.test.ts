@@ -14,11 +14,14 @@
 import { describe, expect, test } from "bun:test";
 import { APICallError, type LanguageModelV3, type SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { AgyEnvelope } from "agy-bridge-engine";
+import { AgyAttachmentError } from "../src/attachments";
 import {
 	AgyLanguageModel,
 	extractToolParam,
 	formatStepUpdate,
+	IMAGE_INPUT_DISABLED_MESSAGE,
 	normalizeResponseText,
+	promptHasImage,
 	readSessionContext,
 	readVariant,
 	sanitizePreview,
@@ -68,6 +71,9 @@ interface FakeRun {
 	envelope?: AgyEnvelope;
 	resume?: boolean;
 	throw?: Error;
+	/** PR 3 (D7): staged-attachment outcome fields mirrored onto TurnResult. */
+	stagedAttachments?: string[];
+	attachmentsInspected?: boolean;
 }
 
 /** Fake runner: records deps+req, replays lines, optionally resumes/throws
@@ -94,6 +100,8 @@ function fakeRunner(run: FakeRun): (deps: TurnDeps, req: TurnRequest) => Promise
 			diverged: false,
 			logPath: "/tmp/agy-run-x/run.log",
 			conversationId: run.envelope?.conversation_id,
+			stagedAttachments: run.stagedAttachments,
+			attachmentsInspected: run.attachmentsInspected,
 		};
 	};
 }
@@ -988,6 +996,316 @@ describe("unit: language-model — per-call variant → modelArg resolution", ()
 		};
 		const messages = (start.warnings ?? []).map((w) => w.message);
 		expect(messages.some((m) => m.includes("variant"))).toBe(false);
+	});
+});
+
+describe("unit: language-model — imageInput disabled fail-safe (spec image-input R1, design D2)", () => {
+	/** Prompt whose LAST user turn carries an inline image part. */
+	const IMAGE_PROMPT = [
+		{ role: "user", content: [{ type: "text", text: "what is in this picture" }, { type: "image", image: "aGVsbG8=", mediaType: "image/png" }] },
+	] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+
+	/** Prompt whose last user turn carries a remote image-url part. */
+	const IMAGE_URL_PROMPT = [
+		{ role: "user", content: [{ type: "image-url", image_url: { url: "https://example.com/cat.png" } }] },
+	] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+
+	/** Prompt with an image in an EARLIER user turn; last turn is text-only. */
+	const EARLIER_IMAGE_PROMPT = [
+		{ role: "user", content: [{ type: "text", text: "first" }, { type: "image", image: "aGVsbG8=", mediaType: "image/png" }] },
+		{ role: "assistant", content: [{ type: "text", text: "old answer" }] },
+		{ role: "user", content: [{ type: "text", text: "follow-up" }] },
+	] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+
+	function makeDisabledModel(run: FakeRun): { model: AgyLanguageModel; seen: Seen[] } {
+		const seen: Seen[] = [];
+		const model = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			// resolveConfig() default: imageInput false — the contract under test.
+			config: resolveConfig({ scratchRoot: "/tmp" }),
+			store: fakeStore().store,
+			run: async (deps, req) => {
+				seen.push({ deps, req });
+				return fakeRunner(run)(deps, req);
+			},
+		});
+		return { model, seen };
+	}
+
+	/** Drain a doStream run with an explicit prompt into ordered parts. */
+	async function drainPrompt(
+		model: AgyLanguageModel,
+		prompt: Parameters<LanguageModelV3["doStream"]>[0]["prompt"],
+	): Promise<Array<Record<string, unknown>>> {
+		const { stream } = await model.doStream({ prompt, providerOptions: { agy: { sessionId: "s" } } });
+		const reader = stream.getReader();
+		const parts: Array<Record<string, unknown>> = [];
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			parts.push(value as Record<string, unknown>);
+		}
+		return parts;
+	}
+
+	test("disabled + inline image in the LAST user turn → actionable error part, runner never invoked", async () => {
+		const { model, seen } = makeDisabledModel({ envelope: OK_ENVELOPE });
+		const parts = await drainPrompt(model, IMAGE_PROMPT);
+		// stream-start then a terminal error part — no run, no text, no finish.
+		expect(parts.map((p) => p["type"])).toEqual(["stream-start", "error"]);
+		const err = (parts[1] as { error: APICallError }).error;
+		expect(APICallError.isInstance(err)).toBe(true);
+		// Enabling the flag is a config action, not a transient fault.
+		expect(err.isRetryable).toBe(false);
+		// Actionable: names the enablement path AND the text alternative.
+		expect(err.message).toBe(IMAGE_INPUT_DISABLED_MESSAGE);
+		expect(err.message).toContain("imageInput");
+		expect(err.message).toContain("provider.agy.options.imageInput: true");
+		expect(err.message).toContain("describe the image in text");
+		// Fail-safe fires BEFORE dispatch: nothing was staged or run.
+		expect(seen).toHaveLength(0);
+	});
+
+	test("disabled + image-url part in the LAST user turn → same actionable rejection", async () => {
+		const { model, seen } = makeDisabledModel({ envelope: OK_ENVELOPE });
+		const parts = await drainPrompt(model, IMAGE_URL_PROMPT);
+		expect(parts.map((p) => p["type"])).toEqual(["stream-start", "error"]);
+		expect((parts[1] as { error: APICallError }).error.message).toBe(IMAGE_INPUT_DISABLED_MESSAGE);
+		expect(seen).toHaveLength(0);
+	});
+
+	test("disabled + image in an EARLIER turn only → NO fail-safe: normal flow, runner runs", async () => {
+		const { model, seen } = makeDisabledModel({ envelope: OK_ENVELOPE });
+		// The fail-safe scopes to the LAST user turn (the current request);
+		// historical image parts keep the existing drop-by-design behavior.
+		const parts = await drainPrompt(model, EARLIER_IMAGE_PROMPT);
+		expect(parts.some((p) => p["type"] === "error")).toBe(false);
+		expect(parts.some((p) => p["type"] === "finish")).toBe(true);
+		expect(seen).toHaveLength(1);
+	});
+
+	test("imageInput ENABLED + image in the last turn → no fail-safe error (bridge activation is a later unit)", async () => {
+		const seen: Seen[] = [];
+		const model = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			config: resolveConfig({ scratchRoot: "/tmp", imageInput: true }),
+			store: fakeStore().store,
+			run: async (deps, req) => {
+				seen.push({ deps, req });
+				return fakeRunner({ envelope: OK_ENVELOPE })(deps, req);
+			},
+		});
+		const parts = await drainPrompt(model, IMAGE_PROMPT);
+		expect(parts.some((p) => p["type"] === "error")).toBe(false);
+		expect(parts.some((p) => p["type"] === "finish")).toBe(true);
+		expect(seen).toHaveLength(1);
+	});
+});
+
+describe("unit: promptHasImage — last-user-turn image detection", () => {
+	test("detects image and image-url parts in the last user turn", () => {
+		expect(
+			promptHasImage([
+				{ role: "user", content: [{ type: "text", text: "q" }, { type: "image", image: "aGk=", mediaType: "image/png" }] },
+			]),
+		).toBe(true);
+		expect(
+			promptHasImage([{ role: "user", content: [{ type: "image-url", url: "https://x/y.png" }] }]),
+		).toBe(true);
+	});
+
+	test("text-only turns, string content, and empty arrays are NOT images", () => {
+		expect(promptHasImage([{ role: "user", content: [{ type: "text", text: "q" }] }])).toBe(false);
+		expect(promptHasImage([{ role: "user", content: "plain question" }])).toBe(false);
+		expect(promptHasImage([])).toBe(false);
+		expect(promptHasImage([{ role: "assistant", content: [{ type: "image", image: "aGk=" }] }])).toBe(false);
+	});
+});
+
+describe("unit: language-model — image bridge activation (spec image-input R2–R4, design D3/D7)", () => {
+	// PR 3: with imageInput ENABLED the last user turn's image parts are
+	// extracted (all-or-nothing), stripped BEFORE mapMessages (no drop
+	// warning on the enabled path), and ride the TurnRequest as decoded
+	// attachments. Unsupported parts reject the whole turn before the
+	// runner is invoked; uninspected staging surfaces as a notice delta.
+
+	/** Last user turn: text + inline png. */
+	const BRIDGE_PROMPT = [
+		{ role: "system", content: "Be brief." },
+		{ role: "user", content: [{ type: "text", text: "what is in this picture" }, { type: "image", image: "aGVsbG8=", mediaType: "image/png" }] },
+	] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+
+	const PNG_BYTES = new Uint8Array(Buffer.from("aGVsbG8=", "base64"));
+
+	function makeEnabledModel(run: FakeRun): { model: AgyLanguageModel; seen: Seen[] } {
+		const seen: Seen[] = [];
+		const model = new AgyLanguageModel({
+			provider: "agy",
+			modelId: "agy/default",
+			config: resolveConfig({ scratchRoot: "/tmp", imageInput: true }),
+			store: fakeStore().store,
+			run: async (deps, req) => {
+				seen.push({ deps, req });
+				return fakeRunner(run)(deps, req);
+			},
+		});
+		return { model, seen };
+	}
+
+	async function drainWithPrompt(
+		model: AgyLanguageModel,
+		prompt: Parameters<LanguageModelV3["doStream"]>[0]["prompt"],
+	): Promise<Array<Record<string, unknown>>> {
+		const { stream } = await model.doStream({ prompt, providerOptions: { agy: { sessionId: "s" } } });
+		const reader = stream.getReader();
+		const parts: Array<Record<string, unknown>> = [];
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			parts.push(value as Record<string, unknown>);
+		}
+		return parts;
+	}
+
+	test("enabled + inline image: attachments ride the TurnRequest; prompt is text-only; no drop warning", async () => {
+		const { model, seen } = makeEnabledModel({ envelope: OK_ENVELOPE });
+		const parts = await drainWithPrompt(model, BRIDGE_PROMPT);
+		expect(seen).toHaveLength(1);
+		const req = seen[0].req;
+		// Decoded bytes + media type pass through untouched.
+		expect(req.attachments).toEqual([{ data: PNG_BYTES, mediaType: "image/png" }]);
+		// The image part is stripped BEFORE mapMessages: the mapped prompt is
+		// the new-conversation system text plus the last user turn's text —
+		// and nothing else (no image residue, no drop warning).
+		expect(req.prompt).toBe("Be brief.\n\nwhat is in this picture");
+		// …and the drop-by-design warning never fires on the enabled path.
+		const start = parts.find((p) => p["type"] === "stream-start") as {
+			warnings?: Array<{ message: string }>;
+		};
+		const messages = (start.warnings ?? []).map((w) => w.message);
+		expect(messages.some((m) => m.includes("dropped non-text part"))).toBe(false);
+		expect(parts.some((p) => p["type"] === "finish")).toBe(true);
+	});
+
+	test("enabled + three images: all extracted in order, prompt stays text-only", async () => {
+		const prompt = [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "compare these" },
+					{ type: "image", image: Buffer.from("one").toString("base64"), mediaType: "image/png" },
+					{ type: "image", image: Buffer.from("two").toString("base64"), mediaType: "image/jpeg" },
+					{ type: "image", image: Buffer.from("three").toString("base64"), mediaType: "image/gif" },
+				],
+			},
+		] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+		const { model, seen } = makeEnabledModel({ envelope: OK_ENVELOPE });
+		await drainWithPrompt(model, prompt);
+		expect(seen[0].req.attachments).toHaveLength(3);
+		expect(seen[0].req.attachments?.map((a) => a.mediaType)).toEqual(["image/png", "image/jpeg", "image/gif"]);
+		expect(seen[0].req.attachments?.[0].data).toEqual(new Uint8Array(Buffer.from("one")));
+		expect(seen[0].req.prompt).toBe("compare these");
+	});
+
+	test("enabled + image in an EARLIER turn only: no extraction, attachments undefined, normal flow", async () => {
+		const earlier = [
+			{ role: "user", content: [{ type: "text", text: "first" }, { type: "image", image: "aGVsbG8=", mediaType: "image/png" }] },
+			{ role: "assistant", content: [{ type: "text", text: "old answer" }] },
+			{ role: "user", content: [{ type: "text", text: "follow-up" }] },
+		] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+		const { model, seen } = makeEnabledModel({ envelope: OK_ENVELOPE });
+		const parts = await drainWithPrompt(model, earlier);
+		expect(seen[0].req.attachments).toBeUndefined();
+		expect(seen[0].req.prompt).toBe("follow-up");
+		expect(parts.some((p) => p["type"] === "error")).toBe(false);
+	});
+
+	test("all-or-nothing: enabled + image AND a PDF part → actionable error naming the type; runner never invoked", async () => {
+		const mixed = [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "see these" },
+					{ type: "image", image: "aGVsbG8=", mediaType: "image/png" },
+					{ type: "file", mediaType: "application/pdf", data: "bb" },
+				],
+			},
+		] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+		const { model, seen } = makeEnabledModel({ envelope: OK_ENVELOPE });
+		const parts = await drainWithPrompt(model, mixed);
+		expect(parts.map((p) => p["type"])).toEqual(["stream-start", "error"]);
+		const err = (parts[1] as { error: APICallError }).error;
+		expect(APICallError.isInstance(err)).toBe(true);
+		expect(err.isRetryable).toBe(false);
+		// Actionable: names the unsupported type and the text alternative.
+		expect(err.message).toContain("application/pdf");
+		expect(err.message).toContain("text");
+		// Nothing staged, nothing run.
+		expect(seen).toHaveLength(0);
+	});
+
+	test("enabled + unreachable image-url → fetch failure surfaces as an actionable error part", async () => {
+		const remote = [
+			{ role: "user", content: [{ type: "image-url", image_url: { url: "http://127.0.0.1:1/x.png" } }] },
+		] as unknown as Parameters<LanguageModelV3["doStream"]>[0]["prompt"];
+		const { model, seen } = makeEnabledModel({ envelope: OK_ENVELOPE });
+		const parts = await drainWithPrompt(model, remote);
+		expect(parts.map((p) => p["type"])).toEqual(["stream-start", "error"]);
+		const err = (parts[1] as { error: APICallError }).error;
+		expect(APICallError.isInstance(err)).toBe(true);
+		expect(err.isRetryable).toBe(false);
+		expect(err.message).toContain("failed to fetch");
+		expect(seen).toHaveLength(0);
+	});
+
+	test("D7 notice: staged attachments NOT inspected → reasoning-delta says so (never silently seen)", async () => {
+		const { model } = makeEnabledModel({
+			envelope: OK_ENVELOPE,
+			stagedAttachments: [".agy-attachments/aaaaaaaaaaaaaaaa.png"],
+			attachmentsInspected: false,
+		});
+		const parts = await drainWithPrompt(model, BRIDGE_PROMPT);
+		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map(
+			(d) => d.delta,
+		);
+		expect(deltas.some((d) => d.includes("not inspected"))).toBe(true);
+		expect(deltas.some((d) => d.includes("view_file"))).toBe(true);
+	});
+
+	test("D7 notice: attachments inspected via view_file → NO notice delta", async () => {
+		const { model } = makeEnabledModel({
+			envelope: OK_ENVELOPE,
+			stagedAttachments: [".agy-attachments/aaaaaaaaaaaaaaaa.png"],
+			attachmentsInspected: true,
+		});
+		const parts = await drainWithPrompt(model, BRIDGE_PROMPT);
+		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map(
+			(d) => d.delta,
+		);
+		expect(deltas.some((d) => d.includes("not inspected"))).toBe(false);
+	});
+
+	test("D7 notice: turns without attachments never emit the notice", async () => {
+		const { model } = makeEnabledModel({ envelope: OK_ENVELOPE });
+		const parts = await drainWithPrompt(model, BRIDGE_PROMPT);
+		const deltas = (parts.filter((p) => p["type"] === "reasoning-delta") as Array<{ delta: string }>).map(
+			(d) => d.delta,
+		);
+		expect(deltas.some((d) => d.includes("not inspected"))).toBe(false);
+	});
+
+	test("staging failure (AgyAttachmentError from the runner) → non-retryable error part with the actionable detail", async () => {
+		const { model } = makeEnabledModel({
+			throw: new AgyAttachmentError("refusing to stage .agy-attachments/x.png: the path already exists as a symlink"),
+		});
+		const parts = await drainWithPrompt(model, BRIDGE_PROMPT);
+		expect(parts.map((p) => p["type"])).toEqual(["stream-start", "error"]);
+		const err = (parts[1] as { error: APICallError }).error;
+		expect(APICallError.isInstance(err)).toBe(true);
+		expect(err.isRetryable).toBe(false);
+		expect(err.message).toContain("refusing to stage");
 	});
 });
 

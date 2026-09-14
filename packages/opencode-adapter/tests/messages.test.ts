@@ -189,7 +189,8 @@ describe("unit: messages — v1.1 seed rendering", () => {
 
 	test("non-text parts are skipped with the existing warning text; textless messages are omitted", () => {
 		const { seed, warnings } = renderSeed([
-			user([{ type: "file", mediaType: "image/png", data: "bb" }]), // no text → omitted
+			// image/* parts now placeholder (design D6) — use a genuinely unsupported type here
+			user([{ type: "file", mediaType: "application/pdf", data: "bb" }]), // no text → omitted
 			user([{ type: "text", text: "with tool" }, { type: "tool-result", toolCallId: "t" }]),
 			{ role: "assistant", content: [{ type: "text", text: "kept" }] },
 		]);
@@ -200,7 +201,7 @@ describe("unit: messages — v1.1 seed rendering", () => {
 	});
 
 	test("no text-bearing messages → empty seed, non-text parts still warned", () => {
-		const { seed, warnings } = renderSeed([user([{ type: "file", mediaType: "image/png", data: "bb" }])]);
+		const { seed, warnings } = renderSeed([user([{ type: "file", mediaType: "application/pdf", data: "bb" }])]);
 		expect(seed).toBe("");
 		expect(warnings).toHaveLength(1);
 	});

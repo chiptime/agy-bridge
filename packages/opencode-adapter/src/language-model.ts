@@ -32,6 +32,7 @@ import { runTurn, TurnError, type TurnDeps, type TurnRequest, type TurnResult } 
 import type { AgyAdapterConfig } from "./config";
 import type { SessionStore } from "./session-store";
 import { mapMessages, messageHashes, renderSeed, type PromptMessage } from "./messages";
+import { AgyAttachmentError, extractAttachments, type ExtractedImage } from "./attachments";
 import { resolveModel, type AgyModel } from "./models";
 
 /** Injectable turn runner — tests fake this to pin the mapping in isolation. */
@@ -346,6 +347,60 @@ const REASONING_ID = "agy-progress";
 const TEXT_ID = "agy-response";
 
 /**
+ * Default-off fail-safe message (spec image-input R1): names the enablement
+ * path (the imageInput option, with its opencode config spelling) AND the
+ * text alternative, so a rejected image turn is actionable, not mysterious.
+ */
+export const IMAGE_INPUT_DISABLED_MESSAGE =
+	"the agy provider received an image but image input is disabled by default — enable it with the imageInput option (provider.agy.options.imageInput: true in your opencode config), or describe the image in text instead";
+
+/**
+ * True when the LAST user turn carries an image part (type "image" or
+ * "image-url" — the exact shapes attachments.ts extraction recognizes).
+ * Scope is deliberately the last user turn, matching the extraction
+ * contract: historical image parts already follow the drop-by-design path.
+ */
+export function promptHasImage(messages: PromptMessage[]): boolean {
+	const lastUser = [...messages].reverse().find((m) => m?.role === "user");
+	if (!lastUser || !Array.isArray(lastUser.content)) return false;
+	return lastUser.content.some(
+		(part) => typeof part === "object" && part !== null && (part.type === "image" || part.type === "image-url"),
+	);
+}
+
+/** Terminal attachment-rejection stream: stream-start → error → close. */
+function attachmentErrorStream(message: string): LanguageModelV3StreamResult {
+	const stream = new ReadableStream<LanguageModelV3StreamPart>({
+		start(controller) {
+			controller.enqueue({ type: "stream-start", warnings: [] });
+			controller.enqueue({
+				type: "error",
+				error: new APICallError({
+					message,
+					url: "agy://turn",
+					requestBodyValues: {},
+					isRetryable: false,
+				}),
+			});
+			controller.close();
+		},
+	});
+	return { stream };
+}
+
+/**
+ * All-or-nothing rejection text for unsupported parts (spec image-input
+ * R4): names every unsupported type and the text alternative.
+ */
+export function unsupportedAttachmentsMessage(types: string[]): string {
+	return `unsupported attachment type(s) in the last user turn: ${types.join(", ")} — the agy image bridge accepts png, jpeg, gif and webp images only; remove the unsupported attachment or describe its content as text`;
+}
+
+/** D7: surfaced when attachments existed but the agent never inspected them. */
+export const IMAGE_NOT_INSPECTED_NOTICE =
+	"⚠ an attached image was not inspected with view_file — the response below may not account for it\n";
+
+/**
  * The agy LanguageModelV3 (R4). Constructed per model id by the provider
  * factory; every doStream/doGenerate call runs one turn through the
  * injected (default: real) runner.
@@ -416,6 +471,55 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		// closed union without index signatures; mapMessages only reads
 		// role/content/part.type and validates shapes at runtime.
 		const incoming = options.prompt as unknown as PromptMessage[];
+		// Default-off fail-safe (spec image-input R1, design D2): advertised
+		// capabilities can desync from config, so the flag is re-checked
+		// here. A disabled config + image in the last user turn rejects
+		// BEFORE the store or the runner is touched — nothing stages, and
+		// the error names the enablement path plus the text alternative.
+		if (!deps.config.imageInput && promptHasImage(incoming)) {
+			return attachmentErrorStream(IMAGE_INPUT_DISABLED_MESSAGE);
+		}
+		// Bridge activation (spec image-input R2–R4, design D3): when
+		// enabled, image parts of the LAST user turn are extracted
+		// all-or-nothing — any unsupported part rejects the whole turn
+		// BEFORE the store or the runner is touched (nothing stages), with
+		// an actionable error naming the type. Extracted images ride the
+		// TurnRequest; the parts are stripped from a COPY used for prompt
+		// building only — `hashes` below still hash the RAW incoming array
+		// so divergence semantics are untouched (same visible thread →
+		// same baseline, image or not).
+		let attachments: ExtractedImage[] | undefined;
+		let promptMessages = incoming;
+		if (deps.config.imageInput) {
+			const lastUser = [...incoming].reverse().find((m) => m?.role === "user");
+			const lastUserContent = lastUser?.content;
+			if (lastUser !== undefined && Array.isArray(lastUserContent) && lastUserContent.length > 0) {
+				let extracted: Awaited<ReturnType<typeof extractAttachments>>;
+				try {
+					extracted = await extractAttachments(lastUserContent);
+				} catch (err) {
+					if (err instanceof AgyAttachmentError) return attachmentErrorStream(err.detail);
+					throw err;
+				}
+				if (extracted.unsupported.length > 0) {
+					return attachmentErrorStream(unsupportedAttachmentsMessage(extracted.unsupported));
+				}
+				if (extracted.images.length > 0) {
+					attachments = extracted.images;
+					promptMessages = incoming.map((m) =>
+						m === lastUser
+							? {
+									...m,
+									content: lastUserContent.filter(
+										(part) =>
+											!(typeof part === "object" && part !== null && (part.type === "image" || part.type === "image-url")),
+									),
+								}
+							: m,
+					);
+				}
+			}
+		}
 		const hashes = messageHashes(incoming);
 		// v2 prefix routing mirrors turn.ts: resolve() picks the binding this
 		// call continues; no match with bindings present means the visible
@@ -427,7 +531,7 @@ export class AgyLanguageModel implements LanguageModelV3 {
 		// TEMPORARY DIAGNOSTIC PROBE — remove once the session-key question is
 		// resolved. Shape only: roles and hashes, never prompt content.
 		const seedInfo = diverged ? renderSeed(incoming) : undefined;
-		const mapping = mapMessages(incoming, { isNewConversation, seed: seedInfo?.seed });
+		const mapping = mapMessages(promptMessages, { isNewConversation, seed: seedInfo?.seed });
 		const warnings: SharedV3Warning[] = [
 			...(seedInfo?.warnings ?? []),
 			...mapping.warnings,
@@ -457,13 +561,14 @@ export class AgyLanguageModel implements LanguageModelV3 {
 							spawnFn: deps.spawnFn,
 							promptViaStdin: deps.promptViaStdin,
 						},
-						{
-							prompt: mapping.prompt,
-							hashes,
-							seedPrompt: diverged ? mapping.prompt : undefined,
-							modelArg,
-							sessionId,
-							signal: options.abortSignal,
+					{
+						prompt: mapping.prompt,
+						hashes,
+						seedPrompt: diverged ? mapping.prompt : undefined,
+						modelArg,
+						sessionId,
+						attachments,
+						signal: options.abortSignal,
 							onLine: (line) => {
 								// Live progress (D1 tap): every step_update is a
 								// reasoning delta in the single status block,
@@ -491,8 +596,22 @@ export class AgyLanguageModel implements LanguageModelV3 {
 								});
 							},
 						},
-					);
-					if (reasoningOpen) controller.enqueue({ type: "reasoning-end", id: REASONING_ID });
+				);
+				// D7 (spec image-input R3): attachments existed but were not
+				// inspected → surface the miss as a notice delta, never
+				// silently treated as seen. Fires before reasoning-end so it
+				// lands inside the (possibly just-opened) status block.
+				if (
+					attachments !== undefined &&
+					attachments.length > 0 &&
+					result.stagedAttachments !== undefined &&
+					result.stagedAttachments.length > 0 &&
+					result.attachmentsInspected !== true
+				) {
+					openReasoning();
+					controller.enqueue({ type: "reasoning-delta", id: REASONING_ID, delta: IMAGE_NOT_INSPECTED_NOTICE });
+				}
+				if (reasoningOpen) controller.enqueue({ type: "reasoning-end", id: REASONING_ID });
 					const text = normalizeResponseText(result.run.envelope?.response ?? "");
 					if (text !== "") {
 						controller.enqueue({ type: "text-start", id: TEXT_ID });
@@ -518,6 +637,23 @@ export class AgyLanguageModel implements LanguageModelV3 {
 								url: "agy://turn",
 								requestBodyValues: {},
 								isRetryable: err.mapping.retryable,
+							}),
+						});
+						controller.close();
+						return;
+					}
+					// Staging failures (design D3/D4): AgyAttachmentError detail
+					// is already actionable user guidance — map it like a
+					// terminal TurnError instead of a raw rejection.
+					if (err instanceof AgyAttachmentError) {
+						if (reasoningOpen) controller.enqueue({ type: "reasoning-end", id: REASONING_ID });
+						controller.enqueue({
+							type: "error",
+							error: new APICallError({
+								message: err.detail,
+								url: "agy://turn",
+								requestBodyValues: {},
+								isRetryable: false,
 							}),
 						});
 						controller.close();

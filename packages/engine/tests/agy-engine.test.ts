@@ -984,6 +984,21 @@ describe("unit: spawn — buildAgyArgs output formats (json + stream-json) and r
 	test("stall default is 10 minutes (evidence: real runs stream intermediate events)", () => {
 		expect(DEFAULT_STALL_MS).toBe(600_000);
 	});
+
+	test("image-support D5 regression: print branch carries exactly one --add-dir pair equal to the workdir", () => {
+		// The attachment bridge depends on the agent reaching staged files
+		// under the workdir; this locks the exposure in the argv (print)
+		// branch. No production change — buildAgyArgs already emitted it.
+		const args = buildAgyArgs({ bin: "agy", prompt: "p", workdir: "/w", timeoutMs: 600_000 });
+		expect(args.filter((a) => a === "--add-dir")).toHaveLength(1);
+		expect(args[args.indexOf("--add-dir") + 1]).toBe("/w");
+	});
+
+	test("image-support D5 regression: stdin branch carries exactly one --add-dir pair equal to the workdir", () => {
+		const args = buildAgyArgs({ bin: "agy", prompt: "p", workdir: "/w", timeoutMs: 600_000, promptViaStdin: true });
+		expect(args.filter((a) => a === "--add-dir")).toHaveLength(1);
+		expect(args[args.indexOf("--add-dir") + 1]).toBe("/w");
+	});
 });
 
 describe("unit: spawn — stream-json NDJSON line extraction (pure)", () => {
@@ -1377,7 +1392,8 @@ describe("unit: messages — R11 bounded seed rendering (host-agnostic lift)", (
 
 	test("non-text parts are skipped with the existing warning text; textless messages are omitted", () => {
 		const { seed, warnings } = renderSeed([
-			user([{ type: "file", mediaType: "image/png", data: "bb" }]), // no text → omitted
+			// image/* parts now placeholder (D6) — use a genuinely unsupported type here
+			user([{ type: "file", mediaType: "application/pdf", data: "bb" }]), // no text → omitted
 			user([{ type: "text", text: "with tool" }, { type: "tool-result", toolCallId: "t" }]),
 			{ role: "assistant", content: [{ type: "text", text: "kept" }] },
 		]);
@@ -1388,7 +1404,7 @@ describe("unit: messages — R11 bounded seed rendering (host-agnostic lift)", (
 	});
 
 	test("no text-bearing messages → empty seed, non-text parts still warned", () => {
-		const { seed, warnings } = renderSeed([user([{ type: "file", mediaType: "image/png", data: "bb" }])]);
+		const { seed, warnings } = renderSeed([user([{ type: "file", mediaType: "application/pdf", data: "bb" }])]);
 		expect(seed).toBe("");
 		expect(warnings).toHaveLength(1);
 	});
@@ -1407,6 +1423,50 @@ describe("unit: messages — R11 bounded seed rendering (host-agnostic lift)", (
 		expect(messageHashesFromIndex).toBe(messageHashes);
 		expect(hashesArePrefixFromIndex).toBe(hashesArePrefix);
 		expect(renderSeedFromIndex).toBe(renderSeed);
+	});
+});
+
+describe("unit: messages — image placeholder on re-seed (spec image-input R5, design D6)", () => {
+	function user(parts: PromptContent): PromptMessage {
+		return { role: "user", content: parts };
+	}
+
+	test("image parts render the compact placeholder inline; raw bytes are never re-embedded", () => {
+		const { seed, warnings } = renderSeed([
+			user([
+				{ type: "text", text: "what is this" },
+				{ type: "image", image: "aGVsbG8=", mediaType: "image/png" },
+			]),
+			{ role: "assistant", content: [{ type: "text", text: "a cat" }] },
+		]);
+		expect(seed).toContain("User: what is this\n[user attached an image — not re-embedded]");
+		expect(seed).toContain("Assistant: a cat");
+		expect(seed).not.toContain("aGVsbG8=");
+		expect(warnings).toEqual([]);
+	});
+
+	test("mediaType image/* on a differently-typed part also placeholders (shape-tolerant detection)", () => {
+		const { seed } = renderSeed([user([{ type: "file", mediaType: "image/jpeg", data: "bbbb" }])]);
+		expect(seed).toContain("User: [user attached an image — not re-embedded]");
+		expect(seed).not.toContain("bbbb");
+	});
+
+	test("image-ONLY message still renders — the placeholder counts as content (prior image context kept)", () => {
+		const { seed, warnings } = renderSeed([
+			user([{ type: "image", image: "aGk=", mediaType: "image/png" }]),
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+		]);
+		expect(seed).toContain("User: [user attached an image — not re-embedded]");
+		expect(warnings).toEqual([]);
+	});
+
+	test("non-image non-text parts keep the existing drop warning", () => {
+		const { seed, warnings } = renderSeed([
+			user([{ type: "text", text: "q" }, { type: "file", mediaType: "application/pdf", data: "bb" }]),
+		]);
+		expect(seed).toContain("User: q");
+		expect(seed).not.toContain("[user attached an image");
+		expect(warnings.some((w) => w.includes("dropped non-text part"))).toBe(true);
 	});
 });
 
