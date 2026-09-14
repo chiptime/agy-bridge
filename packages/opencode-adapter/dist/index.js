@@ -1323,7 +1323,8 @@ async function runTurn(deps, req) {
       model: req.modelArg,
       resumeConversationId,
       logPath,
-      spawnImpl: tap.spawnImpl
+      spawnImpl: tap.spawnImpl,
+      promptViaStdin: deps.promptViaStdin ?? true
     });
     const classification = classifyRun({
       exitCode: run.exitCode,
@@ -1795,7 +1796,8 @@ class AgyLanguageModel {
             config: deps.config,
             store: deps.store,
             worktree: ctx.worktree,
-            spawnFn: deps.spawnFn
+            spawnFn: deps.spawnFn,
+            promptViaStdin: deps.promptViaStdin
           }, {
             prompt: mapping.prompt,
             hashes,
@@ -1914,7 +1916,8 @@ function createAgyProvider(options = {}, testDeps = {}) {
       store,
       bin: testDeps.bin,
       run: testDeps.run,
-      spawnFn: testDeps.spawnFn
+      spawnFn: testDeps.spawnFn,
+      promptViaStdin: testDeps.promptViaStdin
     }),
     embeddingModel: (modelId) => {
       throw new NoSuchModelError({ modelId, modelType: "embeddingModel" });

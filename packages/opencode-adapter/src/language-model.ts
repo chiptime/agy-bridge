@@ -49,6 +49,7 @@ export interface AgyLanguageModelDeps {
 	/** Test seam; defaults to the real runTurn wired with the deps below. */
 	run?: TurnRunner;
 	spawnFn?: TurnDeps["spawnFn"];
+	promptViaStdin?: boolean;
 }
 
 /** Session context surfaced by the plugin's chat.params hook (D3/OQ1) or host headers. */
@@ -454,6 +455,7 @@ export class AgyLanguageModel implements LanguageModelV3 {
 							store: deps.store,
 							worktree: ctx.worktree,
 							spawnFn: deps.spawnFn,
+							promptViaStdin: deps.promptViaStdin,
 						},
 						{
 							prompt: mapping.prompt,

@@ -84,6 +84,12 @@ export interface TurnDeps {
 	worktree?: string;
 	/** Injectable spawn for tests (fed to the stream tap). */
 	spawnFn?: typeof spawn;
+	/**
+	 * Prompt transport seam (default true): when true, prompts ride stdin
+	 * as stream-json NDJSON instead of argv --print. Eliminates E2BIG on
+	 * large system prompts.
+	 */
+	promptViaStdin?: boolean;
 }
 
 /** Terminal turn failure carrying the mapped provider semantics (R6). */
@@ -163,6 +169,7 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			resumeConversationId,
 			logPath,
 			spawnImpl: tap.spawnImpl,
+			promptViaStdin: deps.promptViaStdin ?? true,
 		});
 		const classification = classifyRun({
 			exitCode: run.exitCode,

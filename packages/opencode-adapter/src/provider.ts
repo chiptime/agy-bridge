@@ -30,6 +30,7 @@ export interface AgyProviderTestDeps {
 	bin?: string;
 	run?: TurnRunner;
 	spawnFn?: TurnDeps["spawnFn"];
+	promptViaStdin?: boolean;
 }
 
 /**
@@ -54,6 +55,7 @@ export function createAgyProvider(
 				bin: testDeps.bin,
 				run: testDeps.run,
 				spawnFn: testDeps.spawnFn,
+				promptViaStdin: testDeps.promptViaStdin,
 			}),
 		embeddingModel: (modelId) => {
 			throw new NoSuchModelError({ modelId, modelType: "embeddingModel" });

@@ -17,7 +17,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, utimes } from "node:fs/promises";
 import { join } from "node:path";
@@ -34,6 +34,14 @@ function fakeChild(opts: { lines?: unknown[]; exit?: number | null; hold?: boole
 	const child: any = new EventEmitter();
 	child.stdout = new Readable({ read() {} });
 	child.stderr = new Readable({ read() {} });
+	const stdinChunks: Buffer[] = [];
+	child.stdin = new Writable({
+		write(chunk, _encoding, callback) {
+			stdinChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+			callback();
+		},
+	});
+	child.stdinText = () => Buffer.concat(stdinChunks).toString("utf8");
 	child.killed = false;
 	child.kill = () => {
 		child.killed = true;
@@ -75,7 +83,7 @@ function recordingStore(path: string): { store: SessionStore; calls: string[] } 
 	};
 }
 
-async function setup(spawnFn?: unknown) {
+async function setup(spawnFn?: unknown, depsOverride: Partial<TurnDeps> = {}) {
 	const root = await mkdtemp("/tmp/agy-turn-");
 	const { store, calls } = recordingStore(join(root, "sessions.json"));
 	const deps: TurnDeps = {
@@ -83,6 +91,7 @@ async function setup(spawnFn?: unknown) {
 		config: resolveConfig({ scratchRoot: root, timeoutMs: 30_000 }),
 		store,
 		spawnFn: spawnFn as never,
+		...depsOverride,
 	};
 	return { root, store, calls, deps };
 }
@@ -268,11 +277,13 @@ describe("unit: turn — v1.1 divergence policy (resume vs fresh re-seed)", () =
 	});
 
 	test("divergence: edited middle message → NO --conversation, the seedPrompt is sent, onDiverged fires, fresh id + incoming hashes bound", async () => {
+		let lastChild: any;
 		const spawns: string[][] = [];
 		const events: string[] = [];
 		const { store, deps } = await setup((_bin: string, args: string[]) => {
 			spawns.push(args);
-			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-fresh" }, SUCCESS("conv-fresh")], exit: 0 });
+			lastChild = fakeChild({ lines: [{ event: "init", conversation_id: "conv-fresh" }, SUCCESS("conv-fresh")], exit: 0 });
+			return lastChild;
 		});
 		await store.bind("sess-div", "conv-stale", ["h0", "h1"]);
 		const result = await runTurn(deps, {
@@ -286,8 +297,9 @@ describe("unit: turn — v1.1 divergence policy (resume vs fresh re-seed)", () =
 		expect(events).toEqual(["diverged"]);
 		expect(spawns).toHaveLength(1);
 		expect(spawns[0]).not.toContain("--conversation");
-		// The positional prompt after --print is the SEEDED one, not the bare turn.
-		expect(spawns[0][spawns[0].indexOf("--print") + 1]).toContain("seeded visible thread");
+		// The prompt rides stdin as stream-json user event, never argv --print (promptViaStdin: true).
+		expect(spawns[0]).not.toContain("--print");
+		expect(lastChild.stdinText()).toContain("seeded visible thread");
 		expect(await store.getEntry("sess-div")).toEqual({
 			conversationId: "conv-fresh",
 			hashes: ["h0", "EDITED", "h2"],
@@ -381,3 +393,37 @@ describe("unit: turn — v1.1 divergence policy (resume vs fresh re-seed)", () =
 		expect(pruned).toBe(1);
 	});
 });
+
+describe("unit: turn — prompt transport (promptViaStdin)", () => {
+	test("promptViaStdin default true: prompt travels on stdin as stream-json user event; argv omits --print", async () => {
+		let lastChild: any;
+		const spawns: string[][] = [];
+		const { deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			lastChild = fakeChild({ lines: [{ event: "init", conversation_id: "c-stdin" }, SUCCESS("c-stdin")], exit: 0 });
+			return lastChild;
+		});
+		await runTurn(deps, { prompt: "massive prompt payload", hashes: H1, sessionId: "s-stdin" });
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0]).not.toContain("--print");
+		expect(spawns[0]).toContain("--input-format");
+		expect(spawns[0][spawns[0].indexOf("--input-format") + 1]).toBe("stream-json");
+		expect(spawns[0]).toContain("--output-format");
+		expect(spawns[0][spawns[0].indexOf("--output-format") + 1]).toBe("stream-json");
+		const sent = JSON.parse(lastChild.stdinText().trim());
+		expect(sent).toEqual({ event: "user", message: { role: "user", content: "massive prompt payload" } });
+	});
+
+	test("promptViaStdin override false: legacy transport puts prompt on argv with --print", async () => {
+		const spawns: string[][] = [];
+		const { deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [{ event: "init", conversation_id: "c-argv" }, SUCCESS("c-argv")], exit: 0 });
+		}, { promptViaStdin: false });
+		await runTurn(deps, { prompt: "legacy prompt payload", hashes: H1, sessionId: "s-argv" });
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0]).toContain("--print");
+		expect(spawns[0][spawns[0].indexOf("--print") + 1]).toBe("legacy prompt payload");
+	});
+});
+
