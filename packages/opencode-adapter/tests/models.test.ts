@@ -333,3 +333,36 @@ describe("unit: models — effort-variant collapse (suffixed ids → base entrie
 		expect(record["claude-sonnet-4-6"].variants).toBeUndefined();
 	});
 });
+
+describe("unit: models — imageInput capability gating (spec image-input R1, design D2)", () => {
+	test("DEFAULT (no opts): every model advertises input.image false and attachment false", () => {
+		const record = buildModelRecord(resolveRegistry({}, DISCOVERED_SAMPLE), "agy");
+		expect(Object.keys(record).length).toBeGreaterThan(0);
+		for (const m of Object.values(record)) {
+			expect(m.capabilities.input.image).toBe(false);
+			expect(m.capabilities.attachment).toBe(false);
+			// Text input and the other capabilities are unaffected by the gate.
+			expect(m.capabilities.input.text).toBe(true);
+			expect(m.capabilities.toolcall).toBe(true);
+		}
+	});
+
+	test("explicit imageInput: false keeps the default-off advertisement", () => {
+		const record = buildModelRecord(resolveRegistry({}, DISCOVERED_SAMPLE), "agy", { imageInput: false });
+		for (const m of Object.values(record)) {
+			expect(m.capabilities.input.image).toBe(false);
+			expect(m.capabilities.attachment).toBe(false);
+		}
+	});
+
+	test("imageInput: true advertises image input AND attachment on EVERY model", () => {
+		const record = buildModelRecord(resolveRegistry({}, DISCOVERED_SAMPLE), "agy", { imageInput: true });
+		for (const m of Object.values(record)) {
+			expect(m.capabilities.input.image).toBe(true);
+			expect(m.capabilities.attachment).toBe(true);
+			// Output modality is not gated by image input.
+			expect(m.capabilities.output.image).toBe(false);
+			expect(m.capabilities.input.audio).toBe(false);
+		}
+	});
+});

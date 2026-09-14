@@ -95,4 +95,28 @@ describe("unit: config — resolve adapter options", () => {
 		}
 		expect(resolveConfig({ timeoutMs: 5000 }).timeoutMs).toBe(5000);
 	});
+
+	test("imageInput defaults to false (default-off contract)", () => {
+		expect(resolveConfig().imageInput).toBe(false);
+		expect(resolveConfig({ scratchRoot: "/tmp" }).imageInput).toBe(false);
+	});
+
+	test("imageInput true is accepted and preserved", () => {
+		expect(resolveConfig({ imageInput: true }).imageInput).toBe(true);
+	});
+
+	test("imageInput must be a boolean when provided — strings/numbers/null are rejected", () => {
+		for (const imageInput of ["true", 1, 0, null, {}]) {
+			try {
+				resolveConfig({ imageInput } as never);
+				expect.unreachable();
+			} catch (e) {
+				expect(e).toBeInstanceOf(AgyConfigError);
+				const err = e as AgyConfigError;
+				expect(err.code).toBe("AGY_CONFIG_INVALID");
+				expect(err.field).toBe("imageInput");
+				expect(err.message).toContain("boolean");
+			}
+		}
+	});
 });

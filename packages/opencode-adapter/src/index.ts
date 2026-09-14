@@ -50,6 +50,9 @@ export interface AgyPluginServerOptions {
 	env?: Record<string, string | undefined>;
 	/** State dir override for the models cache (validated absolute upstream). */
 	stateDir?: string;
+	/** Opt-in image attachment bridge (design D2/D8): threads through to
+	 * the advertised model capabilities via buildModelRecord. Default off. */
+	imageInput?: boolean;
 }
 
 const server: Plugin = async (input, options) => {
@@ -82,7 +85,8 @@ const server: Plugin = async (input, options) => {
 	},
 		provider: {
 			id: AGY_PROVIDER_ID,
-			models: async (provider) => buildModelRecord(await getRegistry(), provider.id),
+			models: async (provider) =>
+				buildModelRecord(await getRegistry(), provider.id, { imageInput: opts.imageInput }),
 		},
 	};
 	return hooks;

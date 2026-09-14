@@ -243,7 +243,12 @@ const TRANSPORT_NPM = new URL("provider.js", import.meta.url).href;
 export function buildModelRecord(
 	registry: readonly AgyModel[],
 	providerId: string,
+	opts?: { imageInput?: boolean },
 ): Record<string, ModelV2> {
+	// Opt-in image gate (spec image-input R1, design D2): image input and
+	// attachments are advertised ONLY when the resolved config enables the
+	// bridge; the default-off record keeps the actionable-error contract.
+	const imageInput = opts?.imageInput === true;
 	const record: Record<string, ModelV2> = {};
 	for (const entry of registry) {
 		const suffix = normalize(entry.id);
@@ -255,9 +260,9 @@ export function buildModelRecord(
 			capabilities: {
 				temperature: true,
 				reasoning: true,
-				attachment: false,
+				attachment: imageInput,
 				toolcall: true,
-				input: { text: true, audio: false, image: false, video: false, pdf: false },
+				input: { text: true, audio: false, image: imageInput, video: false, pdf: false },
 				output: { text: true, audio: false, image: false, video: false, pdf: false },
 				interleaved: false,
 			},

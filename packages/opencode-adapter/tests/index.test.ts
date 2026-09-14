@@ -158,4 +158,23 @@ describe("unit: index — provider.models hook (dynamic discovery registration)"
 		});
 		expect(Object.keys(record ?? {})[0]).toBe("default");
 	});
+
+	test("imageInput plugin option threads through to advertised capabilities (default-off)", async () => {
+		// Default: no plugin option → image input NOT advertised.
+		const off = await providerModels({ listAgyModels: async () => DISCOVERED_SAMPLE });
+		for (const m of Object.values(off ?? {})) {
+			expect(m?.capabilities.input.image).toBe(false);
+			expect(m?.capabilities.attachment).toBe(false);
+		}
+		// Opt-in: imageInput: true → image input advertised on every model.
+		const on = await providerModels({
+			listAgyModels: async () => DISCOVERED_SAMPLE,
+			imageInput: true,
+		});
+		expect(Object.keys(on ?? {}).length).toBeGreaterThan(0);
+		for (const m of Object.values(on ?? {})) {
+			expect(m?.capabilities.input.image).toBe(true);
+			expect(m?.capabilities.attachment).toBe(true);
+		}
+	});
 });

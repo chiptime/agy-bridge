@@ -38,6 +38,10 @@ export interface AgyAdapterOptions {
 	models?: Record<string, ModelConfig>;
 	/** Per-attempt hard cap in ms; engine defaults apply when unset. */
 	timeoutMs?: number;
+	/** Opt-in image attachment bridge (design D2). Default false: the
+	 * capability is NOT advertised and image parts fail with an actionable
+	 * error naming the enablement path. */
+	imageInput?: boolean;
 }
 
 export interface AgyAdapterConfig {
@@ -47,6 +51,8 @@ export interface AgyAdapterConfig {
 	quotaSnapshotDir?: string;
 	models: Record<string, ModelConfig>;
 	timeoutMs?: number;
+	/** Resolved image-bridge flag; always present after resolveConfig. */
+	imageInput: boolean;
 }
 
 /** Typed validation error: field names the exact rejected option. */
@@ -111,6 +117,12 @@ export function resolveConfig(options: Partial<AgyAdapterOptions> = {}): AgyAdap
 	if (options.timeoutMs !== undefined && !isPositiveInt(options.timeoutMs)) {
 		throw new AgyConfigError("timeoutMs", `timeoutMs must be a positive integer, got ${String(options.timeoutMs)}`);
 	}
+	if (options.imageInput !== undefined && typeof options.imageInput !== "boolean") {
+		throw new AgyConfigError(
+			"imageInput",
+			`imageInput must be a boolean, got ${typeof options.imageInput} (${String(options.imageInput)})`,
+		);
+	}
 	return {
 		workdirMode,
 		scratchRoot: options.scratchRoot,
@@ -118,5 +130,6 @@ export function resolveConfig(options: Partial<AgyAdapterOptions> = {}): AgyAdap
 		quotaSnapshotDir: options.quotaSnapshotDir,
 		models,
 		timeoutMs: options.timeoutMs,
+		imageInput: options.imageInput ?? false,
 	};
 }
