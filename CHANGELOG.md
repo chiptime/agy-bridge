@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (`0.x` = development line).
 
+## [0.5.0] - 2026-09-14
+
+### Added
+- **Image input (opt-in)**: an `imageInput` adapter flag bridges pasted
+  images to the agy agent — image parts are extracted all-or-nothing from
+  the last user turn, staged as content-addressed files under
+  `<workdir>/.agy-attachments/<sha16>.<ext>` (png/jpeg/gif/webp, 20 MB cap,
+  symlink refusal), and a per-turn directive tells the agent to inspect
+  them with `view_file`; uninspected staging surfaces a notice, re-seeded
+  history renders a compact placeholder, and stale attachments ride the
+  existing 7-day prune. Declare `modalities.input: ["text","image"]` on
+  every model to unlock the client paperclip.
+- **Prompt transport via stdin**: large prompts ride stdin as stream-json
+  NDJSON instead of argv `--print`, eliminating `E2BIG` on big system
+  prompts (`promptViaStdin` seam, default on).
+
+### Fixed
+- **AI SDK V3 file-part shape**: pasted images arrive as
+  `LanguageModelV3FilePart` (`type: 'file'`, `data`,
+  `mediaType: 'image/*'`), not the `type: 'image'` shape the extraction
+  matched — images were silently dropped, never staged. Extraction,
+  `promptHasImage`, and the strip path now recognize the file-part shape
+  (bytes / base64 / data-URL / URL payloads).
+
+### Documentation
+- Root README "Hard limits discovered about agy" extended with the verified
+  stream-json stdin contract (bare `--print` rejected, raw stdin ignored,
+  output shape identical to `--print --output-format stream-json`), the
+  graceful SIGTERM mid-run partial flush, `result.response` as the
+  concatenation of all `agent_response` `text_delta` chunks across steps,
+  plan-mode headless write/command blocking (plan file + link output), and
+  the `--sandbox` / `--dangerously-skip-permissions` incompatibility.
+- Adapter README "Image input (opt-in)" section: enable step
+  (`imageInput` + per-model `modalities`) and E2E checklist.
+
 ## [0.4.1] - 2026-09-13
 
 ### Changed
@@ -86,14 +121,7 @@ one version.
 
 ## [Unreleased]
 
-### Documentation
-- Root README "Hard limits discovered about agy" extended with the verified
-  stream-json stdin contract (bare `--print` rejected, raw stdin ignored,
-  output shape identical to `--print --output-format stream-json`), the
-  graceful SIGTERM mid-run partial flush, `result.response` as the
-  concatenation of all `agent_response` `text_delta` chunks across steps,
-  plan-mode headless write/command blocking (plan file + link output), and
-  the `--sandbox` / `--dangerously-skip-permissions` incompatibility.
+Nothing yet.
 
 ## [0.3.0] — 2026-09-11
 
