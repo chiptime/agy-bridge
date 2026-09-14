@@ -363,9 +363,12 @@ export const IMAGE_INPUT_DISABLED_MESSAGE =
 export function promptHasImage(messages: PromptMessage[]): boolean {
 	const lastUser = [...messages].reverse().find((m) => m?.role === "user");
 	if (!lastUser || !Array.isArray(lastUser.content)) return false;
-	return lastUser.content.some(
-		(part) => typeof part === "object" && part !== null && (part.type === "image" || part.type === "image-url"),
-	);
+	return lastUser.content.some((part) => {
+		if (typeof part !== "object" || part === null) return false;
+		if (part.type === "image" || part.type === "image-url") return true;
+		const mt = part["mediaType"];
+		return typeof mt === "string" && mt.toLowerCase().startsWith("image/");
+	});
 }
 
 /** Terminal attachment-rejection stream: stream-start → error → close. */
@@ -510,10 +513,13 @@ export class AgyLanguageModel implements LanguageModelV3 {
 						m === lastUser
 							? {
 									...m,
-									content: lastUserContent.filter(
-										(part) =>
-											!(typeof part === "object" && part !== null && (part.type === "image" || part.type === "image-url")),
-									),
+							content: lastUserContent.filter((part) => {
+								if (typeof part !== "object" || part === null) return true;
+								if (part.type === "image" || part.type === "image-url") return false;
+								if (part.type !== "file") return true;
+								const mt = part["mediaType"];
+								return !(typeof mt === "string" && mt.toLowerCase().startsWith("image/"));
+							}),
 								}
 							: m,
 					);

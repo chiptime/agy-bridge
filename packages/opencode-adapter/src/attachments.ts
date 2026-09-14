@@ -93,6 +93,32 @@ function urlOf(part: PromptPart): string | undefined {
 	return undefined;
 }
 
+/** Raw bytes from a data payload: Uint8Array, base64 string, or data-URL string. */
+function dataBytes(value: unknown): Uint8Array | undefined {
+	if (value instanceof Uint8Array) return value.byteLength > 0 ? new Uint8Array(value) : undefined;
+	if (typeof value === "string" && value !== "") {
+		const m = value.match(/^data:[^;]*;base64,([\s\S]*)$/i);
+		const b64 = m ? m[1] : value;
+		const bytes = new Uint8Array(Buffer.from(b64, "base64"));
+		return bytes.byteLength > 0 ? bytes : undefined;
+	}
+	return undefined;
+}
+
+/** URL string from a data payload: URL object, http(s) string, or nested url. */
+function dataUrl(value: unknown, part: PromptPart): string | undefined {
+	if (value instanceof URL) return value.toString();
+	if (typeof value === "string" && value !== "" && /^https?:\/\//i.test(value)) return value;
+	const direct = part["url"];
+	if (typeof direct === "string" && direct !== "") return direct;
+	const nested = part["image_url"];
+	if (typeof nested === "object" && nested !== null) {
+		const u = (nested as Record<string, unknown>)["url"];
+		if (typeof u === "string" && u !== "") return u;
+	}
+	return undefined;
+}
+
 /** Injectable seams; fetch defaults to the global (URL images only). */
 export interface AttachmentExtractionDeps {
 	fetchImpl?: typeof fetch;
@@ -149,6 +175,41 @@ export async function extractAttachments(
 		if (typeof part !== "object" || part === null) continue;
 		if (isTextPart(part)) continue;
 		const type = part.type;
+		// AI SDK V3 shape: an image attachment is a `file` part whose mediaType
+		// is image/*. The `data` payload is Uint8Array | base64 string | URL.
+		if (type === "file") {
+			const rawMediaType = part["mediaType"];
+			const isImageMedia = typeof rawMediaType === "string" && rawMediaType.toLowerCase().startsWith("image/");
+			if (!isImageMedia) {
+				unsupported.push(mediaTypeName(part));
+				continue;
+			}
+			const partMediaType = normalizeMediaType(rawMediaType);
+			if (partMediaType === undefined) {
+				unsupported.push(mediaTypeName(part));
+				continue;
+			}
+			const data = part["data"];
+			const inline = dataBytes(data);
+			if (inline !== undefined) {
+				if (inline.byteLength > MAX_ATTACHMENT_BYTES) throw oversizedError(inline.byteLength);
+				images.push({ data: inline, mediaType: partMediaType });
+				continue;
+			}
+			const url = dataUrl(data, part);
+			if (url !== undefined) {
+				const fetched = await fetchUrlImage(url, fetchImpl);
+				const mediaType = partMediaType ?? normalizeMediaType(fetched.mediaTypeName);
+				if (mediaType === undefined) {
+					unsupported.push(fetched.mediaTypeName ?? type);
+					continue;
+				}
+				images.push({ data: fetched.data, mediaType });
+				continue;
+			}
+			unsupported.push(mediaTypeName(part));
+			continue;
+		}
 		if (type === "image" || type === "image-url") {
 			const partMediaType = normalizeMediaType(part["mediaType"]);
 			// a part-declared mediaType that is not allowlisted is hostile, full stop

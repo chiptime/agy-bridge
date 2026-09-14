@@ -1116,6 +1116,15 @@ describe("unit: promptHasImage — last-user-turn image detection", () => {
 		).toBe(true);
 	});
 
+	test("detects AI SDK V3 file part with image/* mediaType (and rejects non-image files)", () => {
+		expect(
+			promptHasImage([{ role: "user", content: [{ type: "file", data: "aGk=", mediaType: "image/png" }] }]),
+		).toBe(true);
+		expect(
+			promptHasImage([{ role: "user", content: [{ type: "file", data: "%PDF", mediaType: "application/pdf" }] }]),
+		).toBe(false);
+	});
+
 	test("text-only turns, string content, and empty arrays are NOT images", () => {
 		expect(promptHasImage([{ role: "user", content: [{ type: "text", text: "q" }] }])).toBe(false);
 		expect(promptHasImage([{ role: "user", content: "plain question" }])).toBe(false);

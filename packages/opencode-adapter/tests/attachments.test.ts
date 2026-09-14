@@ -182,6 +182,35 @@ describe("unit: attachments — extraction (D3)", () => {
 		expect(new TextDecoder().decode(images[0]!.data)).toBe("fetched-webp-bytes");
 	});
 
+	test("AI SDK V3 file part with image/* mediaType extracts (real host shape, base64 data)", async () => {
+		const { images, unsupported } = await extractAttachments([
+			{ type: "text", text: "what is in this picture?" },
+			{ type: "file", data: b64(pngBytes), mediaType: "image/png" },
+		]);
+		expect(unsupported).toEqual([]);
+		expect(images.length).toBe(1);
+		expect(new TextDecoder().decode(images[0]!.data)).toBe("fake-png-bytes-for-hash");
+		expect(images[0]!.mediaType).toBe("image/png");
+	});
+
+	test("AI SDK V3 file part with raw Uint8Array data extracts", async () => {
+		const { images, unsupported } = await extractAttachments([
+			{ type: "file", data: webpBytes, mediaType: "image/webp" },
+		]);
+		expect(unsupported).toEqual([]);
+		expect(images.length).toBe(1);
+		expect(images[0]!.mediaType).toBe("image/webp");
+		expect(new TextDecoder().decode(images[0]!.data)).toBe("fetched-webp-bytes");
+	});
+
+	test("file part with non-image mediaType is unsupported, nothing extracted", async () => {
+		const { images, unsupported } = await extractAttachments([
+			{ type: "file", data: "%PDF-1.7", mediaType: "application/pdf" },
+		]);
+		expect(unsupported).toEqual(["application/pdf"]);
+		expect(images).toEqual([]);
+	});
+
 	test("multiple inline images (png/jpeg/gif) extract in order", async () => {
 		const { images, unsupported } = await extractAttachments([
 			{ type: "image", image: b64(pngBytes), mediaType: "image/png" },
