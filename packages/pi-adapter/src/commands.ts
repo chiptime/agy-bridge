@@ -39,6 +39,8 @@ export interface AgyCommandDeps {
 	store: SessionStore;
 	/** Lifecycle registry: discovery cache, in-flight turns, binding cache. */
 	state: BridgeState;
+	/** pi-image-input: resolved imageInput flag (config.imageInput). */
+	imageInput: boolean;
 	/** Wall-clock seam (tests). */
 	now?: () => number;
 }
@@ -71,9 +73,16 @@ export async function buildStatusLines(deps: AgyCommandDeps, key: string): Promi
 	const turn = deps.state.currentTurn(key);
 	const turnLine =
 		turn === undefined ? "turn: idle" : `turn: in flight (${formatAge(Math.max(0, now() - turn.startedAt))})`;
+	// pi-image-input: the capability flag is config the user can act on —
+	// disabled carries the enable hint (both pi config paths), matching the
+	// disabled-gate message's guidance.
+	const imagesLine = deps.imageInput
+		? "images: enabled"
+		: "images: disabled — enable with imageInput: true in .pi/agy-bridge.json (project) or ~/.pi/agent/agy-bridge.json (global)";
 	return [
 		"agy bridge status",
 		`  bin: ${deps.bin} (timeout ${Math.round(deps.timeoutMs / 1000)}s)`,
+		`  ${imagesLine}`,
 		`  state: ${deps.stateDir}`,
 		`  ${modelsLine}`,
 		`  ${sessionLine}`,

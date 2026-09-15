@@ -37,7 +37,7 @@ interface Setup {
 }
 
 async function setup(
-	opts: { sessionId?: string; cwd?: string; now?: () => number; state?: BridgeState } = {},
+	opts: { sessionId?: string; cwd?: string; now?: () => number; state?: BridgeState; imageInput?: boolean } = {},
 ): Promise<Setup> {
 	const root = await mkdtemp(join(tmpdir(), "agy-pi-cmds-"));
 	const store = openSessionStore(join(root, "pi-sessions.json"));
@@ -54,6 +54,7 @@ async function setup(
 		stateDir: join(root, "state"),
 		store,
 		state,
+		imageInput: opts.imageInput ?? false,
 		...(opts.now !== undefined ? { now: opts.now } : {}),
 	};
 	return { deps, state, notifications, ctx };
@@ -108,6 +109,30 @@ describe("/agy status", () => {
 		deps.state.beginTurn("sess-1", 20_000); // 12.0s in flight at now=32_000
 		const lines = await buildStatusLines(deps, "sess-1");
 		expect(lines.join("\n")).toContain("turn: in flight (12.0s)");
+	});
+
+	// --- pi-image-input: capability visibility in /agy status -------------------------
+
+	test("images: enabled — reports the resolved imageInput flag truthfully", async () => {
+		const { deps } = await setup({ imageInput: true });
+		deps.state.setDiscovery(ROWS);
+		const lines = await buildStatusLines(deps, "sess-1");
+		expect(lines.join("\n")).toContain("images: enabled");
+	});
+
+	test("images: disabled — carries the enable hint naming both config paths", async () => {
+		const { deps } = await setup({ imageInput: false });
+		deps.state.setDiscovery(ROWS);
+		const lines = await buildStatusLines(deps, "sess-1");
+		const imagesLine = lines.find((l) => l.includes("images:"));
+		expect(imagesLine).toBeDefined();
+		expect(imagesLine).toBe(
+			"  images: disabled — enable with imageInput: true in .pi/agy-bridge.json (project) or ~/.pi/agent/agy-bridge.json (global)",
+		);
+		// The images line sits in the config summary block, right after bin.
+		const joined = lines.join("\n");
+		expect(joined.indexOf("bin:")).toBeLessThan(joined.indexOf("images:"));
+		expect(joined.indexOf("images:")).toBeLessThan(joined.indexOf("state:"));
 	});
 
 	test("handler dispatches status and notifies the joined lines", async () => {

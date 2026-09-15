@@ -43,7 +43,7 @@ import type { BridgeState } from "./lifecycle";
 import { mapAbort, type FinalizeReason } from "./errors";
 import { formatStepUpdate } from "./progress";
 import type { SessionStore } from "./session-store";
-import { DIVERGED_NOTICE, RETRY_NOTICE, runTurn, TurnAborted, TurnError } from "./turn";
+import { DIVERGED_NOTICE, PI_IMAGE_NOT_INSPECTED_NOTICE, RETRY_NOTICE, runTurn, TurnAborted, TurnError } from "./turn";
 
 /** Turn budget default (owned by turn.ts); re-exported for API stability. */
 export { DEFAULT_TURN_TIMEOUT_MS } from "./turn";
@@ -74,6 +74,12 @@ export interface StreamSimpleDeps {
 	state?: BridgeState;
 	/** Opt-in debug sink (v0.2 R11/D11); forwarded to runTurn (ids/durations only). */
 	debug?: DebugLogger;
+	/**
+	 * pi-image-input R1: image bridge opt-in (config.imageInput, default
+	 * false); forwarded to runTurn — the gate, staging, and directive all
+	 * live in the turn seam (design D5).
+	 */
+	imageInput?: boolean;
 }
 
 function zeroUsage(): Usage {
@@ -292,6 +298,7 @@ export function createStreamSimple(
 					...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
 					...(deps.state !== undefined ? { state: deps.state } : {}),
 					...(deps.debug !== undefined ? { debug: deps.debug } : {}),
+					...(deps.imageInput !== undefined ? { imageInput: deps.imageInput } : {}),
 					},
 					{
 						context,
@@ -313,9 +320,17 @@ export function createStreamSimple(
 						onRetry: retryReset,
 					},
 				);
-				reconcile(result.run.envelope?.response, result.resumed);
-				toPiUsage(result.run.envelope?.usage, partial.usage);
-				finalizeStop();
+			reconcile(result.run.envelope?.response, result.resumed);
+			toPiUsage(result.run.envelope?.usage, partial.usage);
+			// pi-image-input R6/D7: staged images the agent never opened with
+			// view_file are surfaced as a notice — never silently treated as
+			// seen. Condition is purely result-based (the turn already gated
+			// on imageInput); the notice rides a thinking delta, matching the
+			// DIVERGED_NOTICE rendering contract.
+			if (result.stagedAttachments !== undefined && result.attachmentsInspected !== true) {
+				appendThinking(PI_IMAGE_NOT_INSPECTED_NOTICE);
+			}
+			finalizeStop();
 			} catch (err) {
 				if (err instanceof TurnAborted) {
 					// turn.ts already persisted the tapped conversation id. Probe

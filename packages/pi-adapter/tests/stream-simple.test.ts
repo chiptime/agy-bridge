@@ -16,6 +16,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
@@ -34,6 +35,7 @@ import type { Api } from "@earendil-works/pi-ai";
 import { messageHashes } from "agy-bridge-engine";
 import type { DebugLogger } from "../src/debug";
 import { createStreamSimple } from "../src/stream-simple";
+import { PI_IMAGE_INPUT_DISABLED_MESSAGE, PI_IMAGE_NOT_INSPECTED_NOTICE } from "../src/turn";
 import { openSessionStore, type SessionStore } from "../src/session-store";
 
 // --- fixtures -----------------------------------------------------------------
@@ -140,7 +142,10 @@ interface SpawnRecord {
 	child: any;
 }
 
-async function setup(spawnFn?: (rec: SpawnRecord) => unknown, opts: { workdir?: string; debug?: DebugLogger } = {}) {
+async function setup(
+	spawnFn?: (rec: SpawnRecord) => unknown,
+	opts: { workdir?: string; debug?: DebugLogger; imageInput?: boolean } = {},
+) {
 	const root = await mkdtemp(join(tmpdir(), "agy-pi-stream-"));
 	const store = openSessionStore(join(root, "pi-sessions.json"));
 	const spawns: SpawnRecord[] = [];
@@ -151,6 +156,7 @@ async function setup(spawnFn?: (rec: SpawnRecord) => unknown, opts: { workdir?: 
 		...(opts.workdir !== undefined ? { workdir: opts.workdir } : {}),
 		logRoot: root,
 		...(opts.debug !== undefined ? { debug: opts.debug } : {}),
+		...(opts.imageInput !== undefined ? { imageInput: opts.imageInput } : {}),
 		spawnFn: ((bin: string, args: string[], io: { cwd: string }) => {
 			const rec: SpawnRecord = { bin, args, cwd: io.cwd, child: undefined as never };
 			spawns.push(rec);
@@ -772,5 +778,111 @@ describe("v0.2 R8: retry/abort text policy (D7, D8)", () => {
 		// The flushed partial envelope is authoritative — never a dangling block.
 		expect(last.error.content).toEqual([{ type: "text", text: "ALPHA" }]);
 		expect(last.error.stopReason).toBe("aborted");
+	});
+});
+
+// --- pi-image-input: image turns through the event bridge (R1, R6) ------------------
+
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x07]);
+const stagedBasename = (bytes: Uint8Array): string =>
+	`${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}.png`;
+const imagePart = (bytes: Uint8Array): { type: "image"; data: string; mimeType: string } => ({
+	type: "image",
+	data: Buffer.from(bytes).toString("base64"),
+	mimeType: "image/png",
+});
+
+describe("pi-image-input: streamSimple — gate forwarding and the uninspected notice (R1, R6)", () => {
+	test("imageInput forwarded + image turn: turn succeeds, files stage on disk, directive rides the spawned prompt", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-ss-img-"));
+		const { spawns, drain } = await setup(
+			(rec) => fakeChild({ lines: [{ event: "init", conversation_id: "c-ss" }, SUCCESS("c-ss")], exit: 0 }),
+			{ workdir, imageInput: true },
+		);
+		const context: Context = {
+			messages: [userMsg([{ type: "text", text: "what is this" }, imagePart(PNG_BYTES)])],
+		};
+		const events = await drain(context, { sessionId: "s-ss-img" });
+		expect(types(events).at(-1)).toBe("done");
+		const name = stagedBasename(PNG_BYTES);
+		expect(existsSync(join(workdir, ".agy-attachments", name))).toBe(true);
+		// The directive-carrying prompt reached the child via --print argv.
+		expect(spawns[0].args[spawns[0].args.indexOf("--print") + 1]).toContain(`[Attached user image: .agy-attachments/${name}]`);
+	});
+
+	test("uninspected staged images: the notice surfaces as a thinking delta before done (exact PI_IMAGE_NOT_INSPECTED_NOTICE)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-ss-notif-"));
+		const { drain } = await setup(
+			() => fakeChild({ lines: [{ event: "init", conversation_id: "c-n" }, SUCCESS("c-n", "here is my answer")], exit: 0 }),
+			{ workdir, imageInput: true },
+		);
+		const events = await drain(
+			{ messages: [userMsg([{ type: "text", text: "look" }, imagePart(PNG_BYTES)])] },
+			{ sessionId: "s-ss-notif" },
+		);
+		const noticeDeltas = events
+			.filter((e) => e.type === "thinking_delta")
+			.map((e) => (e as { delta: string }).delta);
+		expect(noticeDeltas).toContain(PI_IMAGE_NOT_INSPECTED_NOTICE);
+		const done = events.at(-1) as Extract<AssistantMessageEvent, { type: "done" }>;
+		expect(done.reason).toBe("stop");
+		expect(done.message.content).toContainEqual({ type: "thinking", thinking: PI_IMAGE_NOT_INSPECTED_NOTICE });
+		// The notice text is pinned (matches the DIVERGED_NOTICE ⟲ style).
+		expect(PI_IMAGE_NOT_INSPECTED_NOTICE).toBe(
+			"⚠ an attached image was not inspected with view_file — the response below may not account for it\n",
+		);
+	});
+
+	test("inspected staged images (view_file naming the staged basename): NO notice anywhere", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-ss-insp-"));
+		const name = stagedBasename(PNG_BYTES);
+		const { drain } = await setup(
+			() =>
+				fakeChild({
+					lines: [{ event: "init", conversation_id: "c-i" }, SUCCESS("c-i", "inspected it")],
+					rawLines: [
+						`{"step_update":{"conversation_id":"c-i","step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"path":".agy-attachments/${name}"}}}`,
+					],
+					exit: 0,
+				}),
+			{ workdir, imageInput: true },
+		);
+		const events = await drain({ messages: [userMsg([imagePart(PNG_BYTES)])] }, { sessionId: "s-ss-insp" });
+		expect(types(events).at(-1)).toBe("done");
+		const thinkingText = events
+			.filter((e) => e.type === "thinking_delta")
+			.map((e) => (e as { delta: string }).delta)
+			.join("");
+		expect(thinkingText).not.toContain("not inspected");
+	});
+
+	test("text-only turn with imageInput enabled: no notice (nothing staged, vacuously inspected)", async () => {
+		const { drain } = await setup(() => fakeChild({ lines: [SUCCESS("c-t")], exit: 0 }), { imageInput: true });
+		const events = await drain({ messages: [userMsg("plain")] }, { sessionId: "s-ss-text" });
+		expect(types(events).at(-1)).toBe("done");
+		const thinkingText = events
+			.filter((e) => e.type === "thinking_delta")
+			.map((e) => (e as { delta: string }).delta)
+			.join("");
+		expect(thinkingText).not.toContain("not inspected");
+	});
+
+	test("disabled + image turn: error terminal carries PI_IMAGE_INPUT_DISABLED_MESSAGE (the gate maps through TurnError)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-ss-off-"));
+		const { spawns, drain } = await setup(() => fakeChild({ lines: [SUCCESS("never")] }), { workdir });
+		const events = await drain(
+			{ messages: [userMsg([{ type: "text", text: "x" }, imagePart(PNG_BYTES)])] },
+			{ sessionId: "s-ss-off" },
+		);
+		const last = events.at(-1);
+		expect(last?.type).toBe("error");
+		if (last?.type === "error") {
+			expect(last.reason).toBe("error");
+			expect(last.error.errorMessage ?? "").toContain(".pi/agy-bridge.json");
+			expect(last.error.errorMessage ?? "").toContain("~/.pi/agent/agy-bridge.json");
+			expect(last.error.errorMessage).toContain(PI_IMAGE_INPUT_DISABLED_MESSAGE);
+		}
+		expect(spawns).toHaveLength(0);
+		expect(existsSync(join(workdir, ".agy-attachments"))).toBe(false);
 	});
 });

