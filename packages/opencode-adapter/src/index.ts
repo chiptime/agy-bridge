@@ -8,7 +8,9 @@
  * read { sessionId, worktree } from providerOptions.agy. Per OQ1 the hook
  * returns void and mutates `output` in place; the session id is the
  * per-request input field `sessionID` (capital D) and the worktree comes
- * from the PluginInput this server was initialized with — no module state,
+ * from the PluginInput this server was initialized with — opencode reports
+ * worktree "/" for the "global" project (non-git directories), so the
+ * session directory takes its place there — no module state,
  * so concurrent sessions cannot race.
  *
  * Dynamic model discovery: the server also registers the pinned
@@ -56,7 +58,11 @@ export interface AgyPluginServerOptions {
 }
 
 const server: Plugin = async (input, options) => {
-	const worktree = input.worktree;
+	// opencode assigns the "global" project (worktree "/") when the session
+	// directory is not inside a git worktree, and an empty worktree never
+	// names a real run location: the session directory is the correct cwd
+	// in both cases (workdir.ts still validates absolute/existing/root).
+	const worktree = input.worktree !== "/" && input.worktree !== "" ? input.worktree : input.directory;
 	const opts = (options ?? {}) as AgyPluginServerOptions;
 	// Memoized lazy discovery: nothing spawns at plugin init; the first
 	// provider.models call pays the (cached) round-trip once.
