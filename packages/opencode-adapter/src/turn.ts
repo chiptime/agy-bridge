@@ -33,18 +33,20 @@
  *   baseline.
  */
 import {
+	attachmentDirective,
 	classifyRun,
 	decidePool,
 	parseSnapshotDir,
+	pruneAttachments,
 	runAgyStream,
+	stageAttachments,
 	type Classification,
+	type ExtractedImage,
 	type SpawnRun,
 } from "agy-bridge-engine";
 import type { spawn } from "node:child_process";
 import { basename, dirname } from "node:path";
 import type { AgyAdapterConfig } from "./config";
-import type { ExtractedImage } from "./attachments";
-import { pruneAttachments, stageAttachments } from "./attachments";
 import type { SessionStore } from "./session-store";
 import { createTap } from "./stream-tap";
 import { prepareWorkdir, pruneScratch } from "./workdir";
@@ -122,20 +124,10 @@ export class TurnError extends Error {
 
 const NO_LOG = "(no run log; the run was rejected before spawn)";
 
-/**
- * D1 inspection directive (spec image-input R3): fixed literal + staged
- * relative paths, deterministically PREPENDED to the per-turn prompt.
- * The per-turn prompt is rebuilt every turn, so the directive is always
- * delivered — unlike a system prefix, which mapMessages drops on
- * continuing conversations exactly when users paste images mid-session.
- */
-export function attachmentDirective(staged: string[]): string | undefined {
-	if (staged.length === 0) return undefined;
-	return [
-		...staged.map((rel) => `[Attached user image: ${rel}]`),
-		"Please inspect each attached image above with view_file before responding.",
-	].join("\n");
-}
+/** Engine promotion (pi-image-input D1): attachmentDirective moved to the
+ * engine and is re-exported here so this module's public API stays
+ * identical. */
+export { attachmentDirective };
 
 function abortError(): Error {
 	const err = new Error("agy turn aborted by the caller");

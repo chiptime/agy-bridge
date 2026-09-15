@@ -28,11 +28,17 @@ import {
 import { randomUUID } from "node:crypto";
 import type { spawn } from "node:child_process";
 import type { AgyUsage } from "agy-bridge-engine";
+import {
+	AgyAttachmentError,
+	extractAttachments,
+	promptHasImage,
+	unsupportedAttachmentsMessage,
+	type ExtractedImage,
+} from "agy-bridge-engine";
 import { runTurn, TurnError, type TurnDeps, type TurnRequest, type TurnResult } from "./turn";
 import type { AgyAdapterConfig } from "./config";
 import type { SessionStore } from "./session-store";
 import { mapMessages, messageHashes, renderSeed, type PromptMessage } from "./messages";
-import { AgyAttachmentError, extractAttachments, type ExtractedImage } from "./attachments";
 import { resolveModel, type AgyModel } from "./models";
 
 /** Injectable turn runner — tests fake this to pin the mapping in isolation. */
@@ -354,22 +360,10 @@ const TEXT_ID = "agy-response";
 export const IMAGE_INPUT_DISABLED_MESSAGE =
 	"the agy provider received an image but image input is disabled by default — enable it with the imageInput option (provider.agy.options.imageInput: true in your opencode config), or describe the image in text instead";
 
-/**
- * True when the LAST user turn carries an image part (type "image" or
- * "image-url" — the exact shapes attachments.ts extraction recognizes).
- * Scope is deliberately the last user turn, matching the extraction
- * contract: historical image parts already follow the drop-by-design path.
- */
-export function promptHasImage(messages: PromptMessage[]): boolean {
-	const lastUser = [...messages].reverse().find((m) => m?.role === "user");
-	if (!lastUser || !Array.isArray(lastUser.content)) return false;
-	return lastUser.content.some((part) => {
-		if (typeof part !== "object" || part === null) return false;
-		if (part.type === "image" || part.type === "image-url") return true;
-		const mt = part["mediaType"];
-		return typeof mt === "string" && mt.toLowerCase().startsWith("image/");
-	});
-}
+/** Engine promotion (pi-image-input D1): promptHasImage and
+ * unsupportedAttachmentsMessage moved to the engine and are re-exported
+ * here so this module's public API stays identical. */
+export { promptHasImage, unsupportedAttachmentsMessage };
 
 /** Terminal attachment-rejection stream: stream-start → error → close. */
 function attachmentErrorStream(message: string): LanguageModelV3StreamResult {
@@ -389,14 +383,6 @@ function attachmentErrorStream(message: string): LanguageModelV3StreamResult {
 		},
 	});
 	return { stream };
-}
-
-/**
- * All-or-nothing rejection text for unsupported parts (spec image-input
- * R4): names every unsupported type and the text alternative.
- */
-export function unsupportedAttachmentsMessage(types: string[]): string {
-	return `unsupported attachment type(s) in the last user turn: ${types.join(", ")} — the agy image bridge accepts png, jpeg, gif and webp images only; remove the unsupported attachment or describe its content as text`;
 }
 
 /** D7: surfaced when attachments existed but the agent never inspected them. */

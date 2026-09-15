@@ -49,6 +49,17 @@ describe("unit: workdir — scratch/session authority (R9, threat matrix)", () =
 		}
 	});
 
+	test('threat (3b): the filesystem root "/" is absolute and exists but is NEVER a valid worktree → typed AgyConfigError', () => {
+		expect(() => prepareWorkdir("session", { worktree: "/" })).toThrow(AgyConfigError);
+		try {
+			prepareWorkdir("session", { worktree: "/" });
+		} catch (err) {
+			expect((err as AgyConfigError).field).toBe("worktree");
+			expect((err as AgyConfigError).message).toMatch(/filesystem root/i);
+			expect((err as AgyConfigError).message).toMatch(/git worktree/i);
+		}
+	});
+
 	test("R9.s1: scratch prune >7d clears old dir contents but keeps run.log; fresh dirs untouched", async () => {
 		const root = await mkdtemp("/tmp/agy-prune-");
 		const old = join(root, "agy-run-old");

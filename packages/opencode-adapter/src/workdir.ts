@@ -3,7 +3,9 @@
  * gives every turn a fresh mkdtemp dir under the configured root (never a
  * relative path, never a second --add-dir — the engine adds exactly the
  * workdir); session mode uses the plugin worktree verbatim as the child's
- * cwd, validated absolute and existing BEFORE any spawn can happen. The
+ * cwd, validated absolute, NOT the filesystem root, and existing BEFORE
+ * any spawn can happen (the root is "/" for the opencode "global" project
+ * and would otherwise turn run.log into //run.log → EACCES). The
  * 7-day scratch prune reclaims old run dirs while keeping each run.log —
  * terminal error messages (R6) point users at those paths.
  */
@@ -42,6 +44,12 @@ export function prepareWorkdir(mode: WorkdirMode, opts: WorkdirOptions): Prepare
 			throw new AgyConfigError(
 				"worktree",
 				`session workdirMode requires an absolute worktree, got "${String(worktree)}"`,
+			);
+		}
+		if (worktree === "/") {
+			throw new AgyConfigError(
+				"worktree",
+				'session workdirMode refuses the filesystem root "/" — opencode reports "/" for non-git directories; run inside a git worktree or switch workdirMode to "scratch"',
 			);
 		}
 		let stat;

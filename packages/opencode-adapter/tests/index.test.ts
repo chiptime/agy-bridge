@@ -14,8 +14,8 @@ import pluginModule, { agyPlugin } from "../src/index";
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
 import type { Provider as ProviderV2 } from "@opencode-ai/sdk/v2";
 
-function pluginInput(worktree: string): PluginInput {
-	return { worktree } as unknown as PluginInput;
+function pluginInput(worktree: string, directory?: string): PluginInput {
+	return { worktree, ...(directory !== undefined ? { directory } : {}) } as unknown as PluginInput;
 }
 
 /** Minimal ProviderV2 stand-in: the host passes the provider being registered. */
@@ -59,8 +59,9 @@ async function chatParams(
 	sessionID: string,
 	providerID: string,
 	options: Record<string, unknown> = { ...MANAGED_OPTIONS },
+	directory?: string,
 ) {
-	const hooks = await agyPlugin.server(pluginInput(worktree));
+	const hooks = await agyPlugin.server(pluginInput(worktree, directory));
 	const hook = hooks["chat.params"];
 	if (!hook) throw new Error("chat.params hook missing");
 	const output = {
@@ -101,6 +102,18 @@ describe("unit: index — plugin entry and chat.params channel (D3/OQ1)", () => 
 		expect(output.options.__managed_by).toBe("other-plugin");
 		expect(output.options.thinking).toEqual({ type: "enabled" });
 		expect(output.options.effort).toBe("high");
+	});
+
+	test('global project: worktree "/" falls back to the session directory (input.directory)', async () => {
+		const { output } = await chatParams("/", "sess-42", "agy", { ...MANAGED_OPTIONS }, "/work/non-git");
+		expect(output.options.worktree).toBe("/work/non-git");
+		expect(output.options.agy).toEqual({ sessionId: "sess-42", worktree: "/work/non-git" });
+	});
+
+	test("empty worktree also falls back to the session directory", async () => {
+		const { output } = await chatParams("", "sess-42", "agy", { ...MANAGED_OPTIONS }, "/work/non-git");
+		expect(output.options.worktree).toBe("/work/non-git");
+		expect(output.options.agy).toEqual({ sessionId: "sess-42", worktree: "/work/non-git" });
 	});
 
 	test("host contract: a null req/output invocation (second call per turn) does not throw", async () => {

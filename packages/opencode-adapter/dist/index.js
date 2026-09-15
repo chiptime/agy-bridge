@@ -381,16 +381,16 @@ function resolveConfig(options = {}) {
 // src/session-store.ts
 import {
   closeSync as closeSync2,
-  mkdirSync as mkdirSync3,
+  mkdirSync as mkdirSync4,
   openSync as openSync2,
-  readFileSync as readFileSync2,
+  readFileSync as readFileSync3,
   renameSync,
-  statSync as statSync2,
+  statSync as statSync3,
   unlinkSync,
-  writeFileSync as writeFileSync2,
+  writeFileSync as writeFileSync3,
   writeSync
 } from "fs";
-import { dirname, join } from "path";
+import { dirname, join as join2 } from "path";
 import { randomUUID } from "crypto";
 
 // ../engine/src/spawn.ts
@@ -797,6 +797,299 @@ function renderSeed(messages, k = SEED_MAX_MESSAGES) {
 ${body}
 ${SEED_FOOTER}`, warnings };
 }
+// ../engine/src/attachments.ts
+import { createHash as createHash2 } from "crypto";
+import { existsSync, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync2, readFileSync as readFileSync2, rmSync, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
+import { join } from "path";
+class AgyAttachmentError extends Error {
+  detail;
+  code = "AGY_ATTACHMENT_INVALID";
+  constructor(detail) {
+    super(detail);
+    this.detail = detail;
+    this.name = "AgyAttachmentError";
+  }
+}
+var MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+var ATTACHMENTS_DIR = ".agy-attachments";
+var ATTACHMENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+var EXT_BY_MEDIA_TYPE = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp"
+};
+function normalizeMediaType(raw) {
+  if (typeof raw !== "string")
+    return;
+  const base = raw.toLowerCase().split(";")[0]?.trim() ?? "";
+  return Object.hasOwn(EXT_BY_MEDIA_TYPE, base) ? base : undefined;
+}
+function mediaTypeName(part) {
+  const mt = part["mediaType"] ?? part["mimeType"];
+  return typeof mt === "string" && mt !== "" ? mt : String(part.type);
+}
+function oversizedError(bytes, url) {
+  const mb = (bytes / (1024 * 1024)).toFixed(1);
+  const src = url === undefined ? "" : ` (${url})`;
+  return new AgyAttachmentError(`image attachment is ${mb} MB${src}, over the 20 MB limit \u2014 compress or resize the image before attaching it`);
+}
+function inlineBytes(part) {
+  const raw = part["data"] ?? part["image"];
+  if (typeof raw === "string" && raw !== "")
+    return new Uint8Array(Buffer.from(raw, "base64"));
+  if (raw instanceof Uint8Array && raw.byteLength > 0)
+    return new Uint8Array(raw);
+  return;
+}
+function urlOf(part) {
+  const direct = part["url"];
+  if (typeof direct === "string" && direct !== "")
+    return direct;
+  const nested = part["image_url"];
+  if (typeof nested === "object" && nested !== null) {
+    const u = nested["url"];
+    if (typeof u === "string" && u !== "")
+      return u;
+  }
+  return;
+}
+function dataBytes(value) {
+  if (value instanceof Uint8Array)
+    return value.byteLength > 0 ? new Uint8Array(value) : undefined;
+  if (typeof value === "string" && value !== "") {
+    const m = value.match(/^data:[^;]*;base64,([\s\S]*)$/i);
+    const b64 = m ? m[1] : value;
+    const bytes = new Uint8Array(Buffer.from(b64, "base64"));
+    return bytes.byteLength > 0 ? bytes : undefined;
+  }
+  return;
+}
+function dataUrl(value, part) {
+  if (value instanceof URL)
+    return value.toString();
+  if (typeof value === "string" && value !== "" && /^https?:\/\//i.test(value))
+    return value;
+  const direct = part["url"];
+  if (typeof direct === "string" && direct !== "")
+    return direct;
+  const nested = part["image_url"];
+  if (typeof nested === "object" && nested !== null) {
+    const u = nested["url"];
+    if (typeof u === "string" && u !== "")
+      return u;
+  }
+  return;
+}
+async function fetchUrlImage(url, fetchImpl) {
+  let res;
+  try {
+    res = await fetchImpl(url);
+  } catch (err) {
+    throw new AgyAttachmentError(`failed to fetch image ${url}: ${err instanceof Error ? err.message : String(err)} \u2014 attach the image file itself instead of a URL`);
+  }
+  if (!res.ok) {
+    throw new AgyAttachmentError(`failed to fetch image ${url}: HTTP ${res.status} \u2014 attach the image file itself instead of a URL`);
+  }
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES)
+    throw oversizedError(declared, url);
+  let buffer;
+  try {
+    buffer = await res.arrayBuffer();
+  } catch (err) {
+    throw new AgyAttachmentError(`failed to read image ${url}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (buffer.byteLength > MAX_ATTACHMENT_BYTES)
+    throw oversizedError(buffer.byteLength, url);
+  return { data: new Uint8Array(buffer), mediaTypeName: res.headers.get("content-type") ?? undefined };
+}
+async function extractAttachments(content, deps = {}) {
+  const images = [];
+  const unsupported = [];
+  if (typeof content === "string" || !Array.isArray(content))
+    return { images, unsupported };
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  for (const part of content) {
+    if (typeof part !== "object" || part === null)
+      continue;
+    if (isTextPart(part))
+      continue;
+    const type = part.type;
+    if (type === "file") {
+      const rawMediaType = part["mediaType"] ?? part["mimeType"];
+      const isImageMedia = typeof rawMediaType === "string" && rawMediaType.toLowerCase().startsWith("image/");
+      if (!isImageMedia) {
+        unsupported.push(mediaTypeName(part));
+        continue;
+      }
+      const partMediaType = normalizeMediaType(rawMediaType);
+      if (partMediaType === undefined) {
+        unsupported.push(mediaTypeName(part));
+        continue;
+      }
+      const data = part["data"];
+      const inline = dataBytes(data);
+      if (inline !== undefined) {
+        if (inline.byteLength > MAX_ATTACHMENT_BYTES)
+          throw oversizedError(inline.byteLength);
+        images.push({ data: inline, mediaType: partMediaType });
+        continue;
+      }
+      const url = dataUrl(data, part);
+      if (url !== undefined) {
+        const fetched = await fetchUrlImage(url, fetchImpl);
+        const mediaType = partMediaType ?? normalizeMediaType(fetched.mediaTypeName);
+        if (mediaType === undefined) {
+          unsupported.push(fetched.mediaTypeName ?? type);
+          continue;
+        }
+        images.push({ data: fetched.data, mediaType });
+        continue;
+      }
+      unsupported.push(mediaTypeName(part));
+      continue;
+    }
+    if (type === "image" || type === "image-url") {
+      const declaredMediaType = part["mediaType"] ?? part["mimeType"];
+      const partMediaType = normalizeMediaType(declaredMediaType);
+      if (declaredMediaType !== undefined && partMediaType === undefined) {
+        unsupported.push(mediaTypeName(part));
+        continue;
+      }
+      const inline = type === "image" ? inlineBytes(part) : undefined;
+      if (inline !== undefined) {
+        if (partMediaType === undefined) {
+          unsupported.push(mediaTypeName(part));
+          continue;
+        }
+        if (inline.byteLength > MAX_ATTACHMENT_BYTES)
+          throw oversizedError(inline.byteLength);
+        images.push({ data: inline, mediaType: partMediaType });
+        continue;
+      }
+      const url = urlOf(part);
+      if (url !== undefined) {
+        const fetched = await fetchUrlImage(url, fetchImpl);
+        const mediaType = partMediaType ?? normalizeMediaType(fetched.mediaTypeName);
+        if (mediaType === undefined) {
+          unsupported.push(fetched.mediaTypeName ?? type);
+          continue;
+        }
+        images.push({ data: fetched.data, mediaType });
+        continue;
+      }
+      unsupported.push(mediaTypeName(part));
+      continue;
+    }
+    unsupported.push(mediaTypeName(part));
+  }
+  if (unsupported.length > 0)
+    return { images: [], unsupported };
+  return { images, unsupported };
+}
+function validateImage(image) {
+  if (!Object.hasOwn(EXT_BY_MEDIA_TYPE, image.mediaType)) {
+    throw new AgyAttachmentError(`unsupported image media type "${String(image.mediaType)}" \u2014 allowed: png, jpeg, gif, webp`);
+  }
+  if (image.data.byteLength > MAX_ATTACHMENT_BYTES)
+    throw oversizedError(image.data.byteLength);
+}
+function bytesEqual(a, b) {
+  return a.byteLength === b.byteLength && Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
+}
+function stageAttachments(workdir, images) {
+  if (images.length === 0)
+    return [];
+  for (const image of images)
+    validateImage(image);
+  const dir = join(workdir, ATTACHMENTS_DIR);
+  if (existsSync(dir)) {
+    const st = lstatSync(dir);
+    if (st.isSymbolicLink()) {
+      throw new AgyAttachmentError(`attachment directory ${ATTACHMENTS_DIR} is a symlink \u2014 refusing to stage outside the workdir`);
+    }
+    if (!st.isDirectory()) {
+      throw new AgyAttachmentError(`attachment directory ${ATTACHMENTS_DIR} exists and is not a directory \u2014 refusing to stage`);
+    }
+  } else {
+    mkdirSync3(dir, { recursive: true });
+  }
+  const staged = [];
+  for (const image of images) {
+    const hash = createHash2("sha256").update(image.data).digest("hex").slice(0, 16);
+    const rel = `${ATTACHMENTS_DIR}/${hash}.${EXT_BY_MEDIA_TYPE[image.mediaType]}`;
+    const abs = join(workdir, rel);
+    if (existsSync(abs)) {
+      const st = lstatSync(abs);
+      if (st.isSymbolicLink()) {
+        throw new AgyAttachmentError(`refusing to stage ${rel}: the path already exists as a symlink`);
+      }
+      if (!st.isFile()) {
+        throw new AgyAttachmentError(`refusing to stage ${rel}: the path exists and is not a file`);
+      }
+      if (!bytesEqual(readFileSync2(abs), image.data)) {
+        throw new AgyAttachmentError(`refusing to stage ${rel}: a different file already occupies the content path`);
+      }
+    } else {
+      writeFileSync2(abs, image.data);
+    }
+    staged.push(rel);
+  }
+  return staged;
+}
+var STAGED_NAME = /^[0-9a-f]{16}\.(png|jpg|gif|webp)$/;
+function pruneAttachments(workdir, now = new Date, maxAgeMs = ATTACHMENT_MAX_AGE_MS) {
+  const dir = join(workdir, ATTACHMENTS_DIR);
+  let entries;
+  try {
+    entries = readdirSync2(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let pruned = 0;
+  for (const entry of entries) {
+    if (!STAGED_NAME.test(entry.name))
+      continue;
+    const path = join(dir, entry.name);
+    let mtime;
+    try {
+      mtime = statSync2(path).mtime;
+    } catch {
+      continue;
+    }
+    if (mtime.getTime() > now.getTime() - maxAgeMs)
+      continue;
+    rmSync(path, { recursive: true, force: true });
+    pruned++;
+  }
+  return pruned;
+}
+function attachmentDirective(staged) {
+  if (staged.length === 0)
+    return;
+  return [
+    ...staged.map((rel) => `[Attached user image: ${rel}]`),
+    "Please inspect each attached image above with view_file before responding."
+  ].join(`
+`);
+}
+function promptHasImage(messages) {
+  const lastUser = [...messages].reverse().find((m) => m?.role === "user");
+  if (!lastUser || !Array.isArray(lastUser.content))
+    return false;
+  return lastUser.content.some((part) => {
+    if (typeof part !== "object" || part === null)
+      return false;
+    if (part.type === "image" || part.type === "image-url")
+      return true;
+    const mt = part["mediaType"] ?? part["mimeType"];
+    return typeof mt === "string" && mt.toLowerCase().startsWith("image/");
+  });
+}
+function unsupportedAttachmentsMessage(types) {
+  return `unsupported attachment type(s) in the last user turn: ${types.join(", ")} \u2014 the agy image bridge accepts png, jpeg, gif and webp images only; remove the unsupported attachment or describe its content as text`;
+}
 // src/messages.ts
 function mapMessages(messages2, opts) {
   const warnings = [];
@@ -900,7 +1193,7 @@ function openSessionStore(path, options = {}) {
   const load = (withPrune = true) => {
     let file;
     try {
-      file = parseStore(readFileSync2(path, "utf8"));
+      file = parseStore(readFileSync3(path, "utf8"));
     } catch {
       return { version: 2, sessions: {} };
     }
@@ -909,9 +1202,9 @@ function openSessionStore(path, options = {}) {
     return file;
   };
   const persist = (file) => {
-    mkdirSync3(dirname(path), { recursive: true });
-    const tmp = join(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
-    writeFileSync2(tmp, `${JSON.stringify(file, null, "\t")}
+    mkdirSync4(dirname(path), { recursive: true });
+    const tmp = join2(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
+    writeFileSync3(tmp, `${JSON.stringify(file, null, "\t")}
 `);
     renameSync(tmp, path);
   };
@@ -948,7 +1241,7 @@ function openSessionStore(path, options = {}) {
   const acquireLock = async () => {
     const deadline = nowMs() + lockWaitMs;
     for (;; ) {
-      mkdirSync3(dirname(path), { recursive: true });
+      mkdirSync4(dirname(path), { recursive: true });
       let fd;
       try {
         fd = openSync2(lockPath, "wx");
@@ -970,7 +1263,7 @@ function openSessionStore(path, options = {}) {
       }
       let fresh;
       try {
-        fresh = nowMs() - statSync2(lockPath).mtimeMs <= lockStaleMs;
+        fresh = nowMs() - statSync3(lockPath).mtimeMs <= lockStaleMs;
       } catch {
         if (nowMs() >= deadline)
           throw new SessionStoreBusyError(lockPath);
@@ -1085,20 +1378,20 @@ function openSessionStore(path, options = {}) {
 
 // src/paths.ts
 import { homedir, tmpdir } from "os";
-import { isAbsolute, join as join2 } from "path";
+import { isAbsolute, join as join3 } from "path";
 function resolveStateDir(opts = {}) {
   const root = opts.override ?? xdgStateRoot(opts.env ?? process.env);
-  return join2(root, "agy-bridge");
+  return join3(root, "agy-bridge");
 }
 function xdgStateRoot(env) {
   const xdg = env["XDG_STATE_HOME"];
   if (xdg && isAbsolute(xdg))
     return xdg;
   const home = env["HOME"] || homedir();
-  return join2(home, ".local", "state");
+  return join3(home, ".local", "state");
 }
 function sessionMapPath(opts = {}) {
-  return join2(resolveStateDir(opts), "opencode-sessions.json");
+  return join3(resolveStateDir(opts), "opencode-sessions.json");
 }
 
 // src/language-model.ts
@@ -1106,330 +1399,6 @@ import { randomUUID as randomUUID2 } from "crypto";
 
 // src/turn.ts
 import { basename, dirname as dirname2 } from "path";
-
-// src/attachments.ts
-import { createHash as createHash2 } from "crypto";
-import { existsSync, lstatSync, mkdirSync as mkdirSync5, readdirSync as readdirSync3, readFileSync as readFileSync3, rmSync as rmSync2, statSync as statSync4, writeFileSync as writeFileSync3 } from "fs";
-import { join as join4 } from "path";
-
-// src/workdir.ts
-import { mkdtempSync, readdirSync as readdirSync2, rmSync, statSync as statSync3 } from "fs";
-import { isAbsolute as isAbsolute2, join as join3 } from "path";
-import { tmpdir as tmpdir2 } from "os";
-var SCRATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-function prepareWorkdir(mode, opts) {
-  if (mode === "session") {
-    const worktree = opts.worktree;
-    if (worktree === undefined || !isAbsolute2(worktree)) {
-      throw new AgyConfigError("worktree", `session workdirMode requires an absolute worktree, got "${String(worktree)}"`);
-    }
-    let stat;
-    try {
-      stat = statSync3(worktree);
-    } catch {
-      stat = undefined;
-    }
-    if (!stat?.isDirectory()) {
-      throw new AgyConfigError("worktree", `session worktree does not exist: "${worktree}"`);
-    }
-    return { dir: worktree, scratch: false };
-  }
-  const root = opts.scratchRoot ?? opts.tmpdir ?? tmpdir2();
-  return { dir: mkdtempSync(join3(root, "agy-run-")), scratch: true };
-}
-function pruneScratch(root, now = new Date) {
-  let entries;
-  try {
-    entries = readdirSync2(root, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  let pruned = 0;
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith("agy-run-"))
-      continue;
-    const dir = join3(root, entry.name);
-    let mtime;
-    try {
-      mtime = statSync3(dir).mtime;
-    } catch {
-      continue;
-    }
-    if (mtime.getTime() > now.getTime() - SCRATCH_MAX_AGE_MS)
-      continue;
-    for (const inner of readdirSync2(dir)) {
-      if (inner === "run.log")
-        continue;
-      rmSync(join3(dir, inner), { recursive: true, force: true });
-    }
-    pruned++;
-  }
-  return pruned;
-}
-
-// src/attachments.ts
-class AgyAttachmentError extends Error {
-  detail;
-  code = "AGY_ATTACHMENT_INVALID";
-  constructor(detail) {
-    super(detail);
-    this.detail = detail;
-    this.name = "AgyAttachmentError";
-  }
-}
-var MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
-var ATTACHMENTS_DIR = ".agy-attachments";
-var EXT_BY_MEDIA_TYPE = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/gif": "gif",
-  "image/webp": "webp"
-};
-function normalizeMediaType(raw) {
-  if (typeof raw !== "string")
-    return;
-  const base = raw.toLowerCase().split(";")[0]?.trim() ?? "";
-  return Object.hasOwn(EXT_BY_MEDIA_TYPE, base) ? base : undefined;
-}
-function mediaTypeName(part) {
-  const mt = part["mediaType"];
-  return typeof mt === "string" && mt !== "" ? mt : String(part.type);
-}
-function oversizedError(bytes, url) {
-  const mb = (bytes / (1024 * 1024)).toFixed(1);
-  const src = url === undefined ? "" : ` (${url})`;
-  return new AgyAttachmentError(`image attachment is ${mb} MB${src}, over the 20 MB limit \u2014 compress or resize the image before attaching it`);
-}
-function inlineBytes(part) {
-  const image = part["image"];
-  if (typeof image === "string" && image !== "")
-    return new Uint8Array(Buffer.from(image, "base64"));
-  if (image instanceof Uint8Array && image.byteLength > 0)
-    return new Uint8Array(image);
-  return;
-}
-function urlOf(part) {
-  const direct = part["url"];
-  if (typeof direct === "string" && direct !== "")
-    return direct;
-  const nested = part["image_url"];
-  if (typeof nested === "object" && nested !== null) {
-    const u = nested["url"];
-    if (typeof u === "string" && u !== "")
-      return u;
-  }
-  return;
-}
-function dataBytes(value) {
-  if (value instanceof Uint8Array)
-    return value.byteLength > 0 ? new Uint8Array(value) : undefined;
-  if (typeof value === "string" && value !== "") {
-    const m = value.match(/^data:[^;]*;base64,([\s\S]*)$/i);
-    const b64 = m ? m[1] : value;
-    const bytes = new Uint8Array(Buffer.from(b64, "base64"));
-    return bytes.byteLength > 0 ? bytes : undefined;
-  }
-  return;
-}
-function dataUrl(value, part) {
-  if (value instanceof URL)
-    return value.toString();
-  if (typeof value === "string" && value !== "" && /^https?:\/\//i.test(value))
-    return value;
-  const direct = part["url"];
-  if (typeof direct === "string" && direct !== "")
-    return direct;
-  const nested = part["image_url"];
-  if (typeof nested === "object" && nested !== null) {
-    const u = nested["url"];
-    if (typeof u === "string" && u !== "")
-      return u;
-  }
-  return;
-}
-async function fetchUrlImage(url, fetchImpl) {
-  let res;
-  try {
-    res = await fetchImpl(url);
-  } catch (err) {
-    throw new AgyAttachmentError(`failed to fetch image ${url}: ${err instanceof Error ? err.message : String(err)} \u2014 attach the image file itself instead of a URL`);
-  }
-  if (!res.ok) {
-    throw new AgyAttachmentError(`failed to fetch image ${url}: HTTP ${res.status} \u2014 attach the image file itself instead of a URL`);
-  }
-  const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES)
-    throw oversizedError(declared, url);
-  let buffer;
-  try {
-    buffer = await res.arrayBuffer();
-  } catch (err) {
-    throw new AgyAttachmentError(`failed to read image ${url}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (buffer.byteLength > MAX_ATTACHMENT_BYTES)
-    throw oversizedError(buffer.byteLength, url);
-  return { data: new Uint8Array(buffer), mediaTypeName: res.headers.get("content-type") ?? undefined };
-}
-async function extractAttachments(content, deps = {}) {
-  const images = [];
-  const unsupported = [];
-  if (typeof content === "string" || !Array.isArray(content))
-    return { images, unsupported };
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  for (const part of content) {
-    if (typeof part !== "object" || part === null)
-      continue;
-    if (isTextPart(part))
-      continue;
-    const type = part.type;
-    if (type === "file") {
-      const rawMediaType = part["mediaType"];
-      const isImageMedia = typeof rawMediaType === "string" && rawMediaType.toLowerCase().startsWith("image/");
-      if (!isImageMedia) {
-        unsupported.push(mediaTypeName(part));
-        continue;
-      }
-      const partMediaType = normalizeMediaType(rawMediaType);
-      if (partMediaType === undefined) {
-        unsupported.push(mediaTypeName(part));
-        continue;
-      }
-      const data = part["data"];
-      const inline = dataBytes(data);
-      if (inline !== undefined) {
-        if (inline.byteLength > MAX_ATTACHMENT_BYTES)
-          throw oversizedError(inline.byteLength);
-        images.push({ data: inline, mediaType: partMediaType });
-        continue;
-      }
-      const url = dataUrl(data, part);
-      if (url !== undefined) {
-        const fetched = await fetchUrlImage(url, fetchImpl);
-        const mediaType = partMediaType ?? normalizeMediaType(fetched.mediaTypeName);
-        if (mediaType === undefined) {
-          unsupported.push(fetched.mediaTypeName ?? type);
-          continue;
-        }
-        images.push({ data: fetched.data, mediaType });
-        continue;
-      }
-      unsupported.push(mediaTypeName(part));
-      continue;
-    }
-    if (type === "image" || type === "image-url") {
-      const partMediaType = normalizeMediaType(part["mediaType"]);
-      if (part["mediaType"] !== undefined && partMediaType === undefined) {
-        unsupported.push(mediaTypeName(part));
-        continue;
-      }
-      const inline = type === "image" ? inlineBytes(part) : undefined;
-      if (inline !== undefined) {
-        if (partMediaType === undefined) {
-          unsupported.push(mediaTypeName(part));
-          continue;
-        }
-        if (inline.byteLength > MAX_ATTACHMENT_BYTES)
-          throw oversizedError(inline.byteLength);
-        images.push({ data: inline, mediaType: partMediaType });
-        continue;
-      }
-      const url = urlOf(part);
-      if (url !== undefined) {
-        const fetched = await fetchUrlImage(url, fetchImpl);
-        const mediaType = partMediaType ?? normalizeMediaType(fetched.mediaTypeName);
-        if (mediaType === undefined) {
-          unsupported.push(fetched.mediaTypeName ?? type);
-          continue;
-        }
-        images.push({ data: fetched.data, mediaType });
-        continue;
-      }
-      unsupported.push(mediaTypeName(part));
-      continue;
-    }
-    unsupported.push(mediaTypeName(part));
-  }
-  if (unsupported.length > 0)
-    return { images: [], unsupported };
-  return { images, unsupported };
-}
-function validateImage(image) {
-  if (!Object.hasOwn(EXT_BY_MEDIA_TYPE, image.mediaType)) {
-    throw new AgyAttachmentError(`unsupported image media type "${String(image.mediaType)}" \u2014 allowed: png, jpeg, gif, webp`);
-  }
-  if (image.data.byteLength > MAX_ATTACHMENT_BYTES)
-    throw oversizedError(image.data.byteLength);
-}
-function bytesEqual(a, b) {
-  return a.byteLength === b.byteLength && Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
-}
-function stageAttachments(workdir, images) {
-  if (images.length === 0)
-    return [];
-  for (const image of images)
-    validateImage(image);
-  const dir = join4(workdir, ATTACHMENTS_DIR);
-  if (existsSync(dir)) {
-    const st = lstatSync(dir);
-    if (st.isSymbolicLink()) {
-      throw new AgyAttachmentError(`attachment directory ${ATTACHMENTS_DIR} is a symlink \u2014 refusing to stage outside the workdir`);
-    }
-    if (!st.isDirectory()) {
-      throw new AgyAttachmentError(`attachment directory ${ATTACHMENTS_DIR} exists and is not a directory \u2014 refusing to stage`);
-    }
-  } else {
-    mkdirSync5(dir, { recursive: true });
-  }
-  const staged = [];
-  for (const image of images) {
-    const hash = createHash2("sha256").update(image.data).digest("hex").slice(0, 16);
-    const rel = `${ATTACHMENTS_DIR}/${hash}.${EXT_BY_MEDIA_TYPE[image.mediaType]}`;
-    const abs = join4(workdir, rel);
-    if (existsSync(abs)) {
-      const st = lstatSync(abs);
-      if (st.isSymbolicLink()) {
-        throw new AgyAttachmentError(`refusing to stage ${rel}: the path already exists as a symlink`);
-      }
-      if (!st.isFile()) {
-        throw new AgyAttachmentError(`refusing to stage ${rel}: the path exists and is not a file`);
-      }
-      if (!bytesEqual(readFileSync3(abs), image.data)) {
-        throw new AgyAttachmentError(`refusing to stage ${rel}: a different file already occupies the content path`);
-      }
-    } else {
-      writeFileSync3(abs, image.data);
-    }
-    staged.push(rel);
-  }
-  return staged;
-}
-var STAGED_NAME = /^[0-9a-f]{16}\.(png|jpg|gif|webp)$/;
-function pruneAttachments(workdir, now = new Date) {
-  const dir = join4(workdir, ATTACHMENTS_DIR);
-  let entries;
-  try {
-    entries = readdirSync3(dir, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  let pruned = 0;
-  for (const entry of entries) {
-    if (!STAGED_NAME.test(entry.name))
-      continue;
-    const path = join4(dir, entry.name);
-    let mtime;
-    try {
-      mtime = statSync4(path).mtime;
-    } catch {
-      continue;
-    }
-    if (mtime.getTime() > now.getTime() - SCRATCH_MAX_AGE_MS)
-      continue;
-    rmSync2(path, { recursive: true, force: true });
-    pruned++;
-  }
-  return pruned;
-}
 
 // src/stream-tap.ts
 import { spawn as spawn3 } from "child_process";
@@ -1483,6 +1452,64 @@ function createTap(onLine, opts = {}) {
   };
   opts.signal?.addEventListener("abort", () => tap.abort(), { once: true });
   return tap;
+}
+
+// src/workdir.ts
+import { mkdtempSync, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync4 } from "fs";
+import { isAbsolute as isAbsolute2, join as join4 } from "path";
+import { tmpdir as tmpdir2 } from "os";
+var SCRATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+function prepareWorkdir(mode, opts) {
+  if (mode === "session") {
+    const worktree = opts.worktree;
+    if (worktree === undefined || !isAbsolute2(worktree)) {
+      throw new AgyConfigError("worktree", `session workdirMode requires an absolute worktree, got "${String(worktree)}"`);
+    }
+    if (worktree === "/") {
+      throw new AgyConfigError("worktree", 'session workdirMode refuses the filesystem root "/" \u2014 opencode reports "/" for non-git directories; run inside a git worktree or switch workdirMode to "scratch"');
+    }
+    let stat;
+    try {
+      stat = statSync4(worktree);
+    } catch {
+      stat = undefined;
+    }
+    if (!stat?.isDirectory()) {
+      throw new AgyConfigError("worktree", `session worktree does not exist: "${worktree}"`);
+    }
+    return { dir: worktree, scratch: false };
+  }
+  const root = opts.scratchRoot ?? opts.tmpdir ?? tmpdir2();
+  return { dir: mkdtempSync(join4(root, "agy-run-")), scratch: true };
+}
+function pruneScratch(root, now = new Date) {
+  let entries;
+  try {
+    entries = readdirSync3(root, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let pruned = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("agy-run-"))
+      continue;
+    const dir = join4(root, entry.name);
+    let mtime;
+    try {
+      mtime = statSync4(dir).mtime;
+    } catch {
+      continue;
+    }
+    if (mtime.getTime() > now.getTime() - SCRATCH_MAX_AGE_MS)
+      continue;
+    for (const inner of readdirSync3(dir)) {
+      if (inner === "run.log")
+        continue;
+      rmSync2(join4(dir, inner), { recursive: true, force: true });
+    }
+    pruned++;
+  }
+  return pruned;
 }
 
 // src/errors.ts
@@ -1554,15 +1581,6 @@ class TurnError extends Error {
   }
 }
 var NO_LOG = "(no run log; the run was rejected before spawn)";
-function attachmentDirective(staged) {
-  if (staged.length === 0)
-    return;
-  return [
-    ...staged.map((rel) => `[Attached user image: ${rel}]`),
-    "Please inspect each attached image above with view_file before responding."
-  ].join(`
-`);
-}
 function abortError() {
   const err = new Error("agy turn aborted by the caller");
   err.name = "AbortError";
@@ -2038,19 +2056,6 @@ function lineDelta(line) {
 var REASONING_ID = "agy-progress";
 var TEXT_ID = "agy-response";
 var IMAGE_INPUT_DISABLED_MESSAGE = "the agy provider received an image but image input is disabled by default \u2014 enable it with the imageInput option (provider.agy.options.imageInput: true in your opencode config), or describe the image in text instead";
-function promptHasImage(messages2) {
-  const lastUser = [...messages2].reverse().find((m) => m?.role === "user");
-  if (!lastUser || !Array.isArray(lastUser.content))
-    return false;
-  return lastUser.content.some((part) => {
-    if (typeof part !== "object" || part === null)
-      return false;
-    if (part.type === "image" || part.type === "image-url")
-      return true;
-    const mt = part["mediaType"];
-    return typeof mt === "string" && mt.toLowerCase().startsWith("image/");
-  });
-}
 function attachmentErrorStream(message) {
   const stream = new ReadableStream({
     start(controller) {
@@ -2068,9 +2073,6 @@ function attachmentErrorStream(message) {
     }
   });
   return { stream };
-}
-function unsupportedAttachmentsMessage(types) {
-  return `unsupported attachment type(s) in the last user turn: ${types.join(", ")} \u2014 the agy image bridge accepts png, jpeg, gif and webp images only; remove the unsupported attachment or describe its content as text`;
 }
 var IMAGE_NOT_INSPECTED_NOTICE = `\u26A0 an attached image was not inspected with view_file \u2014 the response below may not account for it
 `;
@@ -2113,7 +2115,7 @@ class AgyLanguageModel {
     if (!deps.config.imageInput && promptHasImage(incoming)) {
       return attachmentErrorStream(IMAGE_INPUT_DISABLED_MESSAGE);
     }
-    let attachments;
+    let attachments2;
     let promptMessages = incoming;
     if (deps.config.imageInput) {
       const lastUser = [...incoming].reverse().find((m) => m?.role === "user");
@@ -2131,7 +2133,7 @@ class AgyLanguageModel {
           return attachmentErrorStream(unsupportedAttachmentsMessage(extracted.unsupported));
         }
         if (extracted.images.length > 0) {
-          attachments = extracted.images;
+          attachments2 = extracted.images;
           promptMessages = incoming.map((m) => m === lastUser ? {
             ...m,
             content: lastUserContent.filter((part) => {
@@ -2187,7 +2189,7 @@ class AgyLanguageModel {
             seedPrompt: diverged ? mapping.prompt : undefined,
             modelArg,
             sessionId,
-            attachments,
+            attachments: attachments2,
             signal: options.abortSignal,
             onLine: (line) => {
               if (!line.includes('"step_update"'))
@@ -2214,7 +2216,7 @@ class AgyLanguageModel {
               });
             }
           });
-          if (attachments !== undefined && attachments.length > 0 && result.stagedAttachments !== undefined && result.stagedAttachments.length > 0 && result.attachmentsInspected !== true) {
+          if (attachments2 !== undefined && attachments2.length > 0 && result.stagedAttachments !== undefined && result.stagedAttachments.length > 0 && result.attachmentsInspected !== true) {
             openReasoning();
             controller.enqueue({ type: "reasoning-delta", id: REASONING_ID, delta: IMAGE_NOT_INSPECTED_NOTICE });
           }
@@ -2419,7 +2421,7 @@ async function discoverModels(opts = {}) {
 
 // src/index.ts
 var server = async (input, options) => {
-  const worktree = input.worktree;
+  const worktree = input.worktree !== "/" && input.worktree !== "" ? input.worktree : input.directory;
   const opts = options ?? {};
   let registry = null;
   const getRegistry = async () => {
