@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -586,6 +587,48 @@ describe("integration: extensions/index — layered file config (v0.2 R1, D10)",
 	});
 });
 
+// --- pi-image-input: imageInput capability threading (R1/R2, D6/D7) ------------
+
+describe("integration: extensions/index — imageInput capability declaration (pi-image-input)", () => {
+	test("explicit imageInput:true → EVERY registered model advertises [text, image]", async () => {
+		const env = await factoryEnv({ options: { imageInput: true } });
+		await env.load();
+		const models = (env.calls.providers[0].config.models ?? []) as ProviderModelDeclaration[];
+		expect(models.length).toBeGreaterThan(0);
+		for (const model of models) expect(model.input).toEqual(["text", "image"]);
+	});
+
+	test("project file imageInput:true threads the whole file→layer→resolveConfig→registration chain", async () => {
+		const { calls, load } = fileFactoryEnv({ project: JSON.stringify({ imageInput: true }) });
+		await load();
+		const models = (calls.providers[0].config.models ?? []) as ProviderModelDeclaration[];
+		expect(models.length).toBeGreaterThan(0);
+		for (const model of models) expect(model.input).toEqual(["text", "image"]);
+	});
+
+	test("default (no imageInput anywhere) → every model stays text-only", async () => {
+		const env = await factoryEnv();
+		await env.load();
+		const models = (env.calls.providers[0].config.models ?? []) as ProviderModelDeclaration[];
+		expect(models.length).toBeGreaterThan(0);
+		for (const model of models) expect(model.input).toEqual(["text"]);
+	});
+
+	test("/reload re-registers with the SAME capability: imageInput:true models keep [text, image]", async () => {
+		let probe = 0;
+		const env = await factoryEnv({
+			options: { imageInput: true },
+			runner: runnerSeam(() => (++probe === 1 ? { stdout: TSV_A } : { stdout: "agy v1\nreload-model\tReloaded\n" })),
+		});
+		await env.load();
+		await env.calls.handlers["session_start"][0]({ type: "session_start", reason: "reload" } as never);
+		expect(env.calls.providers).toHaveLength(2);
+		const models = (env.calls.providers[1].config.models ?? []) as ProviderModelDeclaration[];
+		expect(models.map((m) => m.id)).toContain("reload-model");
+		for (const model of models) expect(model.input).toEqual(["text", "image"]);
+	});
+});
+
 // --- v0.2 S2: conditional AskAgy registration + overrides + notice (R3, R4) ----
 
 /**
@@ -794,5 +837,78 @@ describe("integration: extensions/index — factory debug wiring (v0.2 R11, task
 		await env.calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
 		await env.calls.handlers["session_shutdown"][0]({ type: "session_shutdown", reason: "quit" } as never);
 		expect(existsSync(join(env.root, "debug.log"))).toBe(false);
+	});
+});
+
+// --- pi-image-input: extension wiring (PR 3) -----------------------------------------
+
+const WIRE_PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x0a]);
+const wireBasename = (): string =>
+	`${createHash("sha256").update(WIRE_PNG).digest("hex").slice(0, 16)}.png`;
+const wireImageContext = {
+	messages: [
+		{
+			role: "user" as const,
+			content: [
+				{ type: "text" as const, text: "what is this" },
+				{ type: "image" as const, data: Buffer.from(WIRE_PNG).toString("base64"), mimeType: "image/png" },
+			],
+			timestamp: 1,
+		},
+	],
+};
+
+describe("pi-image-input: extension wiring (imageInput through factory registrations)", () => {
+	test("options.imageInput threads into the registered streamSimple: image turn stages under the options.cwd workdir and the directive rides the stdin envelope", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-wire-img-"));
+		const { calls, spawn, load } = await factoryEnv({ options: { imageInput: true } });
+		await load();
+		const streamSimple = calls.providers[0].config.streamSimple!;
+		const model = asModel((calls.providers[0].config.models ?? [])[0]);
+		const events = await drain(
+			streamSimple(model, wireImageContext, { sessionId: "wire-img", cwd: workdir } as never),
+		);
+		const last = events.at(-1);
+		expect(last?.type).toBe("done");
+		const name = wireBasename();
+		expect(existsSync(join(workdir, ".agy-attachments", name))).toBe(true);
+		// The factory enables the stdin transport: the directive-carrying
+		// prompt rides the ONE NDJSON user envelope, never argv.
+		expect(spawn.spawns[0].args.some((a) => a.includes("[Attached user image:"))).toBe(false);
+		expect(stdinContent(spawn.spawns[0])).toContain(`[Attached user image: .agy-attachments/${name}]`);
+		expect(stdinContent(spawn.spawns[0])).toContain("Please inspect each attached image above with view_file before responding.");
+	});
+
+	test("default (disabled) through the registered streamSimple: image turn → error terminal naming both config paths, zero spawns, nothing staged", async () => {
+		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-wire-off-"));
+		const { calls, spawn, load } = await factoryEnv();
+		await load();
+		const streamSimple = calls.providers[0].config.streamSimple!;
+		const model = asModel((calls.providers[0].config.models ?? [])[0]);
+		const events = await drain(
+			streamSimple(model, wireImageContext, { sessionId: "wire-off", cwd: workdir } as never),
+		);
+		const last = events.at(-1);
+		expect(last?.type).toBe("error");
+		if (last?.type === "error") {
+			expect(last.error.errorMessage ?? "").toContain(".pi/agy-bridge.json");
+			expect(last.error.errorMessage ?? "").toContain("~/.pi/agent/agy-bridge.json");
+		}
+		expect(spawn.spawns).toHaveLength(0);
+		expect(existsSync(join(workdir, ".agy-attachments"))).toBe(false);
+	});
+
+	test("/agy status reports the resolved imageInput through the registered command (enabled and default-disabled)", async () => {
+		const enabled = await factoryEnv({ options: { imageInput: true } });
+		await enabled.load();
+		const notesOn: string[] = [];
+		await enabled.calls.commands.find((c) => c.name === "agy")!.handler("status", commandCtx("/proj", notesOn));
+		expect(notesOn[0]).toContain("images: enabled");
+
+		const disabled = await factoryEnv();
+		await disabled.load();
+		const notesOff: string[] = [];
+		await disabled.calls.commands.find((c) => c.name === "agy")!.handler("status", commandCtx("/proj", notesOff));
+		expect(notesOff[0]).toContain("images: disabled — enable with imageInput: true");
 	});
 });

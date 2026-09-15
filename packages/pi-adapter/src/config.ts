@@ -67,6 +67,8 @@ export interface PiAdapterOptions {
 	timeoutMs?: number;
 	/** AskAgy delegation section (v0.2 R2). */
 	askAgy?: AskAgyOptions;
+	/** Opt-in image input bridge (pi-image-input R1): disabled by default. */
+	imageInput?: boolean;
 }
 
 export interface PiAdapterConfig {
@@ -79,6 +81,8 @@ export interface PiAdapterConfig {
 	timeoutMs?: number;
 	/** Resolved askAgy section with confirmed defaults (v0.2 R2). */
 	askAgy: AskAgyConfig;
+	/** Resolved image input flag (pi-image-input R1): explicit > project > global, default false. */
+	imageInput: boolean;
 }
 
 /** Typed validation error: field names the exact rejected option. */
@@ -198,6 +202,15 @@ export function resolveConfig(options: PiAdapterOptions = {}, fileLayer?: FileCo
 	const scratchRoot = pickLayered(layer.scratchRoot, options.scratchRoot);
 	const stateDir = pickLayered(layer.stateDir, options.stateDir);
 	const timeoutMs = pickLayered(layer.timeoutMs, options.timeoutMs);
+	// pi-image-input D6: the same layered pick + a boolean guard at the
+	// single validation gate — non-boolean values (explicit or file, null
+	// included, matching the askAgy/timeoutMs guards) throw BEFORE any
+	// spawn can happen; absent everywhere means disabled (R1).
+	const rawImageInput = pickLayered(layer.imageInput, options.imageInput);
+	const imageInput = rawImageInput === undefined ? false : rawImageInput;
+	if (typeof imageInput !== "boolean") {
+		throw new AgyConfigError("imageInput", `imageInput must be a boolean, got ${typeof imageInput}`);
+	}
 	// Per-key merge (D10): file entries first, explicit entries win per key.
 	const models: Record<string, ModelConfig> = { ...(layer.models ?? {}) };
 	for (const [id, entry] of Object.entries(options.models ?? {})) models[id] = entry;
@@ -221,5 +234,6 @@ export function resolveConfig(options: PiAdapterOptions = {}, fileLayer?: FileCo
 		models,
 		timeoutMs,
 		askAgy,
+		imageInput,
 	};
 }

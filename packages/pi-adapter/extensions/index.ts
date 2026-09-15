@@ -148,6 +148,9 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 		promptViaStdin: true,
 		state,
 		debug,
+		// pi-image-input R1: the resolved flag forwards to the turn seam —
+		// gate, staging, directive, and inspection tap all live there (D5).
+		imageInput: config.imageInput,
 	});
 
 	const registerModels = (models: readonly PiAgyModel[]): void => {
@@ -156,7 +159,11 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 			api: AGY_STREAM_API,
 			baseUrl: AGY_BASE_URL,
 			apiKey: AGY_API_KEY,
-			models: models.map(toProviderModel),
+			// pi-image-input R2/D6: the resolved imageInput flag gates the
+			// advertised input modality. Explicit lambda — never
+			// `models.map(toProviderModel)`, whose second .map arg (the
+			// index) would land in the boolean parameter.
+			models: models.map((m) => toProviderModel(m, config.imageInput)),
 			streamSimple,
 		});
 	};
@@ -215,6 +222,8 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 			stateDir: config.stateDir,
 			store,
 			state,
+			// pi-image-input: /agy status reports the resolved capability.
+			imageInput: config.imageInput,
 			...(deps.now !== undefined ? { now: deps.now } : {}),
 		}),
 	);

@@ -157,3 +157,40 @@ describe("unit: file-config — layered global+project loader (R1, D10)", () => 
 		expect(loaded.warnings[0]).toContain("unreadable");
 	});
 });
+
+describe("unit: file-config — imageInput scalar key (pi-image-input spec R1, D6)", () => {
+	test("imageInput loads from the PROJECT file (.pi/agy-bridge.json)", async () => {
+		const { readFile } = reader({
+			"/proj/.pi/agy-bridge.json": JSON.stringify({ imageInput: true }),
+		});
+		const loaded = await loadFileConfig({ env: ENV, cwd: "/proj", agentDir: "/agent", readFile });
+		expect(loaded.config.imageInput).toBe(true);
+		expect(loaded.warnings).toEqual([]);
+	});
+
+	test("imageInput loads from the GLOBAL file (~/.pi/agent/agy-bridge.json) when the project is silent", async () => {
+		const { readFile } = reader({
+			"/agent/agy-bridge.json": JSON.stringify({ imageInput: true }),
+		});
+		const loaded = await loadFileConfig({ env: ENV, cwd: "/proj", agentDir: "/agent", readFile });
+		expect(loaded.config.imageInput).toBe(true);
+	});
+
+	test("project wins per key: project false beats global true", async () => {
+		const { readFile } = reader({
+			"/agent/agy-bridge.json": JSON.stringify({ imageInput: true }),
+			"/proj/.pi/agy-bridge.json": JSON.stringify({ imageInput: false }),
+		});
+		const loaded = await loadFileConfig({ env: ENV, cwd: "/proj", agentDir: "/agent", readFile });
+		expect(loaded.config.imageInput).toBe(false);
+	});
+
+	test("values pass through RAW: a non-boolean imageInput rides the layer unvalidated, zero warnings", async () => {
+		const { readFile } = reader({
+			"/proj/.pi/agy-bridge.json": JSON.stringify({ imageInput: "yes" }),
+		});
+		const loaded = await loadFileConfig({ env: ENV, cwd: "/proj", agentDir: "/agent", readFile });
+		expect(loaded.config.imageInput as unknown).toBe("yes");
+		expect(loaded.warnings).toEqual([]);
+	});
+});

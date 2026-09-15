@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (`0.x` = development line).
 
+## [pi 0.4.0] - 2026-09-15
+
+### Added
+- **Image input (opt-in) — capability phase**: new `imageInput` flag on the
+  layered config (default `false`): explicit factory options >
+  project `.pi/agy-bridge.json` > global `~/.pi/agent/agy-bridge.json`,
+  with a single `AgyConfigError` boolean gate before any spawn (non-boolean
+  values, JSON `null` included, are rejected). While disabled every
+  registered agy model stays text-only (`input: ["text"]`, zero behavior
+  change); when enabled models advertise `input: ["text", "image"]`, so
+  `pi list-models` shows `images: yes` and the built-in `read` tool treats
+  agy models as vision-capable. Turn wiring (extraction, staging,
+  inspection directive, notices) lands with this same version.
+
 ## [0.5.0] - 2026-09-14
 
 ### Added

@@ -153,8 +153,11 @@ export function resolveRegistry(
 /**
  * The declaration handed to pi's registerProvider models array (structural
  * subset of ProviderConfigInput's model entry): agy is a custom-provider
- * transport, so economics are neutral zeros, input is text-only, and the
- * design-pinned limits become contextWindow/maxTokens.
+ * transport, so economics are neutral zeros, the input modality follows the
+ * resolved `imageInput` flag (pi-image-input R2/Q2: enabled advertises
+ * ["text","image"] so the host paperclip, list-models images column, and
+ * the vision-capable `read` tool activate; disabled stays text-only), and
+ * the design-pinned limits become contextWindow/maxTokens.
  */
 export interface ProviderModelDeclaration {
 	id: string;
@@ -167,13 +170,13 @@ export interface ProviderModelDeclaration {
 	maxTokens: number;
 }
 
-export function toProviderModel(entry: PiAgyModel): ProviderModelDeclaration {
+export function toProviderModel(entry: PiAgyModel, imageInput?: boolean): ProviderModelDeclaration {
 	return {
 		id: entry.id,
 		name: entry.name,
 		reasoning: entry.reasoning,
 		...(entry.thinkingLevelMap !== undefined ? { thinkingLevelMap: entry.thinkingLevelMap } : {}),
-		input: ["text"],
+		input: ["text", ...(imageInput ? (["image"] as const) : [])],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: entry.limit.context,
 		maxTokens: entry.limit.output,

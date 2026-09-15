@@ -193,3 +193,49 @@ describe("unit: config — askAgy section and file layer (v0.2 R1, R2; D10)", ()
 		expect(resolved.enabled).toBe(true);
 	});
 });
+
+describe("unit: config — imageInput layered opt-in gating (pi-image-input spec R1, D6)", () => {
+	test("image input is DISABLED by default: no options, no file layer", () => {
+		expect(resolveConfig({ env: {} }).imageInput).toBe(false);
+	});
+
+	test("an explicit imageInput:true passes through validated", () => {
+		expect(resolveConfig({ imageInput: true, env: {} }).imageInput).toBe(true);
+	});
+
+	test("explicit options beat the file layer in BOTH directions (true and false)", () => {
+		const layer = { config: { imageInput: true }, askAgy: {} };
+		expect(resolveConfig({ imageInput: false, env: {} }, layer).imageInput).toBe(false);
+		const falseLayer = { config: { imageInput: false }, askAgy: {} };
+		expect(resolveConfig({ imageInput: true, env: {} }, falseLayer).imageInput).toBe(true);
+	});
+
+	test("the file layer enables imageInput when the explicit option is unset", () => {
+		expect(resolveConfig({ env: {} }, { config: { imageInput: true }, askAgy: {} }).imageInput).toBe(true);
+	});
+
+	test("THREAT: a non-boolean explicit imageInput throws a typed error BEFORE any spawn", () => {
+		for (const bad of ["yes", 1, null]) {
+			try {
+				resolveConfig({ imageInput: bad as never, env: {} });
+				throw new Error(`unreachable: imageInput ${String(bad)} must throw`);
+			} catch (error) {
+				expect(error).toBeInstanceOf(AgyConfigError);
+				const typed = error as AgyConfigError;
+				expect(typed.field).toBe("imageInput");
+				expect(typed.code).toBe("AGY_CONFIG_INVALID");
+				expect(typed.message).toContain("boolean");
+			}
+		}
+	});
+
+	test("THREAT: a non-boolean file-layer imageInput throws at the SAME single gate", () => {
+		try {
+			resolveConfig({ env: {} }, { config: { imageInput: "yes" as never }, askAgy: {} });
+			throw new Error("unreachable: file-layer imageInput must throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AgyConfigError);
+			expect((error as AgyConfigError).field).toBe("imageInput");
+		}
+	});
+});

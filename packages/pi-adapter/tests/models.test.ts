@@ -178,3 +178,32 @@ describe("unit: models — provider-facing declarations (R2)", () => {
 		expect(toProviderModel(flashBase).thinkingLevelMap).toEqual(flashBase.thinkingLevelMap);
 	});
 });
+
+describe("unit: models — imageInput capability gating (pi-image-input spec, Q2 contract)", () => {
+	test("imageInput ENABLED advertises input [text, image] on every registry entry", () => {
+		for (const entry of resolveRegistry({}, FLASH_TIERS)) {
+			const declaration = toProviderModel(entry, true);
+			expect(declaration.input).toEqual(["text", "image"]);
+		}
+	});
+
+	test("imageInput DISABLED declares text-only; the omitted flag stays text-only (backward compatible)", () => {
+		for (const entry of resolveRegistry({}, FLASH_TIERS)) {
+			expect(toProviderModel(entry, false).input).toEqual(["text"]);
+			expect(toProviderModel(entry).input).toEqual(["text"]);
+		}
+	});
+
+	test("the flag gates ONLY the input modality — id, name, reasoning, map, cost, and limits are unchanged", () => {
+		const [, flashBase] = resolveRegistry({}, FLASH_TIERS);
+		const enabled = toProviderModel(flashBase, true);
+		expect(enabled.id).toBe(flashBase.id);
+		expect(enabled.name).toBe(flashBase.name);
+		expect(enabled.reasoning).toBe(flashBase.reasoning);
+		expect(enabled.thinkingLevelMap).toEqual(flashBase.thinkingLevelMap);
+		expect(enabled.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(enabled.contextWindow).toBe(DEFAULT_LIMITS.context);
+		expect(enabled.maxTokens).toBe(DEFAULT_LIMITS.output);
+		expect(Object.keys(enabled).sort()).toEqual(Object.keys(toProviderModel(flashBase, false)).sort());
+	});
+});

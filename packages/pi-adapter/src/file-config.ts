@@ -31,7 +31,7 @@ export interface FileConfigDeps {
 }
 
 /** Scalar option keys lifted from files onto PiAdapterOptions. */
-const SCALAR_KEYS = ["timeoutMs", "stateDir", "scratchRoot"] as const;
+const SCALAR_KEYS = ["timeoutMs", "stateDir", "scratchRoot", "imageInput"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
