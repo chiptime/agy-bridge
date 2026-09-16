@@ -165,6 +165,16 @@ force a fresh conversation for that thread; delete the whole session key to
 reset every thread under that sessionID. Bindings older than 30 days are
 pruned automatically.
 
+## `EACCES: permission denied, open '//run.log'`
+
+The session directory was **not inside a git worktree**, so opencode
+reported its "global" project worktree — literally `/` — and session mode
+tried to write `<worktree>/run.log` at the filesystem root. Fixed in
+**0.5.1**: the plugin falls back to the session directory when the
+worktree is `/` or empty, and the adapter rejects the filesystem root
+with a typed config error before any spawn. On older versions, run
+opencode inside a git worktree or switch to `"workdirMode": "scratch"`.
+
 ## Tool errors like `✗ view_file failed` in the progress panel
 
 Expected in **scratch** workdir mode: agy runs in an empty temporary

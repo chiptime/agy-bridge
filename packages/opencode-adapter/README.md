@@ -81,7 +81,10 @@ entry file are imported directly:
   `scratchRoot` (default: system tmp); dirs older than 7 days are pruned,
   `run.log` kept.
 - `session`: the turn runs directly in the opencode worktree (requires an
-  absolute, existing worktree — config error otherwise).
+  absolute, existing worktree — config error otherwise). Sessions in
+  non-git directories get opencode's "global" worktree `/`; the plugin
+  then uses the session directory instead, and the filesystem root itself
+  is always rejected with a typed config error.
 
 ## Image input (opt-in)
 

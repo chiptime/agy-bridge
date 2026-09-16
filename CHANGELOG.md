@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (`0.x` = development line).
 
+## [0.5.1] - 2026-09-16
+
+### Fixed
+- **`EACCES //run.log` in non-git directories**: opencode assigns the
+  "global" project (worktree `"/"`) when the session directory is not
+  inside a git worktree; session mode accepted `/` as a valid worktree
+  (absolute and existing) and tried to open `//run.log` at the filesystem
+  root → `EACCES`. The plugin now forwards the session directory
+  (`input.directory`) when the worktree is `/` or empty, and
+  `prepareWorkdir` rejects the filesystem root with a typed
+  `AgyConfigError` before any spawn.
+
+### Changed
+- Attachment staging internals were promoted to the engine package; the
+  adapter's attachment modules are now re-export shims (no behavior
+  change, dist bundles stay self-contained).
+
 ## [pi 0.4.0] - 2026-09-15
 
 ### Added
