@@ -148,12 +148,15 @@ describe("unit: session-store — schema v2 multi-conversation bindings", () => 
 	test("migration v1→v2: a v1 file loads wrapped as a single-element list; next write persists version 2", async () => {
 		const dir = await mkdtemp("/tmp/agy-store-mig-");
 		const path = join(dir, "opencode-sessions.json");
+		// Captured ONCE: re-evaluating iso() at assertion time races the wall
+		// clock across the await chain below (a ≥1ms tick fails toEqual).
+		const migratedAt = iso(-DAY_MS);
 		writeFileSync(
 			path,
 			JSON.stringify({
 				version: 1,
 				sessions: {
-					"sess-m": { conversationId: "conv-m", updatedAt: iso(-DAY_MS) },
+					"sess-m": { conversationId: "conv-m", updatedAt: migratedAt },
 					"sess-hm": { conversationId: "conv-hm", hashes: ["h0"], updatedAt: iso(-DAY_MS) },
 				},
 			}),
@@ -168,7 +171,7 @@ describe("unit: session-store — schema v2 multi-conversation bindings", () => 
 		await store.bind("sess-new", "conv-new");
 		const raw = JSON.parse(readFileSync(path, "utf8"));
 		expect(raw.version).toBe(2);
-		expect(raw.sessions["sess-m"]).toEqual([{ conversationId: "conv-m", updatedAt: iso(-DAY_MS) }]);
+		expect(raw.sessions["sess-m"]).toEqual([{ conversationId: "conv-m", updatedAt: migratedAt }]);
 	});
 
 	test("migration tolerance: malformed entries degrade to an empty store; unknown version too", async () => {

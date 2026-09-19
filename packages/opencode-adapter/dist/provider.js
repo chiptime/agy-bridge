@@ -364,6 +364,12 @@ function resolveConfig(options = {}) {
   if (options.timeoutMs !== undefined && !isPositiveInt(options.timeoutMs)) {
     throw new AgyConfigError("timeoutMs", `timeoutMs must be a positive integer, got ${String(options.timeoutMs)}`);
   }
+  if (options.terminationGraceMs !== undefined && !isPositiveInt(options.terminationGraceMs)) {
+    throw new AgyConfigError("terminationGraceMs", `terminationGraceMs must be a positive integer, got ${String(options.terminationGraceMs)}`);
+  }
+  if (options.terminationSettleMs !== undefined && !isPositiveInt(options.terminationSettleMs)) {
+    throw new AgyConfigError("terminationSettleMs", `terminationSettleMs must be a positive integer, got ${String(options.terminationSettleMs)}`);
+  }
   if (options.imageInput !== undefined && typeof options.imageInput !== "boolean") {
     throw new AgyConfigError("imageInput", `imageInput must be a boolean, got ${typeof options.imageInput} (${String(options.imageInput)})`);
   }
@@ -374,23 +380,25 @@ function resolveConfig(options = {}) {
     quotaSnapshotDir: options.quotaSnapshotDir,
     models,
     timeoutMs: options.timeoutMs,
+    terminationGraceMs: options.terminationGraceMs,
+    terminationSettleMs: options.terminationSettleMs,
     imageInput: options.imageInput ?? false
   };
 }
 
 // src/session-store.ts
 import {
-  closeSync as closeSync2,
-  mkdirSync as mkdirSync4,
-  openSync as openSync2,
-  readFileSync as readFileSync3,
+  closeSync as closeSync3,
+  mkdirSync as mkdirSync5,
+  openSync as openSync3,
+  readFileSync as readFileSync4,
   renameSync,
-  statSync as statSync3,
-  unlinkSync,
+  statSync as statSync4,
+  unlinkSync as unlinkSync2,
   writeFileSync as writeFileSync3,
-  writeSync
+  writeSync as writeSync2
 } from "fs";
-import { dirname, join as join2 } from "path";
+import { dirname, join as join3 } from "path";
 import { randomUUID } from "crypto";
 
 // ../engine/src/spawn.ts
@@ -464,23 +472,33 @@ function buildAgyArgs(opts, outputFormat = "json") {
   return args;
 }
 var DEFAULT_STALL_MS = 600000;
+var TERMINATION_GRACE_MS = 5000;
+var TERMINATION_FINAL_DEADLINE_MS = 5000;
 async function runAgyStream(opts) {
   mkdirSync(opts.workdir, { recursive: true });
   const start = Date.now();
   const stallMs = opts.stallMs ?? DEFAULT_STALL_MS;
   return new Promise((resolve) => {
     const spawnFn = opts.spawnImpl ?? spawn;
-    const child = spawnFn(opts.bin, buildAgyArgs(opts, "stream-json"), {
-      cwd: opts.workdir,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
-      stdio: [opts.promptViaStdin ? "pipe" : "ignore", "pipe", "pipe"]
-    });
+    const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, "w", 384);
+    let child;
+    try {
+      child = spawnFn(opts.bin, buildAgyArgs(opts, "stream-json"), {
+        cwd: opts.workdir,
+        env: opts.env ? { ...process.env, ...opts.env } : process.env,
+        stdio: [opts.promptViaStdin ? "pipe" : "ignore", "pipe", "pipe"]
+      });
+    } catch (err) {
+      try {
+        closeSync(logFd);
+      } catch {}
+      throw err;
+    }
     if (opts.promptViaStdin) {
       child.stdin?.on("error", () => {});
       child.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: opts.prompt } }) + `
 `);
     }
-    const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, "w");
     let log = "";
     let envelope;
     let conversationId;
@@ -492,12 +510,54 @@ async function runAgyStream(opts) {
     let spawnError;
     let settled = false;
     let stallTimer = null;
+    let graceTimer = null;
+    let finalTimer = null;
+    let terminationTrigger;
+    let requestedSignal;
+    let escalatedSignal;
+    let observedSignal;
+    let terminationUnconfirmed = false;
     const append = (chunk) => {
       log += chunk;
       try {
         appendFileSync(logFd, chunk);
       } catch {}
     };
+    const killOrRecord = (sig) => {
+      try {
+        child.kill(sig);
+      } catch (err) {
+        append(`[agy-bridge] child.kill(${JSON.stringify(sig)}) failed: ${err instanceof Error ? err.message : String(err)}
+`);
+      }
+    };
+    const requestTermination = (trigger) => {
+      if (settled)
+        return;
+      if (!terminationTrigger)
+        terminationTrigger = trigger;
+      if (!requestedSignal)
+        requestedSignal = "SIGTERM";
+      killOrRecord("SIGTERM");
+      if (graceTimer)
+        return;
+      graceTimer = setTimeout(() => {
+        if (settled)
+          return;
+        killOrRecord("SIGKILL");
+        escalatedSignal = "SIGKILL";
+        finalTimer = setTimeout(() => {
+          if (settled)
+            return;
+          terminationUnconfirmed = true;
+          finish();
+        }, opts.terminationSettleMs ?? TERMINATION_FINAL_DEADLINE_MS);
+      }, opts.terminationGraceMs ?? TERMINATION_GRACE_MS);
+    };
+    const capTimer = setTimeout(() => {
+      timedOut = true;
+      requestTermination("timeout");
+    }, opts.timeoutMs);
     const armStall = () => {
       if (stallTimer)
         clearTimeout(stallTimer);
@@ -505,13 +565,23 @@ async function runAgyStream(opts) {
         return;
       stallTimer = setTimeout(() => {
         stalled = true;
-        child.kill("SIGTERM");
+        requestTermination("stall");
       }, stallMs);
     };
-    const capTimer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-    }, opts.timeoutMs);
+    const onAbort = () => requestTermination("abort");
+    if (opts.signal)
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    const onExit = (code) => {
+      exitCode = code;
+      finish();
+    };
+    const onClose = (code, signal) => {
+      if (!settled) {
+        exitCode = code;
+        observedSignal = signal ?? undefined;
+      }
+      finish();
+    };
     const finish = () => {
       if (settled)
         return;
@@ -519,6 +589,13 @@ async function runAgyStream(opts) {
       if (stallTimer)
         clearTimeout(stallTimer);
       clearTimeout(capTimer);
+      if (graceTimer)
+        clearTimeout(graceTimer);
+      if (finalTimer)
+        clearTimeout(finalTimer);
+      opts.signal?.removeEventListener("abort", onAbort);
+      child.off("exit", onExit);
+      child.off("close", onClose);
       child.stdout?.destroy();
       child.stderr?.destroy();
       try {
@@ -533,7 +610,12 @@ async function runAgyStream(opts) {
         conversationId,
         progress: eventCount > 0 ? { events: eventCount, lastEvent } : undefined,
         stalled: stalled || undefined,
-        spawnError
+        spawnError,
+        terminationUnconfirmed: terminationUnconfirmed || undefined,
+        terminationTrigger,
+        requestedSignal,
+        escalatedSignal,
+        observedSignal
       });
     };
     child.on("error", (err) => {
@@ -559,15 +641,10 @@ async function runAgyStream(opts) {
       armStall();
       append(chunk.toString("utf8"));
     });
-    child.on("exit", (code) => {
-      exitCode = code;
-      finish();
-    });
-    child.on("close", (code) => {
-      if (!settled)
-        exitCode = code;
-      finish();
-    });
+    child.on("exit", onExit);
+    child.on("close", onClose);
+    if (opts.signal?.aborted)
+      requestTermination("abort");
   });
 }
 // ../engine/src/outcomes.ts
@@ -579,6 +656,12 @@ function classifyRun(signal) {
   const log = signal.log ?? "";
   if (signal.spawnError === "ENOENT")
     return { outcome: "transient_unavailable", reason: "agy_absent" };
+  if (signal.terminationUnconfirmed) {
+    return {
+      outcome: "termination_unconfirmed",
+      reason: signal.terminationTrigger ? `termination_unconfirmed_${signal.terminationTrigger}` : "termination_unconfirmed"
+    };
+  }
   if (signal.stalled)
     return { outcome: "timeout", reason: "stall_detected" };
   if (signal.timedOut || signal.exitCode === 124)
@@ -611,8 +694,104 @@ function classifyRun(signal) {
     return { outcome: "artifact_validation_failure", reason: "artifact_missing_or_empty" };
   return { outcome: "success", reason: "ok" };
 }
+// ../engine/src/conversation-lock.ts
+import { createHash } from "crypto";
+import { closeSync as closeSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync, statSync as statSync2, unlinkSync, writeSync } from "fs";
+import { join } from "path";
+var CONVERSATION_LOCK_WAIT_MS = 3000;
+var CONVERSATION_LOCK_STALE_MS = 60 * 60 * 1000;
+var CONVERSATION_LOCK_POLL_MS = 20;
+
+class ConversationBusyError extends Error {
+  conversationKey;
+  lockPath;
+  constructor(conversationKey, lockPath) {
+    super(`conversation busy: another agy request holds the lock for conversation ${conversationKey} (not acquired within the bounded wait): ${lockPath}`);
+    this.conversationKey = conversationKey;
+    this.lockPath = lockPath;
+    this.name = "ConversationBusyError";
+  }
+}
+function defaultIsPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code !== "ESRCH";
+  }
+}
+function abandonLock(lockPath, fd) {
+  try {
+    closeSync2(fd);
+  } catch {}
+  try {
+    unlinkSync(lockPath);
+  } catch {}
+}
+async function acquireConversationLock(lockDir, key, opts = {}) {
+  const waitMs = opts.waitMs ?? CONVERSATION_LOCK_WAIT_MS;
+  const staleMs = opts.staleMs ?? CONVERSATION_LOCK_STALE_MS;
+  const pollMs = opts.pollMs ?? CONVERSATION_LOCK_POLL_MS;
+  const nowMs = opts.now ?? Date.now;
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const lockPath = join(lockDir, `${createHash("sha256").update(key).digest("hex")}.lock`);
+  mkdirSync2(lockDir, { recursive: true, mode: 448 });
+  const deadline = nowMs() + waitMs;
+  let vanishedSpins = 0;
+  for (;; ) {
+    let fd;
+    try {
+      fd = openSync2(lockPath, "wx", 384);
+    } catch (err) {
+      if (err?.code !== "EEXIST")
+        throw err;
+    }
+    if (fd !== undefined) {
+      try {
+        writeSync(fd, JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }));
+      } catch (err) {
+        abandonLock(lockPath, fd);
+        throw err;
+      }
+      closeSync2(fd);
+      return {
+        release: () => {
+          try {
+            unlinkSync(lockPath);
+          } catch {}
+        }
+      };
+    }
+    let holderGone = false;
+    try {
+      const holder = JSON.parse(readFileSync(lockPath, "utf8"));
+      if (typeof holder?.pid === "number" && !isPidAlive(holder.pid))
+        holderGone = true;
+    } catch {}
+    if (!holderGone) {
+      try {
+        if (nowMs() - statSync2(lockPath).mtimeMs > staleMs)
+          holderGone = true;
+      } catch {
+        if (nowMs() >= deadline || ++vanishedSpins > 1e4) {
+          throw new ConversationBusyError(key, lockPath);
+        }
+        continue;
+      }
+    }
+    if (holderGone) {
+      try {
+        unlinkSync(lockPath);
+      } catch {}
+      continue;
+    }
+    if (nowMs() >= deadline)
+      throw new ConversationBusyError(key, lockPath);
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
 // ../engine/src/quota.ts
-import { mkdirSync as mkdirSync2, readFileSync, writeFileSync } from "fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync } from "fs";
 var DEFAULT_THRESHOLD = 0.05;
 function num(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
@@ -645,7 +824,7 @@ function parseSnapshotDir(dir) {
   for (const { file, pool, window: win } of SNAPSHOT_V2_FILES) {
     let w = null;
     try {
-      const o = safeJson(readFileSync(`${dir}/${file}`, "utf8"));
+      const o = safeJson(readFileSync2(`${dir}/${file}`, "utf8"));
       w = typeof o === "object" && o !== null ? o : null;
     } catch {
       w = null;
@@ -737,7 +916,7 @@ function defaultRunner(bin, timeoutMs) {
   }
 }
 // ../engine/src/messages.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 var SEED_MAX_MESSAGES = 20;
 var SEED_MAX_CHARS = 4000;
 var SEED_HEADER = "--- Previous conversation (context restored after edits in the client) ---";
@@ -753,7 +932,7 @@ function isImagePart(p) {
   return typeof mt === "string" && mt.toLowerCase().startsWith("image/");
 }
 function messageHashes(messages) {
-  return messages.map((m) => createHash("sha256").update(JSON.stringify(m)).digest("hex").slice(0, 16));
+  return messages.map((m) => createHash2("sha256").update(JSON.stringify(m)).digest("hex").slice(0, 16));
 }
 function hashesArePrefix(stored, incoming) {
   if (stored.length > incoming.length)
@@ -798,9 +977,9 @@ ${body}
 ${SEED_FOOTER}`, warnings };
 }
 // ../engine/src/attachments.ts
-import { createHash as createHash2 } from "crypto";
-import { existsSync, lstatSync, mkdirSync as mkdirSync3, readdirSync as readdirSync2, readFileSync as readFileSync2, rmSync, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
-import { join } from "path";
+import { createHash as createHash3 } from "crypto";
+import { existsSync, lstatSync, mkdirSync as mkdirSync4, readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "fs";
+import { join as join2 } from "path";
 class AgyAttachmentError extends Error {
   detail;
   code = "AGY_ATTACHMENT_INVALID";
@@ -1003,7 +1182,7 @@ function stageAttachments(workdir, images) {
     return [];
   for (const image of images)
     validateImage(image);
-  const dir = join(workdir, ATTACHMENTS_DIR);
+  const dir = join2(workdir, ATTACHMENTS_DIR);
   if (existsSync(dir)) {
     const st = lstatSync(dir);
     if (st.isSymbolicLink()) {
@@ -1013,13 +1192,13 @@ function stageAttachments(workdir, images) {
       throw new AgyAttachmentError(`attachment directory ${ATTACHMENTS_DIR} exists and is not a directory \u2014 refusing to stage`);
     }
   } else {
-    mkdirSync3(dir, { recursive: true });
+    mkdirSync4(dir, { recursive: true });
   }
   const staged = [];
   for (const image of images) {
-    const hash = createHash2("sha256").update(image.data).digest("hex").slice(0, 16);
+    const hash = createHash3("sha256").update(image.data).digest("hex").slice(0, 16);
     const rel = `${ATTACHMENTS_DIR}/${hash}.${EXT_BY_MEDIA_TYPE[image.mediaType]}`;
-    const abs = join(workdir, rel);
+    const abs = join2(workdir, rel);
     if (existsSync(abs)) {
       const st = lstatSync(abs);
       if (st.isSymbolicLink()) {
@@ -1028,7 +1207,7 @@ function stageAttachments(workdir, images) {
       if (!st.isFile()) {
         throw new AgyAttachmentError(`refusing to stage ${rel}: the path exists and is not a file`);
       }
-      if (!bytesEqual(readFileSync2(abs), image.data)) {
+      if (!bytesEqual(readFileSync3(abs), image.data)) {
         throw new AgyAttachmentError(`refusing to stage ${rel}: a different file already occupies the content path`);
       }
     } else {
@@ -1040,7 +1219,7 @@ function stageAttachments(workdir, images) {
 }
 var STAGED_NAME = /^[0-9a-f]{16}\.(png|jpg|gif|webp)$/;
 function pruneAttachments(workdir, now = new Date, maxAgeMs = ATTACHMENT_MAX_AGE_MS) {
-  const dir = join(workdir, ATTACHMENTS_DIR);
+  const dir = join2(workdir, ATTACHMENTS_DIR);
   let entries;
   try {
     entries = readdirSync2(dir, { withFileTypes: true });
@@ -1051,10 +1230,10 @@ function pruneAttachments(workdir, now = new Date, maxAgeMs = ATTACHMENT_MAX_AGE
   for (const entry of entries) {
     if (!STAGED_NAME.test(entry.name))
       continue;
-    const path = join(dir, entry.name);
+    const path = join2(dir, entry.name);
     let mtime;
     try {
-      mtime = statSync2(path).mtime;
+      mtime = statSync3(path).mtime;
     } catch {
       continue;
     }
@@ -1193,7 +1372,7 @@ function openSessionStore(path, options = {}) {
   const load = (withPrune = true) => {
     let file;
     try {
-      file = parseStore(readFileSync3(path, "utf8"));
+      file = parseStore(readFileSync4(path, "utf8"));
     } catch {
       return { version: 2, sessions: {} };
     }
@@ -1202,8 +1381,8 @@ function openSessionStore(path, options = {}) {
     return file;
   };
   const persist = (file) => {
-    mkdirSync4(dirname(path), { recursive: true });
-    const tmp = join2(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
+    mkdirSync5(dirname(path), { recursive: true });
+    const tmp = join3(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
     writeFileSync3(tmp, `${JSON.stringify(file, null, "\t")}
 `);
     renameSync(tmp, path);
@@ -1230,9 +1409,9 @@ function openSessionStore(path, options = {}) {
   };
   const latest = (list) => list.reduce((best, e) => !best || (e.updatedAt ?? "") >= (best.updatedAt ?? "") ? e : best, undefined);
   const releaseLock = (fd) => {
-    closeSync2(fd);
+    closeSync3(fd);
     try {
-      unlinkSync(lockPath);
+      unlinkSync2(lockPath);
     } catch (err) {
       if (err?.code !== "ENOENT")
         throw err;
@@ -1241,17 +1420,17 @@ function openSessionStore(path, options = {}) {
   const acquireLock = async () => {
     const deadline = nowMs() + lockWaitMs;
     for (;; ) {
-      mkdirSync4(dirname(path), { recursive: true });
+      mkdirSync5(dirname(path), { recursive: true });
       let fd;
       try {
-        fd = openSync2(lockPath, "wx");
+        fd = openSync3(lockPath, "wx");
       } catch (err) {
         if (err?.code !== "EEXIST")
           throw err;
       }
       if (fd !== undefined) {
         try {
-          writeSync(fd, `${process.pid}
+          writeSync2(fd, `${process.pid}
 `);
           return fd;
         } catch (err) {
@@ -1263,7 +1442,7 @@ function openSessionStore(path, options = {}) {
       }
       let fresh;
       try {
-        fresh = nowMs() - statSync3(lockPath).mtimeMs <= lockStaleMs;
+        fresh = nowMs() - statSync4(lockPath).mtimeMs <= lockStaleMs;
       } catch {
         if (nowMs() >= deadline)
           throw new SessionStoreBusyError(lockPath);
@@ -1271,7 +1450,7 @@ function openSessionStore(path, options = {}) {
       }
       if (!fresh) {
         try {
-          unlinkSync(lockPath);
+          unlinkSync2(lockPath);
         } catch {}
         continue;
       }
@@ -1378,27 +1557,27 @@ function openSessionStore(path, options = {}) {
 
 // src/paths.ts
 import { homedir, tmpdir } from "os";
-import { isAbsolute, join as join3 } from "path";
+import { isAbsolute, join as join4 } from "path";
 function resolveStateDir(opts = {}) {
   const root = opts.override ?? xdgStateRoot(opts.env ?? process.env);
-  return join3(root, "agy-bridge");
+  return join4(root, "agy-bridge");
 }
 function xdgStateRoot(env) {
   const xdg = env["XDG_STATE_HOME"];
   if (xdg && isAbsolute(xdg))
     return xdg;
   const home = env["HOME"] || homedir();
-  return join3(home, ".local", "state");
+  return join4(home, ".local", "state");
 }
 function sessionMapPath(opts = {}) {
-  return join3(resolveStateDir(opts), "opencode-sessions.json");
+  return join4(resolveStateDir(opts), "opencode-sessions.json");
 }
 
 // src/language-model.ts
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 
 // src/turn.ts
-import { basename, dirname as dirname2 } from "path";
+import { basename, dirname as dirname2, join as join7 } from "path";
 
 // src/stream-tap.ts
 import { spawn as spawn3 } from "child_process";
@@ -1420,6 +1599,8 @@ function createTap(onLine, opts = {}) {
   const tap = {
     spawnImpl: (...args) => {
       child = spawnFn(...args);
+      if (opts.signal?.aborted)
+        tap.abort();
       child.stdout?.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
         let nl;
@@ -1455,8 +1636,8 @@ function createTap(onLine, opts = {}) {
 }
 
 // src/workdir.ts
-import { mkdtempSync, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync4 } from "fs";
-import { isAbsolute as isAbsolute2, join as join4 } from "path";
+import { mkdtempSync, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync5 } from "fs";
+import { isAbsolute as isAbsolute2, join as join5 } from "path";
 import { tmpdir as tmpdir2 } from "os";
 var SCRATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 function prepareWorkdir(mode, opts) {
@@ -1470,7 +1651,7 @@ function prepareWorkdir(mode, opts) {
     }
     let stat;
     try {
-      stat = statSync4(worktree);
+      stat = statSync5(worktree);
     } catch {
       stat = undefined;
     }
@@ -1480,7 +1661,7 @@ function prepareWorkdir(mode, opts) {
     return { dir: worktree, scratch: false };
   }
   const root = opts.scratchRoot ?? opts.tmpdir ?? tmpdir2();
-  return { dir: mkdtempSync(join4(root, "agy-run-")), scratch: true };
+  return { dir: mkdtempSync(join5(root, "agy-run-")), scratch: true };
 }
 function pruneScratch(root, now = new Date) {
   let entries;
@@ -1493,10 +1674,10 @@ function pruneScratch(root, now = new Date) {
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith("agy-run-"))
       continue;
-    const dir = join4(root, entry.name);
+    const dir = join5(root, entry.name);
     let mtime;
     try {
-      mtime = statSync4(dir).mtime;
+      mtime = statSync5(dir).mtime;
     } catch {
       continue;
     }
@@ -1505,7 +1686,7 @@ function pruneScratch(root, now = new Date) {
     for (const inner of readdirSync3(dir)) {
       if (inner === "run.log")
         continue;
-      rmSync2(join4(dir, inner), { recursive: true, force: true });
+      rmSync2(join5(dir, inner), { recursive: true, force: true });
     }
     pruned++;
   }
@@ -1525,13 +1706,42 @@ function mapClassification(c, ctx) {
   if (c.outcome === "transient_unavailable") {
     return { retryable: true, resume: false, message: "agy provider is temporarily unavailable" };
   }
+  if (c.outcome === "termination_unconfirmed") {
+    const trigger = c.reason.startsWith("termination_unconfirmed_") ? c.reason.slice("termination_unconfirmed_".length) : "unknown";
+    return {
+      retryable: false,
+      resume: false,
+      message: withLog(ctx, `agy termination could not be confirmed locally (trigger: ${trigger}) \u2014 the process ignored every termination signal, remote work may still be running, and side effects may be partial`)
+    };
+  }
   if (c.outcome === "timeout") {
+    if (ctx.recoveryAttempted) {
+      return {
+        retryable: false,
+        resume: false,
+        message: withLog(ctx, "agy timed out and could not be resumed \u2014 the one recovery attempt already ran and failed")
+      };
+    }
+    if (ctx.recoveryBlockedByPolicy) {
+      return {
+        retryable: false,
+        resume: false,
+        message: withLog(ctx, "agy timed out and could not be resumed \u2014 automatic recovery is currently restricted to new conversations pending verified agy CLI resume safety (timeout-recovery PRD slice 3)")
+      };
+    }
     const canResume = !ctx.resumed && ctx.conversationId !== undefined;
     if (canResume) {
       return {
         retryable: false,
         resume: true,
         message: `agy timed out mid-turn; resuming conversation ${ctx.conversationId}`
+      };
+    }
+    if (ctx.conversationId === undefined) {
+      return {
+        retryable: false,
+        resume: false,
+        message: withLog(ctx, "agy timed out and could not be resumed \u2014 no usable conversation id was captured")
       };
     }
     return {
@@ -1567,6 +1777,265 @@ function mapClassification(c, ctx) {
     resume: false,
     message: withLog(ctx, `agy returned an empty or invalid response (${c.reason})`)
   };
+}
+
+// src/diagnostics.ts
+import { lstatSync as lstatSync2, readdirSync as readdirSync4, rmSync as rmSync3, mkdirSync as mkdirSync7, writeFileSync as writeFileSync4, renameSync as renameSync2 } from "fs";
+import { randomUUID as randomUUID2 } from "crypto";
+import { tmpdir as tmpdir3 } from "os";
+import { join as join6 } from "path";
+var DIAGNOSTICS_DIRNAME = ".agy-diagnostics";
+var SUMMARY_FILENAME = "summary.json";
+var MAX_SUMMARY_BYTES = 8 * 1024;
+var MAX_CALL_GROUPS = 200;
+var MAX_FALLBACK_ENTRIES = 200;
+var DIAGNOSTICS_MAX_AGE_MS = SCRATCH_MAX_AGE_MS;
+var NO_DIAGNOSTICS_LOG = "(diagnostics unavailable \u2014 the call summary could not be written)";
+var CALL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function generateCallId() {
+  return randomUUID2();
+}
+function fallbackDiagnosticsDir() {
+  return join6(tmpdir3(), "agy-bridge-diagnostics-fallback");
+}
+function fallbackAttemptLogPathFor(callId, attemptIndex) {
+  return join6(fallbackDiagnosticsDir(), `${callId}-${attemptIndex}.log`);
+}
+function diagnosticsDirFor(workdir) {
+  return join6(workdir, DIAGNOSTICS_DIRNAME);
+}
+function callGroupDirFor(workdir, callId) {
+  return join6(diagnosticsDirFor(workdir), callId);
+}
+function attemptLogPathFor(workdir, callId, attemptIndex) {
+  return join6(callGroupDirFor(workdir, callId), `attempt-${attemptIndex}.log`);
+}
+function summaryPathFor(workdir, callId) {
+  return join6(callGroupDirFor(workdir, callId), SUMMARY_FILENAME);
+}
+function resolveAttemptLogPath(workdir, callId, attemptIndex) {
+  try {
+    mkdirSync7(callGroupDirFor(workdir, callId), { recursive: true, mode: 448 });
+    return attemptLogPathFor(workdir, callId, attemptIndex);
+  } catch {
+    try {
+      mkdirSync7(fallbackDiagnosticsDir(), { recursive: true, mode: 448 });
+      return fallbackAttemptLogPathFor(callId, attemptIndex);
+    } catch {
+      return join6(tmpdir3(), `agy-attempt-${callId}-${attemptIndex}.log`);
+    }
+  }
+}
+function observedSignal(timedOut, stalled, exitCode, escalatedSignal) {
+  if (escalatedSignal === "SIGKILL")
+    return "SIGKILL";
+  if (timedOut || stalled)
+    return "SIGTERM";
+  if (exitCode === null)
+    return "unknown";
+  return "none";
+}
+function buildAttemptDiagnostic(input) {
+  return {
+    attemptIndex: input.attemptIndex,
+    logPath: input.logPath,
+    mode: input.mode,
+    resumed: input.resumed,
+    idAvailable: input.conversationId !== undefined,
+    timeoutMsEffective: input.timeoutMsEffective,
+    stallMsEffective: input.stallMsEffective,
+    wallElapsedMs: input.wallElapsedMs,
+    exitCode: input.exitCode,
+    signal: observedSignal(input.timedOut, input.stalled, input.exitCode, input.escalatedSignal),
+    timedOut: input.timedOut,
+    stalled: input.stalled,
+    aborted: input.aborted,
+    classificationOutcome: input.classificationOutcome,
+    classificationReason: input.classificationReason
+  };
+}
+function boundedSummaryJson(summary) {
+  const fits = (obj) => {
+    const json = JSON.stringify(obj, null, 2);
+    return Buffer.byteLength(json, "utf8") <= MAX_SUMMARY_BYTES ? json : undefined;
+  };
+  const plain = fits({ ...summary, truncated: false });
+  if (plain !== undefined)
+    return { json: plain, truncated: false };
+  if (summary.attempts.length > 2) {
+    const omitted = summary.attempts.length - 2;
+    const shrunk = {
+      ...summary,
+      attempts: [summary.attempts[0], summary.attempts[summary.attempts.length - 1]],
+      truncated: true,
+      truncationNote: `${omitted} attempt entr${omitted === 1 ? "y" : "ies"} omitted to satisfy the ${MAX_SUMMARY_BYTES}-byte bound...[truncated]`
+    };
+    const shrunkJson = fits(shrunk);
+    if (shrunkJson !== undefined)
+      return { json: shrunkJson, truncated: true };
+  }
+  const placeholder = {
+    version: summary.version,
+    callId: summary.callId,
+    bridgeVersion: summary.bridgeVersion,
+    recoveryDisposition: summary.recoveryDisposition,
+    attempts: [],
+    createdAt: summary.createdAt,
+    completedAt: summary.completedAt,
+    truncated: true,
+    truncationNote: `record exceeded the ${MAX_SUMMARY_BYTES}-byte bound and was replaced with this placeholder; ${summary.attempts.length} attempt entries omitted...[truncated]`
+  };
+  return { json: JSON.stringify(placeholder, null, 2), truncated: true };
+}
+function writeCallSummary(workdir, callId, summary) {
+  const dir = callGroupDirFor(workdir, callId);
+  mkdirSync7(dir, { recursive: true, mode: 448 });
+  const { json } = boundedSummaryJson(summary);
+  const path = summaryPathFor(workdir, callId);
+  const tmp = join6(dir, `.${SUMMARY_FILENAME}.${process.pid}.tmp`);
+  writeFileSync4(tmp, json, { mode: 384 });
+  renameSync2(tmp, path);
+  return path;
+}
+function listCompletedCallGroups(diagnosticsDir) {
+  let entries;
+  try {
+    entries = readdirSync4(diagnosticsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const groups = [];
+  for (const entry of entries) {
+    if (entry.isSymbolicLink() || !entry.isDirectory())
+      continue;
+    if (!CALL_ID_PATTERN.test(entry.name))
+      continue;
+    const dir = join6(diagnosticsDir, entry.name);
+    const summary = join6(dir, SUMMARY_FILENAME);
+    try {
+      const st = lstatSync2(summary);
+      if (!st.isFile())
+        continue;
+      groups.push({ dir, mtimeMs: st.mtimeMs });
+    } catch {
+      continue;
+    }
+  }
+  return groups;
+}
+function removeCallGroup(dir) {
+  try {
+    rmSync3(dir, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function pruneCallGroups(groups, opts) {
+  const nowMs = opts.now.getTime();
+  let pruned = 0;
+  const survivors = [];
+  for (const g of groups) {
+    if (nowMs - g.mtimeMs > opts.maxAgeMs) {
+      if (removeCallGroup(g.dir))
+        pruned++;
+    } else {
+      survivors.push(g);
+    }
+  }
+  if (survivors.length > opts.maxGroups) {
+    survivors.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const excess = survivors.length - opts.maxGroups;
+    for (let i = 0;i < excess; i++) {
+      if (removeCallGroup(survivors[i].dir))
+        pruned++;
+    }
+  }
+  return pruned;
+}
+function pruneDiagnosticsUnder(diagnosticsDir, opts = {}) {
+  try {
+    let rootStat;
+    try {
+      rootStat = lstatSync2(diagnosticsDir);
+    } catch {
+      return 0;
+    }
+    if (!rootStat.isDirectory())
+      return 0;
+    const groups = listCompletedCallGroups(diagnosticsDir);
+    return pruneCallGroups(groups, {
+      now: opts.now ?? new Date,
+      maxAgeMs: opts.maxAgeMs ?? DIAGNOSTICS_MAX_AGE_MS,
+      maxGroups: opts.maxGroups ?? MAX_CALL_GROUPS
+    });
+  } catch {
+    return 0;
+  }
+}
+function pruneLooseLogFiles(rootDir, isOwned, opts) {
+  let rootStat;
+  try {
+    rootStat = lstatSync2(rootDir);
+  } catch {
+    return 0;
+  }
+  if (!rootStat.isDirectory())
+    return 0;
+  let entries;
+  try {
+    entries = readdirSync4(rootDir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  const nowMs = (opts.now ?? new Date).getTime();
+  const maxAgeMs = opts.maxAgeMs ?? DIAGNOSTICS_MAX_AGE_MS;
+  const maxEntries = opts.maxEntries ?? MAX_FALLBACK_ENTRIES;
+  let pruned = 0;
+  const survivors = [];
+  for (const entry of entries) {
+    if (entry.isSymbolicLink() || !entry.isFile())
+      continue;
+    if (!isOwned(entry.name))
+      continue;
+    const path = join6(rootDir, entry.name);
+    let st;
+    try {
+      st = lstatSync2(path);
+    } catch {
+      continue;
+    }
+    if (nowMs - st.mtimeMs > maxAgeMs) {
+      try {
+        rmSync3(path, { force: true });
+        pruned++;
+      } catch {
+        continue;
+      }
+    } else {
+      survivors.push({ path, mtimeMs: st.mtimeMs });
+    }
+  }
+  if (survivors.length > maxEntries) {
+    survivors.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const excess = survivors.length - maxEntries;
+    for (let i = 0;i < excess; i++) {
+      try {
+        rmSync3(survivors[i].path, { force: true });
+        pruned++;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return pruned;
+}
+function pruneFallbackDiagnostics(rootDir = fallbackDiagnosticsDir(), opts = {}) {
+  return pruneLooseLogFiles(rootDir, () => true, opts);
+}
+var LOOSE_TIER3_PATTERN = new RegExp(`^agy-attempt-${CALL_ID_PATTERN.source.slice(1, -1)}-\\d+\\.log$`, "i");
+function pruneLooseTier3Logs(rootDir = tmpdir3(), opts = {}) {
+  return pruneLooseLogFiles(rootDir, (name14) => LOOSE_TIER3_PATTERN.test(name14), opts);
 }
 
 // src/turn.ts
@@ -1605,13 +2074,38 @@ async function runTurn(deps, req) {
     scratchRoot: deps.config.scratchRoot,
     worktree: deps.worktree
   });
-  if (workdir.scratch)
+  const callId = generateCallId();
+  if (workdir.scratch) {
     pruneScratch(dirname2(workdir.dir));
+  } else {
+    pruneDiagnosticsUnder(diagnosticsDirFor(workdir.dir));
+  }
+  pruneFallbackDiagnostics();
+  pruneLooseTier3Logs();
   const staged = req.attachments === undefined ? [] : stageAttachments(workdir.dir, req.attachments);
   if (!workdir.scratch)
     pruneAttachments(workdir.dir);
   deps.store.prune().catch(() => {});
-  const logPath = `${workdir.dir}/run.log`;
+  const callStartedAt = new Date;
+  const attemptDiagnostics = [];
+  const finalizeDiagnostics = () => {
+    const recoveryAttempt = attemptDiagnostics.find((a) => a.mode === "recovery");
+    const recoveryDisposition = recoveryAttempt === undefined ? "not-attempted" : recoveryAttempt.classificationOutcome === "success" ? "attempted-success" : "attempted-failure";
+    const summary = {
+      version: 1,
+      callId,
+      bridgeVersion: "unknown",
+      recoveryDisposition,
+      attempts: attemptDiagnostics,
+      createdAt: callStartedAt.toISOString(),
+      completedAt: new Date().toISOString()
+    };
+    try {
+      return writeCallSummary(workdir.dir, callId, summary);
+    } catch {
+      return NO_DIAGNOSTICS_LOG;
+    }
+  };
   const binding = await deps.store.resolve(req.sessionId, req.hashes);
   const sessionKnown = binding !== undefined ? true : await deps.store.get(req.sessionId) !== undefined;
   let diverged = false;
@@ -1636,67 +2130,140 @@ async function runTurn(deps, req) {
   const prompt = (directive !== undefined ? `${directive}
 
 ` : "") + (diverged ? req.seedPrompt ?? req.prompt : req.prompt);
-  const attempt = async (resumeConversationId, resumed, turnPrompt) => {
+  const timeoutMsEffective = deps.config.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
+  const attempt = async (resumeConversationId, resumed, turnPrompt, isRecoveryAttempt) => {
+    const attemptIndex = attemptDiagnostics.length + 1;
+    const attemptLogPath = resolveAttemptLogPath(workdir.dir, callId, attemptIndex);
     const tap = createTap(inspectingOnLine, { signal: req.signal, spawnFn: deps.spawnFn });
-    const run = await runAgyStream({
-      bin: deps.bin,
-      prompt: turnPrompt,
-      workdir: workdir.dir,
-      timeoutMs: deps.config.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
-      model: req.modelArg,
-      resumeConversationId,
-      logPath,
-      spawnImpl: tap.spawnImpl,
-      promptViaStdin: deps.promptViaStdin ?? true
-    });
+    let run;
+    try {
+      run = await runAgyStream({
+        bin: deps.bin,
+        prompt: turnPrompt,
+        workdir: workdir.dir,
+        timeoutMs: timeoutMsEffective,
+        model: req.modelArg,
+        resumeConversationId,
+        logPath: attemptLogPath,
+        spawnImpl: tap.spawnImpl,
+        promptViaStdin: deps.promptViaStdin ?? true,
+        signal: req.signal,
+        ...deps.config.terminationGraceMs !== undefined ? { terminationGraceMs: deps.config.terminationGraceMs } : {},
+        ...deps.config.terminationSettleMs !== undefined ? { terminationSettleMs: deps.config.terminationSettleMs } : {}
+      });
+    } catch (err) {
+      throw new TurnError({
+        retryable: false,
+        resume: false,
+        message: `agy could not be started for this attempt: ${err instanceof Error ? err.message : String(err)}. Full log: ${finalizeDiagnostics()}`
+      });
+    }
     const classification = classifyRun({
       exitCode: run.exitCode,
       log: run.log,
       spawnError: run.spawnError,
       timedOut: run.timedOut,
       stalled: run.stalled,
+      terminationUnconfirmed: run.terminationUnconfirmed,
+      terminationTrigger: run.terminationTrigger,
       envelope: run.envelope,
       expectArtifact: false
     });
+    const conversationId = run.conversationId ?? tap.conversationId;
+    attemptDiagnostics.push(buildAttemptDiagnostic({
+      attemptIndex,
+      logPath: attemptLogPath,
+      mode: isRecoveryAttempt ? "recovery" : "initial",
+      resumed,
+      conversationId,
+      timeoutMsEffective,
+      stallMsEffective: DEFAULT_STALL_MS,
+      wallElapsedMs: run.elapsedMs,
+      exitCode: run.exitCode,
+      timedOut: run.timedOut,
+      stalled: run.stalled ?? false,
+      escalatedSignal: run.escalatedSignal,
+      aborted: false,
+      classificationOutcome: classification.outcome,
+      classificationReason: classification.reason
+    }));
     return {
       classification,
       run,
       resumed,
       diverged,
-      logPath,
-      conversationId: run.conversationId ?? tap.conversationId,
+      logPath: attemptLogPath,
+      conversationId,
       stagedAttachments: staged.length > 0 ? staged : undefined,
       attachmentsInspected
     };
   };
-  let result = await attempt(resumeId, resumeId !== undefined, prompt);
-  const persistAndThrowAbort = async () => {
-    if (result.conversationId)
-      await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
+  const wasOrdinaryContinuation = resumeId !== undefined;
+  let recoveryBudgetConsumed = false;
+  if (req.signal?.aborted) {
+    finalizeDiagnostics();
     throw abortError();
-  };
-  if (req.signal?.aborted)
-    await persistAndThrowAbort();
-  const canResume = result.classification.outcome === "timeout" && !result.resumed && result.conversationId !== undefined;
-  if (canResume) {
-    req.onResume?.();
-    result = await attempt(result.conversationId, true, prompt);
+  }
+  let conversationLock;
+  if (resumeId !== undefined) {
+    const lockDir = join7(resolveStateDir({ override: deps.config.stateDir }), "conversation-locks");
+    try {
+      conversationLock = await acquireConversationLock(lockDir, resumeId);
+    } catch (err) {
+      if (err instanceof ConversationBusyError) {
+        throw new TurnError({
+          retryable: false,
+          resume: false,
+          message: `another agy request is active for this conversation \u2014 wait for it to finish and retry. Full log: ${finalizeDiagnostics()}`
+        });
+      }
+      throw err;
+    }
+  }
+  try {
+    let result = await attempt(resumeId, wasOrdinaryContinuation, prompt, false);
+    const persistAndThrowAbort = async () => {
+      if (attemptDiagnostics.length > 0)
+        attemptDiagnostics[attemptDiagnostics.length - 1].aborted = true;
+      finalizeDiagnostics();
+      if (result.conversationId)
+        await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
+      throw abortError();
+    };
     if (req.signal?.aborted)
       await persistAndThrowAbort();
+    const RECOVERY_RESTRICTED_TO_NEW_CONVERSATIONS = true;
+    const recoveryBlockedByPolicy = RECOVERY_RESTRICTED_TO_NEW_CONVERSATIONS && wasOrdinaryContinuation && result.conversationId !== undefined;
+    const canResume = result.classification.outcome === "timeout" && !recoveryBudgetConsumed && result.conversationId !== undefined && !recoveryBlockedByPolicy;
+    let recoveryAttempted = false;
+    if (canResume) {
+      req.onResume?.();
+      if (req.signal?.aborted)
+        await persistAndThrowAbort();
+      recoveryBudgetConsumed = true;
+      recoveryAttempted = true;
+      result = await attempt(result.conversationId, true, prompt, true);
+      if (req.signal?.aborted)
+        await persistAndThrowAbort();
+    }
+    if (result.classification.outcome === "success") {
+      if (result.conversationId)
+        await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
+      return { ...result, logPath: finalizeDiagnostics() };
+    }
+    if (result.resumed)
+      await deps.store.rebind(req.sessionId, result.conversationId);
+    throw new TurnError(mapClassification(result.classification, {
+      logPath: finalizeDiagnostics(),
+      conversationId: result.conversationId,
+      resumed: result.resumed,
+      recoveryAttempted,
+      recoveryBlockedByPolicy,
+      detail: result.run.envelope?.error
+    }));
+  } finally {
+    conversationLock?.release();
   }
-  if (result.classification.outcome === "success") {
-    if (result.conversationId)
-      await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
-    return result;
-  }
-  if (result.resumed)
-    await deps.store.rebind(req.sessionId, result.conversationId);
-  throw new TurnError(mapClassification(result.classification, {
-    logPath,
-    conversationId: result.conversationId,
-    resumed: result.resumed,
-    detail: result.run.envelope?.error
-  }));
 }
 
 // src/models.ts
@@ -2110,7 +2677,7 @@ class AgyLanguageModel {
       return;
     })();
     const ctx = readSessionContext(options.providerOptions, options.headers);
-    const sessionId = ctx.sessionId ?? randomUUID2();
+    const sessionId = ctx.sessionId ?? randomUUID3();
     const incoming = options.prompt;
     if (!deps.config.imageInput && promptHasImage(incoming)) {
       return attachmentErrorStream(IMAGE_INPUT_DISABLED_MESSAGE);

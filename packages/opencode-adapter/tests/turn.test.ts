@@ -18,13 +18,22 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { mkdtemp, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { runTurn, TurnError, type TurnDeps } from "../src/turn";
-import { openSessionStore, type SessionStore } from "../src/session-store";
+import { openSessionStore, type SessionEntry, type SessionStore } from "../src/session-store";
 import { AgyConfigError, resolveConfig } from "../src/config";
+
+/** Manually-resolvable promise: lets a test pause runTurn mid-await and control exactly when it resumes. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
+}
 
 /** Placeholder baseline for tests with no stored session (any value works). */
 const H1 = ["h0"];
@@ -169,7 +178,9 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		expect(caught).toBeInstanceOf(TurnError);
 		expect(caught?.mapping.retryable).toBe(false);
 		expect(caught?.mapping.resume).toBe(false);
-		expect(caught?.mapping.message).toContain("/run.log");
+		// Slice 1: the fixed workdir run.log is retired — the Full log:
+		// target is now the bounded per-call summary under .agy-diagnostics.
+		expect(caught?.mapping.message).toMatch(/\.agy-diagnostics\/[^/]+\/summary\.json$/);
 		expect(calls).toContain("rebind");
 	});
 
@@ -244,7 +255,12 @@ describe("unit: turn — argv authority, quota gate, resume-once, abort (D2/D5/D
 		deps.config = resolveConfig({ workdirMode: "session", timeoutMs: 30_000 });
 		const result = await runTurn({ ...deps, worktree }, { prompt: "p", hashes: H1, sessionId: "s" });
 		expect(result.classification.outcome).toBe("success");
-		expect(result.logPath).toBe(join(worktree, "run.log"));
+		// Slice 1: logPath names the per-call bounded summary under
+		// <worktree>/.agy-diagnostics/<callId>/summary.json, never a fixed
+		// workdir run.log shared across calls.
+		expect(result.logPath.startsWith(join(worktree, ".agy-diagnostics"))).toBe(true);
+		expect(result.logPath.endsWith("summary.json")).toBe(true);
+		expect(existsSync(result.logPath)).toBe(true);
 		expect(spawns[0].cwd).toBe(worktree);
 		expect(spawns[0].args[spawns[0].args.indexOf("--add-dir") + 1]).toBe(worktree);
 
@@ -612,5 +628,439 @@ describe("unit: turn — image attachment bridge (spec image-input R2/R3/R6, des
 		expect(content.startsWith(`[Attached user image: ${rel}]`)).toBe(true);
 		expect(content).toContain("--- Previous conversation ---");
 		expect(content.endsWith("\n\nnew turn")).toBe(true);
+	});
+});
+
+describe("unit: turn — Fix 4 (audit finding): pre-spawn failures are classified, never a raw Error", () => {
+	test("a synchronous spawnFn throw (proxy for an unrecoverable log-open/pre-spawn failure) surfaces as a classified TurnError, never a raw unclassified Error", async () => {
+		const { deps } = await setup(() => {
+			throw new Error("boom: synchronous pre-spawn failure");
+		});
+		let caught: unknown;
+		try {
+			await runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-prespawn" });
+		} catch (err) {
+			caught = err;
+		}
+		// Distinguishing assertion: this is NOT the generic classified-run
+		// shape (e.g. a real ENOENT/spawn failure resolves via classifyRun
+		// with its own outcome/reason instead of throwing here at all) — it
+		// is specifically the pre-spawn window Fix 4 targets, still wrapped
+		// as a proper TurnError rather than leaking the raw Error.
+		expect(caught).toBeInstanceOf(TurnError);
+		expect((caught as TurnError).name).toBe("TurnError");
+		expect((caught as TurnError).mapping.message).toContain("boom: synchronous pre-spawn failure");
+		expect((caught as TurnError).mapping.message).toContain("could not be started");
+	});
+});
+
+describe("unit: turn — timeout-recovery PRD slice 2 (accounting separation, one-recovery-per-call)", () => {
+	test("ordinary continuation that times out is NOT auto-recovered (slice-3 restriction): exactly one spawn, honest policy message, still rebinds", async () => {
+		const spawns: string[][] = [];
+		const { store, calls, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			// Every spawn (there must only ever be one) times out but still
+			// captures a usable conversation id — proves the denial is a
+			// POLICY decision, not a missing-id fallback.
+			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-cont" }], exit: 124 });
+		});
+		await store.bind("sess-cont", "conv-stored", ["h0"]);
+		let caught: TurnError | undefined;
+		try {
+			await runTurn(deps, { prompt: "p", hashes: ["h0"], sessionId: "sess-cont" });
+		} catch (err) {
+			caught = err as TurnError;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		// The bug this slice fixes: continuation must not silently masquerade
+		// as "recovery already attempted" — it must never spawn a second
+		// child at all while the slice-3 restriction stands.
+		expect(spawns).toHaveLength(1);
+		expect(caught?.mapping.resume).toBe(false);
+		expect(caught?.mapping.retryable).toBe(false);
+		expect(caught?.mapping.message).toContain("restricted to new conversations");
+		// Must NOT be phrased as a spent recovery attempt — that would be
+		// dishonest: no recovery was ever spawned.
+		expect(caught?.mapping.message).not.toContain("recovery attempt already ran");
+		// Ordinary D5/R7 persistence (rebind-on-failed-continuation) is
+		// unaffected by the new policy gate.
+		expect(calls).toContain("rebind");
+	});
+
+	test("fresh conversation still gets exactly one recovery spawn on timeout, then a second timeout is terminal with a distinct budget-exhausted message — never a third spawn", async () => {
+		const spawns: string[][] = [];
+		const { deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return spawns.length === 1
+				? fakeChild({ lines: [{ event: "init", conversation_id: "conv-1" }], exit: 124 })
+				: fakeChild({ lines: [{ event: "init", conversation_id: "conv-2" }], exit: 124 });
+		});
+		let caught: TurnError | undefined;
+		try {
+			await runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-budget" });
+		} catch (err) {
+			caught = err as TurnError;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		expect(spawns).toHaveLength(2); // original + the one recovery spawn, never a third.
+		expect(caught?.mapping.resume).toBe(false);
+		expect(caught?.mapping.message).toContain("recovery attempt already ran");
+		// Distinct from the policy-restricted and missing-id wordings.
+		expect(caught?.mapping.message).not.toContain("restricted to new conversations");
+		expect(caught?.mapping.message).not.toContain("no usable conversation id");
+	});
+
+	test("timeout with no captured conversation id never spawns a recovery attempt and says so honestly", async () => {
+		const spawns: string[][] = [];
+		const { deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [], exit: 124 }); // no init event → no conversationId captured.
+		});
+		let caught: TurnError | undefined;
+		try {
+			await runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-noid" });
+		} catch (err) {
+			caught = err as TurnError;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		expect(spawns).toHaveLength(1);
+		expect(caught?.mapping.message).toContain("no usable conversation id");
+		expect(caught?.mapping.message).not.toContain("recovery attempt already ran");
+		expect(caught?.mapping.message).not.toContain("restricted to new conversations");
+	});
+
+	test("cancellation via onResume never authorizes the recovery spawn: aborting synchronously inside onResume stops the call at one spawn", async () => {
+		const controller = new AbortController();
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			// The only spawn ever expected: a timeout with a usable id,
+			// otherwise eligible for recovery were it not for the abort
+			// fired from inside onResume below.
+			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-onresume-ab" }], exit: 124 });
+		});
+		let name = "";
+		await runTurn(deps, {
+			prompt: "p",
+			hashes: H1,
+			sessionId: "sess-onresume-ab",
+			onResume: () => controller.abort(),
+			signal: controller.signal,
+		}).catch((err: Error) => {
+			name = err.name;
+		});
+		expect(name).toBe("AbortError");
+		// The abort raced INSIDE onResume, before the second attempt() call
+		// — it must never be allowed to spawn regardless.
+		expect(spawns).toHaveLength(1);
+		expect(await store.get("sess-onresume-ab")).toBe("conv-onresume-ab");
+	});
+});
+
+describe("unit: turn — Fix 1 (cancellation-before-first-spawn race)", () => {
+	test("abort while deps.store.resolve() is pending prevents the first spawn entirely (zero spawns)", async () => {
+		const controller = new AbortController();
+		let spawned = 0;
+		const { deps } = await setup(() => {
+			spawned++;
+			return fakeChild({ lines: [SUCCESS("c")], exit: 0 });
+		});
+		const gate = deferred<SessionEntry | undefined>();
+		deps.store = { ...deps.store, resolve: () => gate.promise };
+		const promise = runTurn(deps, {
+			prompt: "p",
+			hashes: H1,
+			sessionId: "s-race-resolve",
+			signal: controller.signal,
+		});
+		// Abort races the pending store.resolve() await — strictly before
+		// the first attempt() call in runTurn.
+		controller.abort();
+		gate.resolve(undefined);
+		let name = "";
+		await promise.catch((err: Error) => {
+			name = err.name;
+		});
+		expect(name).toBe("AbortError");
+		expect(spawned).toBe(0);
+	});
+
+	test("abort while deps.store.get() is pending (sessionKnown check) also prevents the first spawn (zero spawns)", async () => {
+		const controller = new AbortController();
+		let spawned = 0;
+		const { deps } = await setup(() => {
+			spawned++;
+			return fakeChild({ lines: [SUCCESS("c")], exit: 0 });
+		});
+		const gate = deferred<string | undefined>();
+		// resolve() returns undefined immediately (no binding) so runTurn's
+		// sessionKnown check falls through to await deps.store.get(...) —
+		// THAT is the await this test races the abort against.
+		deps.store = { ...deps.store, resolve: async () => undefined, get: () => gate.promise };
+		const promise = runTurn(deps, {
+			prompt: "p",
+			hashes: H1,
+			sessionId: "s-race-get",
+			signal: controller.signal,
+		});
+		controller.abort();
+		gate.resolve(undefined);
+		let name = "";
+		await promise.catch((err: Error) => {
+			name = err.name;
+		});
+		expect(name).toBe("AbortError");
+		expect(spawned).toBe(0);
+	});
+
+	test("normal cancellation (abort registered before it fires, while the child is running) is unaffected by the pre-spawn check", async () => {
+		// Regression guard: Fix 1's synchronous pre-spawn check must not
+		// interfere with the pre-existing "abort while running" path,
+		// which DOES spawn the child and only converts the outcome to
+		// AbortError after attempt() resolves.
+		const controller = new AbortController();
+		const { store, deps } = await setup(() =>
+			fakeChild({ lines: [{ event: "init", conversation_id: "conv-normal-ab" }], hold: true }),
+		);
+		const promise = runTurn(deps, {
+			prompt: "p",
+			hashes: H1,
+			sessionId: "sess-normal-ab",
+			signal: controller.signal,
+		});
+		setTimeout(() => controller.abort(), 20);
+		let name = "";
+		await promise.catch((err: Error) => {
+			name = err.name;
+		});
+		expect(name).toBe("AbortError");
+		expect(await store.get("sess-normal-ab")).toBe("conv-normal-ab");
+	});
+});
+
+describe("unit: turn — Fix 2 (honest diagnostic: missing id beats the policy restriction)", () => {
+	test("ordinary continuation that times out with NO usable id this attempt reports the missing-id cause, never the policy restriction", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			// No init event this attempt → no conversationId captured, even
+			// though the call continued an existing bound conversation.
+			return fakeChild({ lines: [], exit: 124 });
+		});
+		await store.bind("sess-cont-noid", "conv-stored", ["h0"]);
+		let caught: TurnError | undefined;
+		try {
+			await runTurn(deps, { prompt: "p", hashes: ["h0"], sessionId: "sess-cont-noid" });
+		} catch (err) {
+			caught = err as TurnError;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		expect(spawns).toHaveLength(1);
+		expect(caught?.mapping.message).toContain("no usable conversation id");
+		// The more specific missing-id cause wins even though this WAS an
+		// ordinary continuation — never masked by the policy wording.
+		expect(caught?.mapping.message).not.toContain("restricted to new conversations");
+		expect(caught?.mapping.message).not.toContain("recovery attempt already ran");
+	});
+
+	test("regression: ordinary continuation that times out WITH a usable id still reports the policy restriction unchanged", async () => {
+		// Same scenario as the existing slice-2 test above, restated here to
+		// pin the no-regression contract for Fix 2 explicitly: a captured
+		// id must still produce the policy-restriction message, not the
+		// missing-id one.
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-cont-2" }], exit: 124 });
+		});
+		await store.bind("sess-cont-withid", "conv-stored-2", ["h0"]);
+		let caught: TurnError | undefined;
+		try {
+			await runTurn(deps, { prompt: "p", hashes: ["h0"], sessionId: "sess-cont-withid" });
+		} catch (err) {
+			caught = err as TurnError;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		expect(spawns).toHaveLength(1);
+		expect(caught?.mapping.message).toContain("restricted to new conversations");
+		expect(caught?.mapping.message).not.toContain("no usable conversation id");
+		expect(caught?.mapping.message).not.toContain("recovery attempt already ran");
+	});
+});
+
+describe("unit: turn — termination_unconfirmed (bounded termination chain settlement)", () => {
+	/**
+	 * An unkillable child: emits its init line (a capturable conversation
+	 * id), then ignores EVERY kill attempt and never emits exit/close —
+	 * the stand-in for agy ignoring SIGTERM and SIGKILL. Only the engine's
+	 * bounded termination chain (small terminationGraceMs/terminationSettleMs
+	 * via the config seam) can settle a turn against this child.
+	 */
+	function neverDyingChild(conversationId: string) {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const child: any = new EventEmitter();
+		child.stdout = new Readable({ read() {} });
+		child.stderr = new Readable({ read() {} });
+		child.stdin = new Writable({
+			write(_chunk, _encoding, callback) {
+				callback();
+			},
+		});
+		child.killed = false;
+		child.kill = () => {
+			child.killed = true; // records the attempt; deliberately NEVER closes
+			return true;
+		};
+		child.stdout.push(Buffer.from(`${JSON.stringify({ event: "init", conversation_id: conversationId })}\n`));
+		return child;
+	}
+
+	/** Guard race: a pre-fix hang (no bounded settlement) must FAIL the test, not hang the suite. */
+	function guard<T>(p: Promise<T>, label: string): Promise<T> {
+		return Promise.race([
+			p,
+			new Promise<never>((_, reject) => {
+				setTimeout(() => reject(new Error(`${label}: still unresolved after 3000ms (pre-fix hang?)`)), 3000);
+			}),
+		]);
+	}
+
+	test("cap-triggered settlement: exactly ONE spawn, terminal TurnError with the unconfirmed message, NO binding persisted", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return neverDyingChild("conv-stub");
+		}, {
+			// Internal/test seams: tiny termination bounds so the forced
+			// settlement lands in milliseconds, not the engine's 5s defaults.
+			config: resolveConfig({
+				scratchRoot: "/tmp",
+				timeoutMs: 60,
+				terminationGraceMs: 20,
+				terminationSettleMs: 20,
+			}),
+		});
+		let caught: unknown;
+		try {
+			await guard(runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-term" }), "cap-triggered settlement");
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		const turnError = caught as TurnError;
+		// The replay gate stays === "timeout": termination_unconfirmed never
+		// recovers — exactly ONE spawn, no resume attempt, no second spawn.
+		expect(spawns).toHaveLength(1);
+		expect(turnError.mapping.retryable).toBe(false);
+		expect(turnError.mapping.message).toMatch(/termination could not be confirmed/i);
+		expect(turnError.mapping.message).toContain("timeout");
+		// Not the timeout family's message, and not the unmapped fallthrough.
+		expect(turnError.mapping.message).not.toMatch(/timed out and could not be resumed/);
+		expect(turnError.mapping.message).not.toMatch(/empty or invalid/i);
+		expect(turnError.mapping.message).toMatch(/\.agy-diagnostics\/[^/]+\/summary\.json$/);
+		// No success hash/binding may be persisted for an unconfirmed run.
+		expect(await store.get("sess-term")).toBeUndefined();
+	});
+
+	test("caller abort during the unconfirmed window keeps the public AbortError: binding persisted, unconfirmed-ness visible in diagnostics", async () => {
+		const controller = new AbortController();
+		let workdir = "";
+		const { store, deps } = await setup((_bin: string, _args: string[], opts: { cwd: string }) => {
+			workdir = opts.cwd;
+			return neverDyingChild("conv-ab-term");
+		}, {
+			config: resolveConfig({
+				scratchRoot: "/tmp",
+				timeoutMs: 30_000,
+				terminationGraceMs: 20,
+				terminationSettleMs: 20,
+			}),
+		});
+		setTimeout(() => controller.abort(), 30);
+		let name = "";
+		try {
+			await guard(
+				runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-ab-term", signal: controller.signal }),
+				"abort during the unconfirmed window",
+			);
+		} catch (err) {
+			name = (err as Error).name;
+		}
+		// Cancellation contract intact — never a TurnError for a caller abort.
+		expect(name).toBe("AbortError");
+		// Existing abort semantics preserved: the tapped id is persisted.
+		expect(await store.get("sess-ab-term")).toBe("conv-ab-term");
+		// Unconfirmed-ness is visible in the attempt diagnostic.
+		const groups = readdirSync(join(workdir, ".agy-diagnostics"));
+		expect(groups).toHaveLength(1);
+		const summary = JSON.parse(readFileSync(join(workdir, ".agy-diagnostics", groups[0], "summary.json"), "utf8")) as {
+			recoveryDisposition: string;
+			attempts: Array<{ aborted: boolean; classificationOutcome: string; signal: string }>;
+		};
+		expect(summary.attempts).toHaveLength(1);
+		expect(summary.attempts[0].classificationOutcome).toBe("termination_unconfirmed");
+		expect(summary.attempts[0].aborted).toBe(true);
+		// Escalation honesty: the forced-settlement run must not read as a
+		// plain SIGTERM report.
+		expect(summary.attempts[0].signal).toBe("SIGKILL");
+		expect(summary.recoveryDisposition).toBe("not-attempted");
+	});
+
+	test("after an unconfirmed settlement the SUBSEQUENT ordinary turn on the same session still works — no quarantine; failed continuation drops the binding as today", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return spawns.length === 1
+				? neverDyingChild("conv-unconfirmed")
+				: fakeChild({ lines: [{ event: "init", conversation_id: "conv-ok" }, SUCCESS("conv-ok")], exit: 0 });
+		}, {
+			config: resolveConfig({
+				scratchRoot: "/tmp",
+				timeoutMs: 60,
+				terminationGraceMs: 20,
+				terminationSettleMs: 20,
+			}),
+		});
+		// The unconfirmed turn RESUMES a bound conversation (lock path taken).
+		await store.bind("sess-q", "conv-held", ["h0"]);
+		let caught: unknown;
+		try {
+			await guard(runTurn(deps, { prompt: "p", hashes: ["h0"], sessionId: "sess-q" }), "continuation settlement");
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		expect((caught as TurnError).mapping.message).toMatch(/termination could not be confirmed/i);
+		expect(spawns).toHaveLength(1);
+		// A failed RESUMED attempt rebinds by the CAPTURED id (this fake
+		// reports a NEW id for the resumed attempt, which was never stored),
+		// so the stored parent binding survives — byte-identical to the
+		// confirmed-timeout family's rebind accounting today.
+		expect(await store.get("sess-q")).toBe("conv-held");
+		// Continuity unchanged: the next ordinary turn runs (resuming the
+		// surviving binding) and succeeds — no quarantine.
+		const result = await runTurn(deps, { prompt: "p", hashes: ["h0"], sessionId: "sess-q" });
+		expect(result.classification.outcome).toBe("success");
+		expect(spawns).toHaveLength(2);
+		expect(await store.get("sess-q")).toBe("conv-ok");
+	});
+
+	test("success path unchanged: one spawn, binding persisted (termination seams present but irrelevant)", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			return fakeChild({ lines: [{ event: "init", conversation_id: "conv-ok" }, SUCCESS("conv-ok")], exit: 0 });
+		}, {
+			config: resolveConfig({
+				scratchRoot: "/tmp",
+				timeoutMs: 30_000,
+				terminationGraceMs: 20,
+				terminationSettleMs: 20,
+			}),
+		});
+		const result = await runTurn(deps, { prompt: "p", hashes: H1, sessionId: "sess-success" });
+		expect(result.classification.outcome).toBe("success");
+		expect(spawns).toHaveLength(1);
+		expect(await store.get("sess-success")).toBe("conv-ok");
 	});
 });

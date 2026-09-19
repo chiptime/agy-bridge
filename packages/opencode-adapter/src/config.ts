@@ -38,6 +38,18 @@ export interface AgyAdapterOptions {
 	models?: Record<string, ModelConfig>;
 	/** Per-attempt hard cap in ms; engine defaults apply when unset. */
 	timeoutMs?: number;
+	/**
+	 * Internal/test seam, not public configuration: SIGTERM→SIGKILL
+	 * escalation delay forwarded to the engine's bounded termination chain.
+	 * Undefined → engine default (TERMINATION_GRACE_MS).
+	 */
+	terminationGraceMs?: number;
+	/**
+	 * Internal/test seam, not public configuration: settle deadline after
+	 * SIGKILL without a confirmed death. Undefined → engine default
+	 * (TERMINATION_FINAL_DEADLINE_MS).
+	 */
+	terminationSettleMs?: number;
 	/** Opt-in image attachment bridge (design D2). Default false: the
 	 * capability is NOT advertised and image parts fail with an actionable
 	 * error naming the enablement path. */
@@ -51,6 +63,10 @@ export interface AgyAdapterConfig {
 	quotaSnapshotDir?: string;
 	models: Record<string, ModelConfig>;
 	timeoutMs?: number;
+	/** Internal/test seam forwarded to the engine; undefined → engine defaults. */
+	terminationGraceMs?: number;
+	/** Internal/test seam forwarded to the engine; undefined → engine defaults. */
+	terminationSettleMs?: number;
 	/** Resolved image-bridge flag; always present after resolveConfig. */
 	imageInput: boolean;
 }
@@ -117,6 +133,18 @@ export function resolveConfig(options: Partial<AgyAdapterOptions> = {}): AgyAdap
 	if (options.timeoutMs !== undefined && !isPositiveInt(options.timeoutMs)) {
 		throw new AgyConfigError("timeoutMs", `timeoutMs must be a positive integer, got ${String(options.timeoutMs)}`);
 	}
+	if (options.terminationGraceMs !== undefined && !isPositiveInt(options.terminationGraceMs)) {
+		throw new AgyConfigError(
+			"terminationGraceMs",
+			`terminationGraceMs must be a positive integer, got ${String(options.terminationGraceMs)}`,
+		);
+	}
+	if (options.terminationSettleMs !== undefined && !isPositiveInt(options.terminationSettleMs)) {
+		throw new AgyConfigError(
+			"terminationSettleMs",
+			`terminationSettleMs must be a positive integer, got ${String(options.terminationSettleMs)}`,
+		);
+	}
 	if (options.imageInput !== undefined && typeof options.imageInput !== "boolean") {
 		throw new AgyConfigError(
 			"imageInput",
@@ -130,6 +158,8 @@ export function resolveConfig(options: Partial<AgyAdapterOptions> = {}): AgyAdap
 		quotaSnapshotDir: options.quotaSnapshotDir,
 		models,
 		timeoutMs: options.timeoutMs,
+		terminationGraceMs: options.terminationGraceMs,
+		terminationSettleMs: options.terminationSettleMs,
 		imageInput: options.imageInput ?? false,
 	};
 }

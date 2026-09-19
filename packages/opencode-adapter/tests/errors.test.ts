@@ -91,3 +91,66 @@ describe("unit: errors — classifyRun family to provider semantics", () => {
 		expect(m.message).toMatch(/empty|invalid/i);
 	});
 });
+
+describe("unit: errors — timeout-recovery PRD slice 2 (honest, distinct recovery-denial reasons)", () => {
+	test("recoveryAttempted: the call's one recovery spawn already ran and failed — never phrased as a fresh resume offer", () => {
+		const m = mapClassification(
+			{ outcome: "timeout", reason: "agy_print_wait_timeout" },
+			{ ...ctx, conversationId: "conv-1", resumed: true, recoveryAttempted: true },
+		);
+		expect(m.resume).toBe(false);
+		expect(m.retryable).toBe(false);
+		expect(m.message).toContain("recovery attempt already ran");
+		expect(m.message).toContain("/w/run.log");
+	});
+
+	test("recoveryBlockedByPolicy: continuation timed out but recovery was never attempted (slice-3 restriction) — distinct from budget-exhausted", () => {
+		const m = mapClassification(
+			{ outcome: "timeout", reason: "agy_print_wait_timeout" },
+			{ ...ctx, conversationId: "conv-1", resumed: true, recoveryBlockedByPolicy: true },
+		);
+		expect(m.resume).toBe(false);
+		expect(m.retryable).toBe(false);
+		expect(m.message).toContain("restricted to new conversations");
+		expect(m.message).not.toContain("recovery attempt already ran");
+	});
+
+	test("recoveryAttempted takes precedence when (defensively) both facts are somehow set", () => {
+		const m = mapClassification(
+			{ outcome: "timeout", reason: "timeout" },
+			{ ...ctx, conversationId: "conv-1", resumed: true, recoveryAttempted: true, recoveryBlockedByPolicy: true },
+		);
+		expect(m.message).toContain("recovery attempt already ran");
+		expect(m.message).not.toContain("restricted to new conversations");
+	});
+});
+
+describe("unit: errors — termination_unconfirmed (bounded termination chain settlement)", () => {
+	test.each(["timeout", "stall", "abort"])(
+		"termination_unconfirmed_%s: non-retryable, non-resumable, honest trigger-named message with the log path",
+		(trigger) => {
+			const m = mapClassification(
+				{ outcome: "termination_unconfirmed", reason: `termination_unconfirmed_${trigger}` } as Classification,
+				{ ...ctx, conversationId: "conv-1" },
+			);
+			expect(m.retryable).toBe(false);
+			expect(m.resume).toBe(false);
+			// Never falls through to the timeout family's resume offer…
+			expect(m.message).not.toContain("resuming conversation");
+			// …nor to the unmapped-family fallthrough.
+			expect(m.message).not.toMatch(/empty or invalid/i);
+			expect(m.message).toContain(trigger);
+			expect(m.message).toMatch(/termination could not be confirmed/i);
+			expect(m.message).toMatch(/remote work may still be running|side effects may be partial/i);
+			expect(m.message).toContain("/w/run.log");
+		},
+	);
+
+	test("bare termination_unconfirmed (no trigger suffix) maps honestly without inventing a trigger", () => {
+		const m = mapClassification({ outcome: "termination_unconfirmed", reason: "termination_unconfirmed" }, ctx);
+		expect(m.retryable).toBe(false);
+		expect(m.resume).toBe(false);
+		expect(m.message).toContain("unknown");
+		expect(m.message).toContain("/w/run.log");
+	});
+});

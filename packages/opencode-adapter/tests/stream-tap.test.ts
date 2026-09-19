@@ -103,4 +103,22 @@ describe("unit: stream-tap — same-tick line tap (D1) and abort kill (D2)", () 
 		expect(tap.conversationId).toBe("conv-sig");
 		await promise;
 	});
+
+	test("Fix 1: a signal ALREADY aborted before spawnImpl runs kills the child immediately — never depends on a future 'abort' event", async () => {
+		const child = fakeChild();
+		const controller = new AbortController();
+		// Aborted BEFORE createTap is even called: addEventListener("abort",
+		// ...) registered inside createTap below can never fire for this —
+		// the event already happened. The only way this child still gets
+		// killed is the synchronous opts.signal.aborted check at spawnImpl
+		// time (Fix 1's defense-in-depth in stream-tap.ts).
+		controller.abort();
+		const tap = createTap(undefined, { spawnFn: () => child, signal: controller.signal });
+		// tap.spawnImpl runs synchronously inside runAgyStream's promise
+		// executor (packages/engine/src/spawn.ts has no await before
+		// invoking it), so by the time runWith's own await resolves the
+		// kill must already have happened.
+		await runWith(child, tap.spawnImpl);
+		expect(child.killed).toBe(true);
+	});
 });

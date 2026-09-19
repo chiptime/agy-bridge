@@ -48,6 +48,19 @@ export function createTap(onLine?: (line: string) => void, opts: TapOptions = {}
 		// engine's readline: chunk broadcast then reaches both consumers.
 		spawnImpl: ((...args: Parameters<typeof spawn>) => {
 			child = spawnFn(...args);
+			// Fix 1 (already-aborted-signal defense): opts.signal may
+			// already be aborted by the time this spawnImpl call runs
+			// (e.g. a caller that did not, or could not, re-check
+			// signal.aborted immediately before spawning). The
+			// addEventListener("abort", ...) below never fires
+			// retroactively for a signal that was already aborted at
+			// listener-registration time (standard AbortSignal/
+			// EventTarget semantics) — without this check the child
+			// would run unabated until its own timeout. Route it
+			// through the SAME kill path a live abort takes (SIGTERM →
+			// agy flushes gracefully → normal classification
+			// downstream), never a synthesized/different error.
+			if (opts.signal?.aborted) tap.abort();
 			child.stdout?.on("data", (chunk: Buffer) => {
 				buffer += chunk.toString("utf8");
 				let nl: number;
