@@ -275,10 +275,11 @@ describe("integration: streamSimple — session key, workdir, log containment", 
 		expect(await store.get("sess-key")).toBe("conv-k");
 		expect(spawns[0].cwd).toBe(workdir);
 		expect(spawns[0].args[spawns[0].args.indexOf("--add-dir") + 1]).toBe(workdir);
-		// Log containment: a fresh agy-run-* dir under logRoot holds run.log.
+		// Log containment: a fresh agy-run-* dir under logRoot holds the
+		// attempt's own log file.
 		const scratch = readdirSync(root).filter((d) => d.startsWith("agy-run-"));
 		expect(scratch.length).toBeGreaterThanOrEqual(1);
-		expect(existsSync(join(root, scratch[0], "run.log"))).toBe(true);
+		expect(existsSync(join(root, scratch[0], "attempt-1.log"))).toBe(true);
 		expect(readdirSync(workdir)).toEqual([]);
 	});
 
@@ -390,7 +391,7 @@ describe("integration: streamSimple — resume-once, error terminals, abort (R8,
 		expect(await store.get("s-resume")).toBe("conv-2");
 	});
 
-	test("repeat timeout is terminal: rebind (fresh next turn), errorMessage carries the run.log path", async () => {
+	test("repeat timeout is terminal: rebind (fresh next turn), errorMessage carries the resume attempt's log path", async () => {
 		const { store, spawns, drain } = await setup(() =>
 			fakeChild({ lines: [{ event: "init", conversation_id: "conv-x" }], exit: 124 }),
 		);
@@ -400,7 +401,7 @@ describe("integration: streamSimple — resume-once, error terminals, abort (R8,
 		expect(last?.type).toBe("error");
 		if (last?.type === "error") {
 			expect(last.reason).toBe("error");
-			expect(last.error.errorMessage ?? "").toContain("run.log");
+			expect(last.error.errorMessage ?? "").toContain("attempt-2.log");
 		}
 		expect(await store.getEntry("s-twice")).toBeUndefined();
 	});
@@ -418,7 +419,7 @@ describe("integration: streamSimple — resume-once, error terminals, abort (R8,
 		if (last?.type === "error") {
 			expect(last.reason).toBe("error");
 			expect(last.error.errorMessage ?? "").toContain("agy exploded");
-			expect(last.error.errorMessage ?? "").toContain("run.log");
+			expect(last.error.errorMessage ?? "").toContain("attempt-1.log");
 			expect(last.error.stopReason).toBe("error");
 		}
 		expect(await store.getEntry("s-fail")).toBeUndefined();
@@ -503,16 +504,16 @@ describe("integration: streamSimple — model resolution", () => {
 	});
 });
 
-// The engine's run.log captures every streamed line (containment evidence).
-describe("integration: streamSimple — run.log evidence", () => {
-	test("scripted NDJSON lines land in the scratch run.log", async () => {
+// The engine's per-attempt log captures every streamed line (containment evidence).
+describe("integration: streamSimple — attempt log evidence", () => {
+	test("scripted NDJSON lines land in the scratch attempt log", async () => {
 		const { root, drain } = await setup(() =>
 			fakeChild({ lines: [{ event: "init", conversation_id: "c" }, STEP_TOOL_ACTIVE, SUCCESS("c")], exit: 0 }),
 		);
 		await drain({ messages: [userMsg("q")] }, { sessionId: "s-log" });
 		const scratch = readdirSync(root).find((d) => d.startsWith("agy-run-"));
 		expect(scratch).toBeDefined();
-		const log = readFileSync(join(root, scratch!, "run.log"), "utf8");
+		const log = readFileSync(join(root, scratch!, "attempt-1.log"), "utf8");
 		expect(log).toContain('"step_update"');
 		expect(log).toContain('"result"');
 	});

@@ -62,6 +62,28 @@ export function mapClassification(c: Classification, ctx: ErrorContext): ErrorMa
 	if (c.outcome === "transient_unavailable") {
 		return { retryable: true, resumeEligible: false, finalize: "error", message: "agy provider is temporarily unavailable" };
 	}
+	if (c.outcome === "termination_unconfirmed") {
+		// Bounded-termination chain forced settlement: the child ignored
+		// SIGTERM and SIGKILL (or every kill attempt threw) and never
+		// confirmed death before the settle deadline. Checked BEFORE the
+		// timeout family: without this branch the outcome would silently
+		// fall through to the unmapped-family message below. retryable is
+		// FALSE because pi's host auto-retries whenever the message carries
+		// a "(retryable)" marker — an unconfirmed settlement must never be
+		// auto-retried into a conversation whose remote state is unknown.
+		const trigger = c.reason.startsWith("termination_unconfirmed_")
+			? c.reason.slice("termination_unconfirmed_".length)
+			: "unknown";
+		return {
+			retryable: false,
+			resumeEligible: false,
+			finalize: "error",
+			message: withLog(
+				ctx,
+				`agy termination could not be confirmed locally (trigger: ${trigger}) — the process ignored every termination signal, remote work may still be running, and side effects may be partial`,
+			),
+		};
+	}
 	if (c.outcome === "timeout") {
 		const resumeEligible = !ctx.resumed && ctx.conversationId !== undefined;
 		if (resumeEligible) {

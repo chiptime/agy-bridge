@@ -115,3 +115,38 @@ describe("unit: errors — abort terminal (R3)", () => {
 		expect(m.message).toMatch(/abort/i);
 	});
 });
+
+describe("unit: errors — termination_unconfirmed (bounded termination chain settlement)", () => {
+	test.each(["timeout", "stall", "abort"])(
+		"termination_unconfirmed_%s: non-retryable, finalize error, honest trigger-named message with the log path",
+		(trigger) => {
+			const m = mapClassification(
+				{ outcome: "termination_unconfirmed", reason: `termination_unconfirmed_${trigger}` } as Classification,
+				{ ...ctx, conversationId: "conv-1" },
+			);
+			expect(m.retryable).toBe(false);
+			expect(m.resumeEligible).toBe(false);
+			expect(m.finalize).toBe("error");
+			// The host auto-retries when the message carries "(retryable)" —
+			// an unconfirmed settlement must NEVER be auto-retried.
+			expect(m.message).not.toContain("(retryable)");
+			// Never falls through to the timeout family's resume offer…
+			expect(m.message).not.toContain("resuming conversation");
+			// …nor to the unmapped-family fallthrough.
+			expect(m.message).not.toMatch(/empty or invalid/i);
+			expect(m.message).toContain(trigger);
+			expect(m.message).toMatch(/termination could not be confirmed/i);
+			expect(m.message).toMatch(/remote work may still be running|side effects may be partial/i);
+			expect(m.message).toContain("/w/run.log");
+		},
+	);
+
+	test("bare termination_unconfirmed (no trigger suffix) maps honestly without inventing a trigger", () => {
+		const m = mapClassification({ outcome: "termination_unconfirmed", reason: "termination_unconfirmed" }, ctx);
+		expect(m.retryable).toBe(false);
+		expect(m.resumeEligible).toBe(false);
+		expect(m.finalize).toBe("error");
+		expect(m.message).toContain("unknown");
+		expect(m.message).toContain("/w/run.log");
+	});
+});

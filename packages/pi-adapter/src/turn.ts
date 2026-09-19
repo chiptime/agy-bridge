@@ -29,8 +29,10 @@
  */
 import {
 	AgyAttachmentError,
+	acquireConversationLock,
 	attachmentDirective,
 	classifyRun,
+	ConversationBusyError,
 	extractAttachments,
 	hashesArePrefix,
 	messageHashes,
@@ -42,6 +44,7 @@ import {
 	stageAttachments,
 	unsupportedAttachmentsMessage,
 	type Classification,
+	type ConversationLock,
 	type SpawnRun,
 } from "agy-bridge-engine";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -51,6 +54,7 @@ import { basename, join } from "node:path";
 import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { DebugLogger } from "./debug";
 import type { BridgeState } from "./lifecycle";
+import { resolveStateDir } from "./paths";
 import { mapClassification, type ErrorMapping } from "./errors";
 import { mapPiPrompt, toPromptMessages } from "./messages";
 import { sessionKey, type SessionStore } from "./session-store";
@@ -88,12 +92,14 @@ interface AttemptResult {
 	run: SpawnRun;
 	resumed: boolean;
 	conversationId?: string;
+	/** This attempt's own exclusive log file (never shared across attempts). */
+	logPath: string;
 }
 
 export interface TurnResult extends AttemptResult {
 	/** v1.1: the visible thread diverged from agy's history; a fresh, seeded conversation was started. */
 	diverged: boolean;
-	/** Absolute path of this turn's run.log (fresh agy-run-* scratch dir under deps.logRoot). */
+	/** Absolute path of the FINAL attempt's log file (inside a fresh agy-run-* scratch dir under deps.logRoot). */
 	logPath: string;
 	/** The prompt actually forwarded this turn (directive + divergence/seed decision). */
 	prompt: string;
@@ -148,6 +154,12 @@ export interface TurnDeps {
 	workdir?: string;
 	/** Scratch root for per-turn run.log dirs; default os.tmpdir(). */
 	logRoot?: string;
+	/**
+	 * Absolute state dir root (config.stateDir): roots the shared
+	 * per-conversation exclusion lock dir. Absent → the XDG default
+	 * resolution (paths.resolveStateDir) applies.
+	 */
+	stateDir?: string;
 	/** Injectable spawn for tests (fed to the stream tap). */
 	spawnFn?: typeof spawn;
 	/**
@@ -155,6 +167,18 @@ export interface TurnDeps {
 	 * argv. Default off = the frozen argv transport (--print <prompt>).
 	 */
 	promptViaStdin?: boolean;
+	/**
+	 * Internal/test seam, not public configuration: SIGTERM→SIGKILL
+	 * escalation delay forwarded to the engine's bounded termination chain.
+	 * Undefined → engine default (TERMINATION_GRACE_MS).
+	 */
+	terminationGraceMs?: number;
+	/**
+	 * Internal/test seam, not public configuration: settle deadline after
+	 * SIGKILL without a confirmed death. Undefined → engine default
+	 * (TERMINATION_FINAL_DEADLINE_MS).
+	 */
+	terminationSettleMs?: number;
 	/**
 	 * Lifecycle registry (R6): when present, the turn registers itself
 	 * in-flight, notes tapped conversation ids, and keeps the binding
@@ -340,6 +364,10 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 	const note = (id: string | undefined) => {
 		if (id !== undefined) deps.state?.noteConversationId(key, id);
 	};
+	// Per-conversation exclusion lock (mirrors the opencode sibling):
+	// acquired below ONLY when this turn will RESUME a known conversation
+	// id, and released on EVERY exit path via the finally at the bottom.
+	let conversationLock: ConversationLock | undefined;
 	try {
 		// Workdir authority: only deps/config or the pi turn's own cwd — never
 		// anything derived from prompt content (threat row b).
@@ -464,12 +492,18 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			resume: resumeId !== undefined,
 			diverged,
 		});
-		// Per-turn scratch dir keeps run.log out of the user's project.
-		const logPath = join(mkdtempSync(join(deps.logRoot ?? tmpdir(), "agy-run-")), "run.log");
+		// Per-turn scratch dir keeps run evidence out of the user's project;
+		// each ATTEMPT gets its own exclusive log file inside it — the old
+		// single shared run.log let the resume attempt (mode 'w') truncate
+		// attempt 1's evidence.
+		const turnDir = mkdtempSync(join(deps.logRoot ?? tmpdir(), "agy-run-"));
+		let attemptCount = 0;
 		const attempt = async (
 			resumeConversationId: string | undefined,
 			resumed: boolean,
 		): Promise<AttemptResult> => {
+			attemptCount++;
+			const attemptLogPath = join(turnDir, `attempt-${attemptCount}.log`);
 			const tap = createTap({
 				signal,
 				spawnFn: deps.spawnFn,
@@ -502,8 +536,16 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				timeoutMs: deps.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
 				model: req.modelArg,
 				resumeConversationId,
-				logPath,
+				logPath: attemptLogPath,
 				spawnImpl: tap.spawnImpl,
+				// Cancellation drives the engine's bounded termination chain
+				// directly (terminationTrigger "abort", bounded abort hangs),
+				// alongside the tap's own kill path above.
+				signal,
+				// Internal/test seams (deps → engine); undefined → engine
+				// termination constants.
+				...(deps.terminationGraceMs !== undefined ? { terminationGraceMs: deps.terminationGraceMs } : {}),
+				...(deps.terminationSettleMs !== undefined ? { terminationSettleMs: deps.terminationSettleMs } : {}),
 				...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
 				...(req.mode !== undefined ? { mode: req.mode } : {}),
 			});
@@ -513,6 +555,12 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				spawnError: run.spawnError,
 				timedOut: run.timedOut,
 				stalled: run.stalled,
+				// Bounded termination chain settlement: forwarded so the engine
+				// can classify the run as termination_unconfirmed (checked
+				// BEFORE the timeout family) instead of misreading it as a
+				// plain timeout.
+				terminationUnconfirmed: run.terminationUnconfirmed,
+				terminationTrigger: run.terminationTrigger,
 				envelope: run.envelope,
 				expectArtifact: false,
 			});
@@ -524,9 +572,35 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				durationMs: Date.now() - startedAt,
 				...(conversationId !== undefined ? { conversationId } : {}),
 			});
-			return { classification, run, resumed, conversationId };
+			return { classification, run, resumed, conversationId, logPath: attemptLogPath };
 		};
 		const resumeAttemptId = diverged ? undefined : entry?.conversationId;
+		// Per-conversation exclusion lock (timeout-recovery PRD concurrency
+		// matrix): ONLY a turn that will RESUME a known conversation id takes
+		// the lock — held across the whole attempt loop (success, TurnError,
+		// TurnAborted, and termination_unconfirmed alike) via the finally at
+		// the bottom of this function. A FRESH conversation takes NO lock:
+		// each request creates its own agy conversation, so the
+		// same-conversation invariant holds there by construction.
+		if (resumeAttemptId !== undefined) {
+			const lockDir = join(resolveStateDir({ override: deps.stateDir }), "conversation-locks");
+			try {
+				conversationLock = await acquireConversationLock(lockDir, resumeAttemptId);
+			} catch (err) {
+				if (err instanceof ConversationBusyError) {
+					// Typed, non-retryable terminal BEFORE any spawn: the
+					// message must never carry a "(retryable)" marker (pi's
+					// host regex-matches it for auto-retry).
+					throw new TurnError({
+						retryable: false,
+						resumeEligible: false,
+						finalize: "error",
+						message: `another agy request is active for this conversation — wait for it to finish and retry`,
+					});
+				}
+				throw err;
+			}
+		}
 		let result = await attempt(resumeAttemptId, resumeAttemptId !== undefined);
 		note(result.conversationId);
 		const persistAndThrowAbort = async (r: AttemptResult): Promise<never> => {
@@ -571,7 +645,7 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			return {
 				...result,
 				diverged,
-				logPath,
+				logPath: result.logPath,
 				prompt,
 				...(staged.length > 0 ? { stagedAttachments: staged } : {}),
 				attachmentsInspected,
@@ -592,13 +666,17 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		});
 		throw new TurnError(
 			mapClassification(result.classification, {
-				logPath,
+				logPath: result.logPath,
 				conversationId: result.conversationId,
 				resumed: result.resumed,
 				detail: result.run.envelope?.error,
 			}),
 		);
 	} finally {
+		// Every exit path releases the conversation lock — never throwing
+		// over a TurnError/TurnAborted, and never leaking a lock across a
+		// forced settlement.
+		conversationLock?.release();
 		if (tracked !== undefined) deps.state?.endTurn(key, tracked);
 	}
 }

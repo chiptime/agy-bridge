@@ -174,6 +174,12 @@ export interface AskAgyDeps {
 	timeoutMs?: number;
 	/** Scratch root for per-run run.log dirs; default os.tmpdir(). */
 	logRoot?: string;
+	/**
+	 * Absolute state dir root (config.stateDir): roots the shared
+	 * per-conversation exclusion lock dir. Absent → the XDG default
+	 * resolution applies.
+	 */
+	stateDir?: string;
 	/** Injectable spawn for tests (fed to the stream tap). */
 	spawnFn?: typeof spawn;
 	/** D1 engine seam: the prompt rides stdin, never argv. Default off. */
@@ -358,6 +364,7 @@ export function createAskAgyTool(deps: AskAgyDeps) {
 						...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
 						workdir: details.workdir,
 						...(deps.logRoot !== undefined ? { logRoot: deps.logRoot } : {}),
+						...(deps.stateDir !== undefined ? { stateDir: deps.stateDir } : {}),
 						...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 						...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
 						...(deps.state !== undefined ? { state: deps.state } : {}),

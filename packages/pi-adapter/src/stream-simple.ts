@@ -61,6 +61,12 @@ export interface StreamSimpleDeps {
 	workdir?: string;
 	/** Scratch root for per-turn run.log dirs; default os.tmpdir(). */
 	logRoot?: string;
+	/**
+	 * Absolute state dir root (config.stateDir): roots the shared
+	 * per-conversation exclusion lock dir. Absent → the XDG default
+	 * resolution applies.
+	 */
+	stateDir?: string;
 	/** Injectable spawn for tests (fed to the stream tap). */
 	spawnFn?: typeof spawn;
 	/** Wall-clock seam for the partial timestamp. */
@@ -70,6 +76,10 @@ export interface StreamSimpleDeps {
 	 * argv. Default off = the frozen argv transport (--print <prompt>).
 	 */
 	promptViaStdin?: boolean;
+	/** Internal/test seam forwarded to runTurn; undefined → engine default. */
+	terminationGraceMs?: number;
+	/** Internal/test seam forwarded to runTurn; undefined → engine default. */
+	terminationSettleMs?: number;
 	/** Lifecycle registry (R6); forwarded to runTurn when present. */
 	state?: BridgeState;
 	/** Opt-in debug sink (v0.2 R11/D11); forwarded to runTurn (ids/durations only). */
@@ -294,6 +304,9 @@ export function createStreamSimple(
 						...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
 						...(deps.workdir !== undefined ? { workdir: deps.workdir } : {}),
 						...(deps.logRoot !== undefined ? { logRoot: deps.logRoot } : {}),
+						...(deps.stateDir !== undefined ? { stateDir: deps.stateDir } : {}),
+						...(deps.terminationGraceMs !== undefined ? { terminationGraceMs: deps.terminationGraceMs } : {}),
+						...(deps.terminationSettleMs !== undefined ? { terminationSettleMs: deps.terminationSettleMs } : {}),
 					...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 					...(deps.promptViaStdin !== undefined ? { promptViaStdin: deps.promptViaStdin } : {}),
 					...(deps.state !== undefined ? { state: deps.state } : {}),

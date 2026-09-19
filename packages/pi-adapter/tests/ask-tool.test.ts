@@ -366,13 +366,13 @@ describe("unit: ask-tool — progress, prune, plumbing", () => {
 		expect(d.conversationId).toBe("conv-1");
 	});
 
-	test("failure surfaces as tool text (never a throw): TurnError message with the run.log path", async () => {
+	test("failure surfaces as tool text (never a throw): TurnError message with the attempt log path", async () => {
 		const { run } = await setup(() =>
 			fakeChild({ lines: [{ event: "result", result: { status: "ERROR", error: "agy exploded" } }], exit: 1 }),
 		);
 		const { text } = await run({ prompt: "doomed" });
 		expect(text).toContain("agy exploded");
-		expect(text).toMatch(/run\.log/);
+		expect(text).toMatch(/attempt-1\.log/);
 	});
 
 	test("circular-delegation guard: an active agy provider refuses with zero spawns", async () => {

@@ -18,7 +18,7 @@ import { Readable, Writable } from "node:stream";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Context, Message, SimpleStreamOptions, UserMessage } from "@earendil-works/pi-ai";
 import { messageHashes } from "agy-bridge-engine";
@@ -107,6 +107,13 @@ async function setup(
 		promptViaStdin?: boolean;
 		debug?: import("../src/debug").DebugLogger;
 		imageInput?: boolean;
+		/** Per-attempt hard cap override (termination_unconfirmed tests need a tiny cap). */
+		timeoutMs?: number;
+		/** Internal/test seams forwarded to runTurn (engine termination bounds). */
+		terminationGraceMs?: number;
+		terminationSettleMs?: number;
+		/** Absolute state dir root (config.stateDir channel) for the conversation lock dir. */
+		stateDir?: string;
 	} = {},
 ) {
 	const root = await mkdtemp(join(tmpdir(), "agy-pi-turn-"));
@@ -115,12 +122,15 @@ async function setup(
 	const deps: TurnDeps = {
 		bin: "agy",
 		store,
-		timeoutMs: 30_000,
+		timeoutMs: depsOpts.timeoutMs ?? 30_000,
 		logRoot: root,
 		...(depsOpts.workdir !== undefined ? { workdir: depsOpts.workdir } : {}),
 		...(depsOpts.promptViaStdin !== undefined ? { promptViaStdin: depsOpts.promptViaStdin } : {}),
 		...(depsOpts.debug !== undefined ? { debug: depsOpts.debug } : {}),
 		...(depsOpts.imageInput !== undefined ? { imageInput: depsOpts.imageInput } : {}),
+		...(depsOpts.terminationGraceMs !== undefined ? { terminationGraceMs: depsOpts.terminationGraceMs } : {}),
+		...(depsOpts.terminationSettleMs !== undefined ? { terminationSettleMs: depsOpts.terminationSettleMs } : {}),
+		...(depsOpts.stateDir !== undefined ? { stateDir: depsOpts.stateDir } : {}),
 		spawnFn: ((bin: string, args: string[], io: { cwd: string }) => {
 			const rec: SpawnRecord = {
 				bin,
@@ -370,7 +380,8 @@ describe("unit: turn — resume-once and terminals (R8, R3)", () => {
 		expect(err.mapping.finalize).toBe("error");
 		expect(err.mapping.resumeEligible).toBe(false);
 		expect(err.mapping.message).toContain("timed out");
-		expect(err.mapping.message).toMatch(/Full log: .+run\.log/);
+		// The terminal (resume) failure names the RESUME attempt's own log.
+		expect(err.mapping.message).toMatch(/Full log: .+attempt-2\.log/);
 		expect(spawns).toHaveLength(2);
 		expect(spawns[1].args[spawns[1].args.indexOf("--conversation") + 1]).toBe("conv-x");
 		expect(await store.getEntry("s-twice")).toBeUndefined();
@@ -389,7 +400,7 @@ describe("unit: turn — resume-once and terminals (R8, R3)", () => {
 		expect(caught).toBeInstanceOf(TurnError);
 		const err = caught as TurnError;
 		expect(err.mapping.message).toContain("agy exploded");
-		expect(err.mapping.message).toMatch(/run\.log/);
+		expect(err.mapping.message).toMatch(/attempt-1\.log/);
 		expect(await store.getEntry("s-fail")).toBeUndefined();
 	});
 
@@ -446,14 +457,14 @@ describe("unit: turn — live hooks and model plumbing", () => {
 		expect(spawns[1].args).not.toContain("--model");
 	});
 
-	test("run.log lands in a fresh agy-run-* scratch dir under logRoot, never the child cwd", async () => {
+	test("attempt log lands in a fresh agy-run-* scratch dir under logRoot, never the child cwd", async () => {
 		const workdir = await mkdtemp(join(tmpdir(), "agy-pi-turn-wd-"));
 		const { root, turn, req } = await setup(() => fakeChild({ lines: [SUCCESS("c")], stdin: true }), { workdir });
 		const result = await turn(req({ messages: [userMsg("q")] }, { sessionId: "s-log" }));
 		const scratch = readdirSync(root).filter((d) => d.startsWith("agy-run-"));
 		expect(scratch.length).toBeGreaterThanOrEqual(1);
 		expect(result.logPath.startsWith(join(root, scratch[0]))).toBe(true);
-		expect(existsSync(join(root, scratch[0], "run.log"))).toBe(true);
+		expect(existsSync(join(root, scratch[0], "attempt-1.log"))).toBe(true);
 		expect(readdirSync(workdir)).toEqual([]);
 	});
 });
@@ -1037,5 +1048,122 @@ describe("unit: turn — resume-always thread branch (v0.3 R2, D3)", () => {
 		await expect(p).rejects.toBeInstanceOf(TurnAborted);
 		expect(spawns[0].child.killed).toBe(true);
 		expect(await store.getEntry("s-thread-ab")).toEqual({ conversationId: "conv-thread-ab" }); // hash-less, survives
+	});
+});
+
+describe("unit: turn — per-attempt log evidence (no shared run.log truncation)", () => {
+	test("attempt-1 evidence survives the resume attempt: per-attempt files, result.logPath names the FINAL attempt", async () => {
+		const { spawns, deps, req } = await setup((_rec, call) =>
+			call === 1
+				? fakeChild({ lines: [{ event: "init", conversation_id: "conv-1" }], exit: 124 })
+				: fakeChild({ lines: [{ event: "init", conversation_id: "conv-2" }, SUCCESS("conv-2")] }),
+		);
+		const result = await runTurn(deps, req({ messages: [userMsg("q")] }, { sessionId: "s-logs" }));
+		expect(result.classification.outcome).toBe("success");
+		expect(result.resumed).toBe(true);
+		expect(spawns).toHaveLength(2);
+		// The turn's log path is the FINAL attempt's exclusive file.
+		expect(result.logPath).toMatch(/attempt-2\.log$/);
+		const turnDir = dirname(result.logPath);
+		// Attempt 1's evidence is intact — the resume attempt never truncated it.
+		const attempt1 = readFileSync(join(turnDir, "attempt-1.log"), "utf8");
+		const attempt2 = readFileSync(join(turnDir, "attempt-2.log"), "utf8");
+		expect(attempt1).toContain("conv-1");
+		expect(attempt1).not.toContain("conv-2");
+		expect(attempt2).toContain("conv-2");
+		// The old shared filename is gone for good.
+		expect(existsSync(join(turnDir, "run.log"))).toBe(false);
+	});
+});
+
+describe("unit: turn — termination_unconfirmed (bounded termination chain settlement)", () => {
+	/**
+	 * An unkillable child: emits its init line (a capturable conversation
+	 * id), then ignores EVERY kill attempt and never emits exit/close —
+	 * the stand-in for agy ignoring SIGTERM and SIGKILL. Only the engine's
+	 * bounded termination chain (small terminationGraceMs/terminationSettleMs
+	 * seams) can settle a turn against this child.
+	 */
+	function stubbornChild(conversationId: string) {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const child: any = new EventEmitter();
+		child.stdout = new Readable({ read() {} });
+		child.stderr = new Readable({ read() {} });
+		child.killed = false;
+		child.kill = () => {
+			child.killed = true; // records the attempt; deliberately NEVER closes
+			return true;
+		};
+		child.stdout.push(Buffer.from(`${JSON.stringify({ event: "init", conversation_id: conversationId })}\n`));
+		return child;
+	}
+
+	/** Guard race: a pre-fix hang (no bounded settlement) must FAIL the test, not hang the suite. */
+	function guard<T>(p: Promise<T>, label: string): Promise<T> {
+		return Promise.race([
+			p,
+			new Promise<never>((_, reject) => {
+				setTimeout(() => reject(new Error(`${label}: still unresolved after 3000ms (pre-fix hang?)`)), 3000);
+			}),
+		]);
+	}
+
+	test("cap-triggered settlement: exactly ONE spawn, no replay, TurnError (not TurnAborted) with the unconfirmed message and the attempt log path", async () => {
+		const { store, spawns, deps, req } = await setup(
+			() => stubbornChild("conv-stub"),
+			{ timeoutMs: 60, terminationGraceMs: 20, terminationSettleMs: 20 },
+		);
+		let caught: unknown;
+		try {
+			await guard(runTurn(deps, req({ messages: [userMsg("q")] }, { sessionId: "s-term" })), "cap-triggered settlement");
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(TurnError);
+		const turnError = caught as TurnError;
+		// The replay gate stays === "timeout": termination_unconfirmed never
+		// recovers — exactly ONE spawn, no resume attempt, no second
+		// conversation.
+		expect(spawns).toHaveLength(1);
+		expect(turnError.mapping.retryable).toBe(false);
+		expect(turnError.mapping.finalize).toBe("error");
+		// pi's host auto-retries on a visible "(retryable)" marker — the
+		// unconfirmed message must never carry one.
+		expect(turnError.mapping.message).not.toContain("(retryable)");
+		expect(turnError.mapping.message).toMatch(/termination could not be confirmed/i);
+		expect(turnError.mapping.message).toContain("timeout");
+		expect(turnError.mapping.message).not.toMatch(/timed out and could not be resumed/);
+		expect(turnError.mapping.message).not.toMatch(/empty or invalid/i);
+		// The Full log target is THIS (final) attempt's own file.
+		expect(turnError.mapping.message).toMatch(/attempt-1\.log$/);
+		// No binding/rebind may be persisted for an unconfirmed run.
+		expect(await store.getEntry("s-term")).toBeUndefined();
+	});
+
+	test("caller abort during the unconfirmed window keeps the TurnAborted contract: binding persisted per existing abort semantics", async () => {
+		const controller = new AbortController();
+		const { store, spawns, deps, req } = await setup(
+			() => stubbornChild("conv-ab-term"),
+			{ timeoutMs: 30_000, terminationGraceMs: 20, terminationSettleMs: 20 },
+		);
+		setTimeout(() => controller.abort(), 30);
+		let caught: unknown;
+		try {
+			await guard(
+				runTurn(deps, req({ messages: [userMsg("q")] }, { sessionId: "s-ab-term", signal: controller.signal })),
+				"abort during the unconfirmed window",
+			);
+		} catch (err) {
+			caught = err;
+		}
+		// Cancellation contract intact — never a plain TurnError for a caller abort.
+		expect(caught).toBeInstanceOf(TurnAborted);
+		expect(spawns).toHaveLength(1);
+		// Existing abort semantics preserved exactly: the tapped id is bound
+		// WITH the incoming hash baseline.
+		expect(await store.getEntry("s-ab-term")).toEqual({
+			conversationId: "conv-ab-term",
+			hashes: messageHashes([{ role: "user", content: "q" }]),
+		});
 	});
 });

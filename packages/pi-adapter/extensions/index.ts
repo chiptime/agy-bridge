@@ -144,6 +144,9 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 		bin: config.agyBin,
 		store,
 		...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
+		// Roots the shared per-conversation exclusion lock dir (always
+		// absolute — validated by config).
+		stateDir: config.stateDir,
 		...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 		promptViaStdin: true,
 		state,
@@ -188,6 +191,8 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 				},
 				...(config.scratchRoot !== undefined ? { scratchRoot: config.scratchRoot } : {}),
 				...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
+				// Roots the shared per-conversation exclusion lock dir.
+				stateDir: config.stateDir,
 				...(deps.spawnFn !== undefined ? { spawnFn: deps.spawnFn } : {}),
 				promptViaStdin: true,
 				state,
