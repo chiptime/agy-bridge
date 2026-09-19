@@ -6,6 +6,7 @@
  */
 export * from "./spawn";
 export * from "./outcomes";
+export * from "./conversation-lock";
 export * from "./quota";
 export * from "./models-list";
 export * from "./messages";

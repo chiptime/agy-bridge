@@ -65,6 +65,16 @@ export interface SpawnRun {
 	conversationId?: string;
 	/** Stream progress: count of parsed NDJSON event lines and the last event type; present only when at least one event line arrived. */
 	progress?: { events: number; lastEvent?: string };
+	/** True when the child never confirmed death (no exit/close) before the bounded termination chain's final settle deadline fired. */
+	terminationUnconfirmed?: boolean;
+	/** Which path requested termination first: the hard cap, the stall watchdog, or an external abort. */
+	terminationTrigger?: 'timeout' | 'stall' | 'abort';
+	/** First signal we asked the child to die with (SIGTERM today). */
+	requestedSignal?: string;
+	/** Escalation signal attempted after the grace window; recorded even when the kill call threw. */
+	escalatedSignal?: string;
+	/** Signal argument reported by the child's `close` event, when one arrived before settlement. */
+	observedSignal?: string;
 }
 
 /** Token accounting reported by agy's envelope. */
@@ -206,20 +216,47 @@ export function buildAgyArgs(opts: SpawnOptions, outputFormat: 'json' | 'stream-
  */
 export const DEFAULT_STALL_MS = 600_000;
 
+/**
+ * Bounded-termination chain bounds: after a termination request (cap, stall
+ * watchdog, or abort) the child gets TERMINATION_GRACE_MS to die from the
+ * SIGTERM before escalation to SIGKILL, then TERMINATION_FINAL_DEADLINE_MS
+ * more to report exit/close before the run settles as unconfirmed. Internal
+ * bounds, not public config; worst-case added latency per attempt is their
+ * sum (10s).
+ */
+export const TERMINATION_GRACE_MS = 5_000;
+export const TERMINATION_FINAL_DEADLINE_MS = 5_000;
+
 export interface StreamSpawnOptions extends SpawnOptions {
 	/** Stall watchdog ms without any output line before SIGTERM; 0 disables. Default DEFAULT_STALL_MS. */
 	stallMs?: number;
 	/** Test seam: replace the real child_process spawn. */
 	spawnImpl?: typeof spawn;
+	/**
+	 * External cancellation: aborting this signal drives the bounded
+	 * termination chain via requestTermination('abort'). Consumed by
+	 * runAgyStream itself — never forwarded to spawn(). Declared explicitly
+	 * because the engine's local SpawnOptions (unlike node's own) does not
+	 * carry it.
+	 */
+	signal?: AbortSignal;
+	/** Test/internal seam: SIGTERM→SIGKILL escalation delay. Default TERMINATION_GRACE_MS. */
+	terminationGraceMs?: number;
+	/** Test/internal seam: settle deadline after SIGKILL without a confirmed death. Default TERMINATION_FINAL_DEADLINE_MS. */
+	terminationSettleMs?: number;
 }
 
 /**
  * Async stream runner over agy's NDJSON output: opens/truncates run.log up
  * front and appends every stdout line and stderr chunk the moment they
  * arrive (so a killed run still leaves its progress on disk), resets a stall
- * watchdog on every line, enforces the overall hard cap at timeoutMs
- * (SIGTERM), and returns whatever was captured — init conversation id and
- * partial log included — even when killed.
+ * watchdog on every line, enforces the overall hard cap at timeoutMs, and
+ * returns whatever was captured — init conversation id and partial log
+ * included — even when killed. Termination is a bounded chain (SIGTERM →
+ * SIGKILL after TERMINATION_GRACE_MS → forced settlement after
+ * TERMINATION_FINAL_DEADLINE_MS, flagged terminationUnconfirmed) driven by
+ * the cap, the stall watchdog, or an external abort signal, so an
+ * unkillable child can never hang the attempt.
  */
 export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> {
 	mkdirSync(opts.workdir, { recursive: true });
@@ -227,11 +264,38 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 	const stallMs = opts.stallMs ?? DEFAULT_STALL_MS;
 	return new Promise<SpawnRun>((resolve) => {
 		const spawnFn = opts.spawnImpl ?? spawn;
-		const child = spawnFn(opts.bin, buildAgyArgs(opts, 'stream-json'), {
-			cwd: opts.workdir,
-			env: opts.env ? { ...process.env, ...opts.env } : process.env,
-			stdio: [opts.promptViaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-		});
+		// Open the attempt log BEFORE spawning the child (reordered — see
+		// timeout-recovery PRD review): if this throws (permissions, disk
+		// full, a TOCTOU race on the parent directory), no child is ever
+		// spawned. Opening it AFTER spawnFn(...) would leave an
+		// already-running child with no error handler and no watchdogs
+		// attached yet if the open failed — an orphaned, unmonitored
+		// process. Mode 0o600: owner-restricted access (PRD section 3);
+		// process output captured here may be sensitive.
+		const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, 'w', 0o600);
+		// spawnFn is production-real Node spawn(), which never throws
+		// synchronously for realistic failures (ENOENT surfaces async via
+		// the 'error' event, handled below) — this try/catch only guards
+		// the test-only injection seam (StreamSpawnOptions.spawnImpl) and
+		// any argument-validation TypeError. Without it, a synchronous
+		// throw here would leave the already-opened logFd leaked: nothing
+		// downstream (armStall/finish/child.on('error')) has been reached
+		// yet to close it.
+		let child: ReturnType<typeof spawn>;
+		try {
+			child = spawnFn(opts.bin, buildAgyArgs(opts, 'stream-json'), {
+				cwd: opts.workdir,
+				env: opts.env ? { ...process.env, ...opts.env } : process.env,
+				stdio: [opts.promptViaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+			});
+		} catch (err) {
+			try {
+				closeSync(logFd);
+			} catch {
+				/* already closed */
+			}
+			throw err;
+		}
 		if (opts.promptViaStdin) {
 			// Prompt transport: stdin, never argv. ONE NDJSON user line (the
 			// stream-json input contract); the child processes the turn and
@@ -243,7 +307,6 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 				JSON.stringify({ event: 'user', message: { role: 'user', content: opts.prompt } }) + '\n',
 			);
 		}
-		const logFd = openSync(opts.logPath ?? `${opts.workdir}/run.log`, 'w');
 		let log = '';
 		let envelope: AgyEnvelope | undefined;
 		let conversationId: string | undefined;
@@ -255,6 +318,13 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 		let spawnError: string | undefined;
 		let settled = false;
 		let stallTimer: ReturnType<typeof setTimeout> | null = null;
+		let graceTimer: ReturnType<typeof setTimeout> | null = null;
+		let finalTimer: ReturnType<typeof setTimeout> | null = null;
+		let terminationTrigger: SpawnRun['terminationTrigger'];
+		let requestedSignal: string | undefined;
+		let escalatedSignal: string | undefined;
+		let observedSignal: string | undefined;
+		let terminationUnconfirmed = false;
 		const append = (chunk: string) => {
 			log += chunk;
 			try {
@@ -263,23 +333,84 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 				/* disk error — the in-memory log still wins */
 			}
 		};
+		// Bounded termination chain: requestTermination asks politely with
+		// SIGTERM, the grace timer escalates to SIGKILL, and the final settle
+		// timer forces settlement even when the child never reports
+		// exit/close. Every kill call is try/catch-wrapped — a throwing kill
+		// (EPERM, already-reaped pid) must still hand control to the next
+		// stage; a timer callback NEVER throws.
+		const killOrRecord = (sig: NodeJS.Signals): void => {
+			try {
+				child.kill(sig);
+			} catch (err) {
+				// Best-effort diagnostic into the attempt log; the in-memory
+				// copy still wins if the fd write fails (same contract as
+				// append() below).
+				append(
+					`[agy-bridge] child.kill(${JSON.stringify(sig)}) failed: ${err instanceof Error ? err.message : String(err)}\n`,
+				);
+			}
+		};
+		const requestTermination = (trigger: 'timeout' | 'stall' | 'abort'): void => {
+			if (settled) return;
+			// Only the FIRST requester owns the recorded trigger.
+			if (!terminationTrigger) terminationTrigger = trigger;
+			if (!requestedSignal) requestedSignal = 'SIGTERM';
+			killOrRecord('SIGTERM');
+			// Arm the escalation exactly once, no matter how many triggers fire.
+			if (graceTimer) return;
+			graceTimer = setTimeout(() => {
+				if (settled) return;
+				killOrRecord('SIGKILL');
+				// Recorded even when the kill threw: the attempt was made.
+				escalatedSignal = 'SIGKILL';
+				finalTimer = setTimeout(() => {
+					if (settled) return;
+					// Forced settlement without exit/close: the child ignored
+					// every signal (or each kill attempt threw) and this
+					// attempt must never hang forever.
+					terminationUnconfirmed = true;
+					finish();
+				}, opts.terminationSettleMs ?? TERMINATION_FINAL_DEADLINE_MS);
+			}, opts.terminationGraceMs ?? TERMINATION_GRACE_MS);
+		};
+		const capTimer = setTimeout(() => {
+			timedOut = true;
+			requestTermination('timeout');
+		}, opts.timeoutMs);
 		const armStall = () => {
 			if (stallTimer) clearTimeout(stallTimer);
 			if (stallMs <= 0 || settled) return;
 			stallTimer = setTimeout(() => {
 				stalled = true;
-				child.kill('SIGTERM');
+				requestTermination('stall');
 			}, stallMs);
 		};
-		const capTimer = setTimeout(() => {
-			timedOut = true;
-			child.kill('SIGTERM');
-		}, opts.timeoutMs);
+		const onAbort = () => requestTermination('abort');
+		if (opts.signal) opts.signal.addEventListener('abort', onAbort, { once: true });
+		const onExit = (code: number | null) => {
+			exitCode = code;
+			finish();
+		};
+		const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+			// Mirror the exitCode guard: a close racing in after settlement
+			// (forced or otherwise) must not mutate the resolved run.
+			if (!settled) {
+				exitCode = code;
+				observedSignal = signal ?? undefined;
+			}
+			finish();
+		};
 		const finish = () => {
 			if (settled) return;
 			settled = true;
 			if (stallTimer) clearTimeout(stallTimer);
 			clearTimeout(capTimer);
+			if (graceTimer) clearTimeout(graceTimer);
+			if (finalTimer) clearTimeout(finalTimer);
+			opts.signal?.removeEventListener('abort', onAbort);
+			child.off('exit', onExit);
+			child.off('close', onClose);
 			// Release the stdio pipes: after a kill, grandchildren (e.g. a sleep
 			// the shell spawned) can hold them open and delay 'close' indefinitely.
 			child.stdout?.destroy();
@@ -299,6 +430,11 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 				progress: eventCount > 0 ? { events: eventCount, lastEvent } : undefined,
 				stalled: stalled || undefined,
 				spawnError,
+				terminationUnconfirmed: terminationUnconfirmed || undefined,
+				terminationTrigger,
+				requestedSignal,
+				escalatedSignal,
+				observedSignal,
 			});
 		};
 		child.on('error', (err: NodeJS.ErrnoException) => {
@@ -324,14 +460,15 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 		// Resolve on the FIRST of exit|close: 'close' waits for the stdio pipes
 		// to drain, which a killed process tree can delay indefinitely (see
 		// finish()); 'exit' is the reliable signal that the child is gone.
-		child.on('exit', (code: number | null) => {
-			exitCode = code;
-			finish();
-		});
-		child.on('close', (code: number | null) => {
-			if (!settled) exitCode = code;
-			finish();
-		});
+		child.on('exit', onExit);
+		child.on('close', onClose);
+		// Abort composition: an already-aborted signal must still take down
+		// this fresh child — fire the same requestTermination('abort') path
+		// immediately after spawn. EventTarget never fires listeners added
+		// after abort, and the adapters' taps already own the stale-signal
+		// kill path upstream; killing here keeps engine behavior
+		// self-contained without skipping the spawn.
+		if (opts.signal?.aborted) requestTermination('abort');
 	});
 }
 

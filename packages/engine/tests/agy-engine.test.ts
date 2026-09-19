@@ -12,7 +12,7 @@
  * mapMessages and the ⟲ status line are host behavior and stay there).
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
@@ -42,6 +42,8 @@ import {
 	parseAgyEnvelope,
 	parseStreamLine,
 	runAgy,
+	TERMINATION_FINAL_DEADLINE_MS,
+	TERMINATION_GRACE_MS,
 } from "../src/spawn";
 import { listAgyModels, parseAgyModelsOutput } from "../src/models-list";
 import {
@@ -464,6 +466,7 @@ describe("unit: outcomes — fallback policy", () => {
 		["timeout", true],
 		["task_failure", false],
 		["artifact_validation_failure", false],
+		["termination_unconfirmed", false],
 	];
 	for (const [outcome, allowed] of fallbackCases) {
 		test(`${outcome} fallbackAllowed=${allowed}`, () => {
@@ -1316,6 +1319,404 @@ describe("unit: spawn — async stream runner: stall watchdog, hard cap, init/re
 		setTimeout(() => child.emit("close", 0, null), 10);
 		await p;
 		expect(await Bun.file(`${dir}/run.log`).text()).toContain('"event":"init"');
+	});
+
+	test("Fix 2: the run log is created with an owner-only mode (0o600), independent of the ambient umask", async () => {
+		const dir = await mkdtemp("/tmp/agy-logpath-mode-");
+		const originalUmask = process.umask(0o022); // permissive; would otherwise widen the mode.
+		try {
+			const custom = `${dir}/custom-run.log`;
+			const child = fakeChild();
+			const p = runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 30_000,
+				stallMs: 0,
+				logPath: custom,
+				spawnImpl: asSpawn(child),
+			});
+			setTimeout(() => child.emit("close", 0, null), 10);
+			await p;
+			expect(statSync(custom).mode & 0o777).toBe(0o600);
+		} finally {
+			process.umask(originalUmask);
+		}
+	});
+
+	test("Fix 4: when the log cannot be opened, the child is never spawned (no orphaned/unmonitored process)", async () => {
+		const dir = await mkdtemp("/tmp/agy-logpath-fail-");
+		let spawnCalls = 0;
+		const spawnImpl = ((..._args: unknown[]) => {
+			spawnCalls++;
+			return fakeChild();
+		}) as unknown as typeof spawn;
+		// A directory can never be opened with the 'w' flag: openSync throws
+		// EISDIR BEFORE spawnFn(...) is ever reached (reordered by Fix 4).
+		await expect(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 30_000,
+				stallMs: 0,
+				logPath: dir,
+				spawnImpl,
+			}),
+		).rejects.toThrow();
+		expect(spawnCalls).toBe(0);
+	});
+
+	/** Count real, currently-open file descriptors pointing at `path` (Linux /proc/self/fd). */
+	function countOpenFdsFor(path: string): number {
+		let count = 0;
+		for (const fd of readdirSync("/proc/self/fd")) {
+			try {
+				if (readlinkSync(`/proc/self/fd/${fd}`) === path) count++;
+			} catch {
+				continue; // fd closed between readdir and readlink, or unreadable — never ours anyway.
+			}
+		}
+		return count;
+	}
+
+	test("Fix 2 (audit H2): a synchronous spawnFn throw closes the already-opened log fd instead of leaking it", async () => {
+		const dir = await mkdtemp("/tmp/agy-logpath-throw-");
+		const logPath = `${dir}/custom-run.log`;
+		// Real Node child_process.spawn() never throws synchronously for a
+		// realistic failure (ENOENT resolves async via the 'error' event —
+		// see the "never spawned" test above and the daily-guard/success
+		// tests elsewhere in this file). This spawnImpl exercises the
+		// confirmed test-only synchronous-throw seam as a stand-in for the
+		// one class of failure (argument-validation TypeErrors) where real
+		// spawn() *can* throw synchronously.
+		const spawnImpl = (() => {
+			throw new Error("boom: synchronous spawn failure");
+		}) as unknown as typeof spawn;
+		expect(countOpenFdsFor(logPath)).toBe(0);
+		await expect(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 30_000,
+				stallMs: 0,
+				logPath,
+				spawnImpl,
+			}),
+		).rejects.toThrow("boom: synchronous spawn failure");
+		// openSync('w') already created/truncated the file before the throw.
+		expect(existsSync(logPath)).toBe(true);
+		// The critical assertion: the fd opened just before the throw must
+		// be closed, not leaked. Pre-fix, this count would be 1 (leaked).
+		expect(countOpenFdsFor(logPath)).toBe(0);
+	});
+});
+
+describe("unit: spawn — bounded termination and termination_unconfirmed", () => {
+	/**
+	 * Kill-reason-aware fake child: records every requested signal and can
+	 * honor it (fake close carrying that signal) or ignore it entirely, so the
+	 * SIGTERM→SIGKILL escalation chain and its forced-settlement deadline
+	 * become observable without a real process tree.
+	 */
+	function stubbornChild(behavior: { dieOn?: string[]; ignoreAll?: boolean } = {}) {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const child: any = new EventEmitter();
+		child.stdout = new Readable({ read() {} });
+		child.stderr = new Readable({ read() {} });
+		child.killed = false;
+		child.killSignals = [];
+		child.kill = (sig: NodeJS.Signals | number) => {
+			child.killed = true;
+			child.killSignals.push(String(sig));
+			if (behavior.ignoreAll || !behavior.dieOn?.includes(String(sig))) return true;
+			queueMicrotask(() => child.emit("close", null, sig));
+			return true;
+		};
+		return child;
+	}
+	const asSpawn = (child: unknown) => (() => child) as unknown as typeof spawn;
+	/** Guard race: a pre-fix hang (no bounded settlement) must FAIL the test, not hang the suite. */
+	function guard<T>(p: Promise<T>, label: string): Promise<T> {
+		return Promise.race([
+			p,
+			new Promise<never>((_, reject) => {
+				setTimeout(() => reject(new Error(`${label}: still unresolved after 3000ms (pre-fix hang?)`)), 3000);
+			}),
+		]);
+	}
+	/** Count real, currently-open file descriptors pointing at `path` (Linux /proc/self/fd). */
+	function countOpenFdsFor(path: string): number {
+		let count = 0;
+		for (const fd of readdirSync("/proc/self/fd")) {
+			try {
+				if (readlinkSync(`/proc/self/fd/${fd}`) === path) count++;
+			} catch {
+				continue; // fd closed between readdir and readlink, or unreadable — never ours anyway.
+			}
+		}
+		return count;
+	}
+
+	test("SIGTERM ignored → SIGKILL effective: confirmed close on SIGKILL, no unconfirmed settlement", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-esc-");
+		const child = stubbornChild({ dieOn: ["SIGKILL"] });
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 60,
+				stallMs: 0,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"SIGKILL escalation",
+		);
+		expect(r.requestedSignal).toBe("SIGTERM");
+		expect(r.escalatedSignal).toBe("SIGKILL");
+		expect(r.observedSignal).toBe("SIGKILL");
+		expect(r.terminationUnconfirmed).toBeFalsy();
+		expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+		const classification = classifyRun({ exitCode: r.exitCode, timedOut: r.timedOut });
+		expect(classification.outcome).toBe("timeout");
+		expect(classification.outcome).not.toBe("termination_unconfirmed");
+	});
+
+	test("nothing works (child never exits): forced settlement flags terminationUnconfirmed with the cap trigger", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-none-");
+		const child = stubbornChild({ ignoreAll: true });
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 60,
+				stallMs: 0,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"forced settlement",
+		);
+		expect(r.terminationUnconfirmed).toBe(true);
+		expect(r.terminationTrigger).toBe("timeout");
+		expect(r.requestedSignal).toBe("SIGTERM");
+		expect(r.escalatedSignal).toBe("SIGKILL");
+		expect(r.observedSignal).toBeUndefined();
+		expect(r.exitCode).toBeNull();
+		expect(
+			classifyRun({
+				exitCode: r.exitCode,
+				timedOut: r.timedOut,
+				terminationUnconfirmed: r.terminationUnconfirmed,
+				terminationTrigger: r.terminationTrigger,
+			}),
+		).toEqual({ outcome: "termination_unconfirmed", reason: "termination_unconfirmed_timeout" });
+	});
+
+	test("stall trigger: silent signal-ignoring child settles unconfirmed with the stall trigger", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-stall-");
+		const child = stubbornChild({ ignoreAll: true });
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 30_000,
+				stallMs: 30,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"stall settlement",
+		);
+		expect(r.stalled).toBe(true);
+		expect(r.timedOut).toBeFalsy();
+		expect(r.terminationTrigger).toBe("stall");
+		expect(r.terminationUnconfirmed).toBe(true);
+		expect(
+			classifyRun({
+				exitCode: r.exitCode,
+				timedOut: r.timedOut,
+				stalled: r.stalled,
+				terminationUnconfirmed: r.terminationUnconfirmed,
+				terminationTrigger: r.terminationTrigger,
+			}).reason,
+		).toBe("termination_unconfirmed_stall");
+	});
+
+	test("abort trigger: external AbortController abort mid-run settles unconfirmed with the abort trigger", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-abort-");
+		const child = stubbornChild({ ignoreAll: true });
+		const ac = new AbortController();
+		setTimeout(() => ac.abort(), 20);
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				signal: ac.signal,
+				timeoutMs: 30_000,
+				stallMs: 0,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"abort settlement",
+		);
+		expect(r.terminationTrigger).toBe("abort");
+		expect(r.terminationUnconfirmed).toBe(true);
+		expect(r.timedOut).toBeFalsy();
+		expect(child.killSignals[0]).toBe("SIGTERM");
+	});
+
+	test("kill(SIGKILL) throws: settlement still lands at the final deadline; failure recorded in the attempt log", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-throw-");
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const child: any = new EventEmitter();
+		child.stdout = new Readable({ read() {} });
+		child.stderr = new Readable({ read() {} });
+		child.killed = false;
+		child.killSignals = [];
+		child.kill = (sig: NodeJS.Signals | number) => {
+			child.killed = true;
+			child.killSignals.push(String(sig));
+			if (String(sig) === "SIGKILL") throw new Error("EPERM: injected kill failure");
+			return true; // SIGTERM is swallowed; no close ever arrives.
+		};
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 60,
+				stallMs: 0,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"kill-throws settlement",
+		);
+		expect(r.terminationUnconfirmed).toBe(true);
+		expect(r.escalatedSignal).toBe("SIGKILL");
+		const log = await Bun.file(`${dir}/run.log`).text();
+		expect(log).toContain('child.kill("SIGKILL") failed');
+		expect(log).toContain("EPERM: injected kill failure");
+	});
+
+	test("late close after forced settlement: resolution, listeners, and fds stay clean", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-late-");
+		const child = stubbornChild({ ignoreAll: true });
+		// Chain: cap at 60ms → grace SIGKILL at ~100ms → forced settle at ~140ms.
+		// This close lands ~30ms AFTER settlement, with no listener left attached.
+		setTimeout(() => child.emit("close", 0, null), 175);
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 60,
+				stallMs: 0,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"late-close settlement",
+		);
+		expect(r.terminationUnconfirmed).toBe(true);
+		expect(r.terminationTrigger).toBe("timeout");
+		expect(r.exitCode).toBeNull();
+		// Listeners dropped at settlement: the late close hits nothing.
+		expect(child.listenerCount("exit")).toBe(0);
+		expect(child.listenerCount("close")).toBe(0);
+		// Give the late close its bounded window to fire harmlessly.
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(child.listenerCount("exit")).toBe(0);
+		expect(child.listenerCount("close")).toBe(0);
+		expect(countOpenFdsFor(`${dir}/run.log`)).toBe(0);
+	});
+
+	test("exit during the grace window: confirmed resolution, no escalation recorded, no extra delay", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-grace-");
+		const child = stubbornChild({}); // ignores SIGTERM, never closes on its own
+		// Dies on its own 15ms into the 40ms grace window after the cap SIGTERM.
+		setTimeout(() => child.emit("exit", 0), 75);
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				timeoutMs: 60,
+				stallMs: 0,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"grace-exit resolution",
+		);
+		expect(r.exitCode).toBe(0);
+		expect(r.terminationUnconfirmed).toBeFalsy();
+		expect(r.escalatedSignal).toBeUndefined();
+		expect(r.observedSignal).toBeUndefined();
+		expect(r.requestedSignal).toBe("SIGTERM");
+		expect(r.terminationTrigger).toBe("timeout");
+	});
+
+	test("abort and cap timer race: exactly one coherent settlement, first requester owns the trigger", async () => {
+		const dir = await mkdtemp("/tmp/agy-term-race-");
+		const child = stubbornChild({ ignoreAll: true });
+		const ac = new AbortController();
+		// Deterministic race: abort at 55ms, cap at 60ms — both land inside the
+		// same unconfirmed-settlement window (Bun's same-expiry timer order is
+		// not insertion-ordered, so the strict 5ms gap is what makes the
+		// winner assertable). The cap's requestTermination must neither
+		// overwrite the trigger nor re-arm the escalation.
+		setTimeout(() => ac.abort(), 55);
+		const r = await guard(
+			runAgy({
+				bin: "agy",
+				prompt: "p",
+				workdir: dir,
+				signal: ac.signal,
+				timeoutMs: 60,
+				stallMs: 0,
+				terminationGraceMs: 40,
+				terminationSettleMs: 40,
+				spawnImpl: asSpawn(child),
+			}),
+			"race settlement",
+		);
+		expect(r.terminationUnconfirmed).toBe(true);
+		expect(r.terminationTrigger).toBe("abort");
+		expect(r.requestedSignal).toBe("SIGTERM");
+		expect(r.escalatedSignal).toBe("SIGKILL");
+	});
+
+	test("classifyRun: terminationUnconfirmed maps to termination_unconfirmed with trigger-scoped reason", () => {
+		expect(
+			classifyRun({ exitCode: null, terminationUnconfirmed: true, terminationTrigger: "timeout" }),
+		).toEqual({ outcome: "termination_unconfirmed", reason: "termination_unconfirmed_timeout" });
+	});
+
+	test("classifyRun: unconfirmed settlement outranks stalled/timedOut; missing trigger keeps a plain reason", () => {
+		expect(
+			classifyRun({ exitCode: null, terminationUnconfirmed: true, stalled: true, timedOut: true }).reason,
+		).toBe("termination_unconfirmed");
+		expect(classifyRun({ exitCode: null, terminationUnconfirmed: true }).outcome).toBe(
+			"termination_unconfirmed",
+		);
+	});
+
+	test("termination bounds are exported internal constants with the documented defaults", () => {
+		expect(TERMINATION_GRACE_MS).toBe(5_000);
+		expect(TERMINATION_FINAL_DEADLINE_MS).toBe(5_000);
+	});
+
+	test("fallback policy: termination_unconfirmed never falls back to the native executor", () => {
+		expect(isFallbackAllowed("termination_unconfirmed")).toBe(false);
 	});
 });
 

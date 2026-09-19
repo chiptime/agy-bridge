@@ -8,33 +8,38 @@
  *
  * classifyRun precedence (first match wins):
  * 1. spawnError ENOENT            → transient_unavailable (agy_absent)
- * 2. stalled                      → timeout (stall_detected) — the stream
+ * 2. terminationUnconfirmed       → termination_unconfirmed
+ *    (termination_unconfirmed[_<trigger>]) — the bounded termination chain
+ *    forced settlement: the child ignored SIGTERM and SIGKILL (or every kill
+ *    attempt threw) and never confirmed death before the final settle
+ *    deadline; no exit/close observation exists to back any later rule
+ * 3. stalled                      → timeout (stall_detected) — the stream
  *    runner's stall watchdog killed the child after a stall window with no
  *    output line at all; recoverable like any other timeout
- * 3. timedOut OR exitCode 124     → timeout (timeout)
- * 4. exitCode 0 AND artifactBytes → success (ok) — a non-empty artifact on a
+ * 4. timedOut OR exitCode 124     → timeout (timeout)
+ * 5. exitCode 0 AND artifactBytes → success (ok) — a non-empty artifact on a
  *    clean exit is the authoritative success signal; log-pattern regexes gate
  *    only runs that miss this rule (failed runs). expectArtifact:false (R1)
  *    swaps the success evidence to a SUCCESS envelope with a non-empty
  *    response, for hosts that consume the streamed response instead of a
  *    file artifact
- * 5. AUTH_RE matches log          → auth_captcha (auth_or_captcha)
- * 6. failed run AND envelope.status === 'ERROR' with the print-wait timeout
+ * 6. AUTH_RE matches log          → auth_captcha (auth_or_captcha)
+ * 7. failed run AND envelope.status === 'ERROR' with the print-wait timeout
  *    signature in envelope.error → timeout (agy_print_wait_timeout) — the
  *    typed JSON envelope is the FIRST failed-run signal, ahead of the
- *    plain-text regex; any other envelope ERROR falls through to 7–10
- * 7. exitCode !== 0 (or null) AND PRINT_WAIT_TIMEOUT_RE matches log
+ *    plain-text regex; any other envelope ERROR falls through to 8–11
+ * 8. exitCode !== 0 (or null) AND PRINT_WAIT_TIMEOUT_RE matches log
  *                                → timeout (agy_print_wait_timeout) — kept as
  *    the plain-text fallback for runs without a parseable envelope
- * 8. exitCode !== 0 (or null) AND QUOTA_RE matches log
+ * 9. exitCode !== 0 (or null) AND QUOTA_RE matches log
  *                                → quota_unavailable (quota_exhausted)
- * 9. exitCode !== 0 (or null) AND TRANSIENT_RE matches log
+ * 10. exitCode !== 0 (or null) AND TRANSIENT_RE matches log
  *                                → transient_unavailable (provider_outage)
  *    Exit-code corroboration: the log is agy's COMBINED stdout+stderr, so
  *    quota/transient words can appear as noise on clean runs. They only
  *    count as unavailability (fallback) when the process exit code agrees.
- * 10. exitCode !== 0              → task_failure (nonzero_exit)
- * 11. artifactBytes missing/0      → artifact_validation_failure (artifact_missing_or_empty)
+ * 11. exitCode !== 0              → task_failure (nonzero_exit)
+ * 12. artifactBytes missing/0      → artifact_validation_failure (artifact_missing_or_empty)
  */
 import { type AgyEnvelope } from './spawn';
 
@@ -45,7 +50,8 @@ export type Outcome =
 	| 'auth_captcha'
 	| 'timeout'
 	| 'task_failure'
-	| 'artifact_validation_failure';
+	| 'artifact_validation_failure'
+	| 'termination_unconfirmed';
 /** Stream progress surfaced to the orchestrator: NDJSON event count, last event type, and agy's turn count when known. */
 export interface RunProgress {
 	events: number;
@@ -61,6 +67,10 @@ export interface RunSignal {
 	timedOut?: boolean;
 	/** True when the stream runner's stall watchdog killed the run after stallMs of silence. */
 	stalled?: boolean;
+	/** True when the bounded termination chain settled the run without a confirmed child death (no exit/close before the final deadline). */
+	terminationUnconfirmed?: boolean;
+	/** Which path requested termination first: the hard cap, the stall watchdog, or an external abort. */
+	terminationTrigger?: 'timeout' | 'stall' | 'abort';
 	/** Size in bytes of the expected artifact; 0/undefined means missing. */
 	artifactBytes?: number;
 	/**
@@ -90,18 +100,32 @@ export function isFallbackAllowed(outcome: Outcome): boolean {
 
 /**
  * Deterministic exit/log/envelope → Outcome mapping. First match wins across
- * the 11 rules documented on this module: ENOENT, stall-watchdog kill
- * (stall_detected), plain timeout, artifact-backed success (exit 0 + artifact
- * present — immune to log patterns), AUTH gate, then, within FAILED runs, the
- * typed JSON envelope's ERROR status gates first (its print-wait timeout
- * signature maps to timeout, not task_failure), followed by the plain-text
- * print-wait regex fallback, the QUOTA/TRANSIENT regex gates for FAILED runs
- * only (nonzero/null exit — combined-output log noise on a clean exit is not
+ * the 12 rules documented on this module: ENOENT, forced-termination
+ * settlement (termination_unconfirmed), stall-watchdog kill (stall_detected),
+ * plain timeout, artifact-backed success (exit 0 + artifact present — immune
+ * to log patterns), AUTH gate, then, within FAILED runs, the typed JSON
+ * envelope's ERROR status gates first (its print-wait timeout signature maps
+ * to timeout, not task_failure), followed by the plain-text print-wait regex
+ * fallback, the QUOTA/TRANSIENT regex gates for FAILED runs only
+ * (nonzero/null exit — combined-output log noise on a clean exit is not
  * unavailability), nonzero exit, and empty artifact.
  */
 export function classifyRun(signal: RunSignal): Classification {
 	const log = signal.log ?? '';
 	if (signal.spawnError === 'ENOENT') return { outcome: 'transient_unavailable', reason: 'agy_absent' };
+	// Forced settlement from the bounded termination chain: the child ignored
+	// SIGTERM and SIGKILL (or every kill attempt threw) and never confirmed
+	// death before the final settle deadline. No exit/close observation
+	// exists to back any later rule, so this outranks the stall/timeout
+	// family; it is deliberately NOT a fallback-allowed outcome.
+	if (signal.terminationUnconfirmed) {
+		return {
+			outcome: 'termination_unconfirmed',
+			reason: signal.terminationTrigger
+				? `termination_unconfirmed_${signal.terminationTrigger}`
+				: 'termination_unconfirmed',
+		};
+	}
 	// Stall watchdog kill: no output line for the whole stall window. Checked
 	// before the plain-timeout rule so a stalled run reports stall_detected;
 	// either way the outcome is the recoverable timeout family.
