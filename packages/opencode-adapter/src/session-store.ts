@@ -299,10 +299,17 @@ export function openSessionStore(path: string, options: SessionStoreOptions = {}
 						const hashes = Array.isArray(entry.hashes)
 							? entry.hashes.filter((h): h is string => typeof h === "string")
 							: undefined;
-						if (hashes !== undefined && hashes.length > 0 && hashesArePrefix(hashes, incomingHashes)) {
-							if (hashes.length > bestLen) {
+						const isPrefix =
+							hashes !== undefined &&
+							hashes.length > 0 &&
+							(hashesArePrefix(hashes, incomingHashes) ||
+								(hashes.length > 1 &&
+									incomingHashes.length >= hashes.length &&
+									hashesArePrefix(hashes.slice(1), incomingHashes.slice(1))));
+						if (isPrefix) {
+							if (hashes!.length > bestLen) {
 								best = entry;
-								bestLen = hashes.length;
+								bestLen = hashes!.length;
 							}
 						} else if (hashes === undefined && adopt === undefined) {
 							adopt = entry;

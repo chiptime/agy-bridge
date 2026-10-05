@@ -161,6 +161,16 @@ export function mapClassification(c: Classification, ctx: ErrorContext): ErrorMa
 		};
 	}
 	if (c.outcome === "task_failure") {
+		if (c.reason === "interrupted" || ctx.detail === "interrupted") {
+			return {
+				retryable: false,
+				resume: true,
+				message: withLog(
+					ctx,
+					"agy turn was interrupted internally by agy; send another prompt or 'continue' to resume this conversation",
+				),
+			};
+		}
 		return {
 			retryable: false,
 			resume: false,

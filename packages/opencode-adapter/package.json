@@ -3,7 +3,7 @@
   "version": "0.5.1",
   "type": "module",
   "scripts": {
-    "build": "bun build src/index.ts src/provider.ts --outdir dist --target bun"
+    "build": "bun build src/index.ts src/provider.ts src/tui.ts --outdir dist --target bun"
   },
   "exports": {
     ".": {
@@ -13,6 +13,10 @@
     "./provider": {
       "types": "./src/provider.ts",
       "default": "./dist/provider.js"
+    },
+    "./tui": {
+      "types": "./src/tui.ts",
+      "default": "./dist/tui.js"
     }
   },
   "dependencies": {},

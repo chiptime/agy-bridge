@@ -11,3 +11,4 @@ export * from "./quota";
 export * from "./models-list";
 export * from "./messages";
 export * from "./attachments";
+export * from "./interactive-session";

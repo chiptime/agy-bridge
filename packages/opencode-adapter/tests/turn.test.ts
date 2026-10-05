@@ -1064,3 +1064,123 @@ describe("unit: turn — termination_unconfirmed (bounded termination chain sett
 		expect(await store.get("sess-success")).toBe("conv-ok");
 	});
 });
+
+describe("unit: turn — interrupted recovery & session continuity across abort/continue", () => {
+	test("agy internal interruption: maps to actionable error message, does NOT drop binding, continue resumes same conversation", async () => {
+		const spawns: string[][] = [];
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			if (spawns.length === 1) {
+				return fakeChild({
+					lines: [{ event: "init", conversation_id: "conv-stable" }, SUCCESS("conv-stable")],
+					exit: 0,
+				});
+			}
+			if (spawns.length === 2) {
+				return fakeChild({
+					lines: [
+						{ event: "init", conversation_id: "conv-stable" },
+						{ event: "result", result: { status: "ERROR", error: "interrupted", response: "" } },
+					],
+					exit: 1,
+				});
+			}
+			return fakeChild({
+				lines: [{ event: "init", conversation_id: "conv-stable" }, SUCCESS("conv-stable")],
+				exit: 0,
+			});
+		});
+
+		// Turn 1
+		const r1 = await runTurn(deps, { prompt: "turn 1", hashes: ["sys1", "u1", "a1"], sessionId: "sess-cont" });
+		expect(r1.classification.outcome).toBe("success");
+		expect(await store.get("sess-cont")).toBe("conv-stable");
+
+		// Turn 2: agy internal error 'interrupted'
+		let err2: unknown;
+		try {
+			await runTurn(deps, { prompt: "turn 2", hashes: ["sys2_dynamic", "u1", "a1", "u2"], sessionId: "sess-cont" });
+		} catch (e) {
+			err2 = e;
+		}
+		expect(err2).toBeInstanceOf(TurnError);
+		expect((err2 as TurnError).mapping.message).toContain("interrupted internally by agy");
+		expect((err2 as TurnError).mapping.resume).toBe(true);
+		// Crucial: binding must NOT be deleted by rebind!
+		expect(await store.get("sess-cont")).toBe("conv-stable");
+
+		// Turn 3: user sends "continue" with dynamic system prompt
+		const r3 = await runTurn(deps, {
+			prompt: "continue",
+			hashes: ["sys3_dynamic", "u1", "a1", "u2", "u3"],
+			sessionId: "sess-cont",
+		});
+		expect(r3.classification.outcome).toBe("success");
+		expect(spawns).toHaveLength(3);
+		// Spawns 2 and 3 both continued the SAME conversation!
+		expect(spawns[1]).toContain("--conversation");
+		expect(spawns[1][spawns[1].indexOf("--conversation") + 1]).toBe("conv-stable");
+		expect(spawns[2]).toContain("--conversation");
+		expect(spawns[2][spawns[2].indexOf("--conversation") + 1]).toBe("conv-stable");
+		expect(await store.get("sess-cont")).toBe("conv-stable");
+	});
+
+	test("host abort (Esc) mid-turn preserves binding, and next 'continue' resumes same conversation", async () => {
+		const spawns: string[][] = [];
+		const controller = new AbortController();
+		const { store, deps } = await setup((_bin: string, args: string[]) => {
+			spawns.push(args);
+			if (spawns.length === 1) {
+				return fakeChild({
+					lines: [{ event: "init", conversation_id: "conv-esc" }, SUCCESS("conv-esc")],
+					exit: 0,
+				});
+			}
+			if (spawns.length === 2) {
+				const child = fakeChild({
+					lines: [{ event: "init", conversation_id: "conv-esc" }],
+					hold: true,
+				});
+				return child;
+			}
+			return fakeChild({
+				lines: [{ event: "init", conversation_id: "conv-esc" }, SUCCESS("conv-esc")],
+				exit: 0,
+			});
+		});
+
+		// Turn 1
+		await runTurn(deps, { prompt: "turn 1", hashes: ["sys", "u1", "a1"], sessionId: "sess-esc" });
+		expect(await store.get("sess-esc")).toBe("conv-esc");
+
+		// Turn 2: start and abort
+		const turn2Promise = runTurn(deps, {
+			prompt: "turn 2",
+			hashes: ["sys_dyn2", "u1", "a1", "u2"],
+			sessionId: "sess-esc",
+			signal: controller.signal,
+		});
+		await new Promise((r) => setTimeout(r, 10));
+		controller.abort();
+		let caughtAbort: unknown;
+		try {
+			await turn2Promise;
+		} catch (e) {
+			caughtAbort = e;
+		}
+		expect((caughtAbort as Error)?.name).toBe("AbortError");
+		// Binding preserved!
+		expect(await store.get("sess-esc")).toBe("conv-esc");
+
+		// Turn 3: send "continue"
+		const r3 = await runTurn(deps, {
+			prompt: "continue",
+			hashes: ["sys_dyn3", "u1", "a1", "u2", "u3"],
+			sessionId: "sess-esc",
+		});
+		expect(r3.classification.outcome).toBe("success");
+		expect(spawns).toHaveLength(3);
+		expect(spawns[2]).toContain("--conversation");
+		expect(spawns[2][spawns[2].indexOf("--conversation") + 1]).toBe("conv-esc");
+	});
+});

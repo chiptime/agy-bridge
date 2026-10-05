@@ -157,8 +157,13 @@ export function classifyRun(signal: RunSignal): Classification {
 		// a timeout, not a task failure — treat it as recoverable. Any other
 		// envelope ERROR falls through to the regex gates below, which still run
 		// against the log.
-		if (signal.envelope?.status === 'ERROR' && /timeout waiting for response/i.test(signal.envelope.error ?? '')) {
-			return { outcome: 'timeout', reason: 'agy_print_wait_timeout' };
+		if (signal.envelope?.status === 'ERROR') {
+			if (/timeout waiting for response/i.test(signal.envelope.error ?? '')) {
+				return { outcome: 'timeout', reason: 'agy_print_wait_timeout' };
+			}
+			if (/interrupted/i.test(signal.envelope.error ?? '')) {
+				return { outcome: 'task_failure', reason: 'interrupted' };
+			}
 		}
 		// Plain-text fallback for runs without a parseable envelope: agy's print
 		// client exits nonzero with this exact line when its own wait deadline fires.
@@ -172,8 +177,13 @@ export function classifyRun(signal: RunSignal): Classification {
 	// pre-turn timeouts exit nonzero). The typed envelope is authoritative:
 	// that is a recoverable timeout, not a task failure, so it must reach
 	// the resume/fallback path instead of artifact_validation_failure.
-	if (signal.envelope?.status === 'ERROR' && PRINT_WAIT_TIMEOUT_RE.test(signal.envelope.error ?? '')) {
-		return { outcome: 'timeout', reason: 'agy_print_wait_timeout' };
+	if (signal.envelope?.status === 'ERROR') {
+		if (PRINT_WAIT_TIMEOUT_RE.test(signal.envelope.error ?? '')) {
+			return { outcome: 'timeout', reason: 'agy_print_wait_timeout' };
+		}
+		if (/interrupted/i.test(signal.envelope.error ?? '')) {
+			return { outcome: 'task_failure', reason: 'interrupted' };
+		}
 	}
 	if (!signal.artifactBytes) return { outcome: 'artifact_validation_failure', reason: 'artifact_missing_or_empty' };
 	return { outcome: 'success', reason: 'ok' };

@@ -41,6 +41,7 @@ import {
 	DEFAULT_STALL_MS,
 	parseSnapshotDir,
 	pruneAttachments,
+	parseStreamLine,
 	runAgyStream,
 	stageAttachments,
 	type Classification,
@@ -283,10 +284,15 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 	// view_file AND a staged filename marks the images inspected. Shape-
 	// tolerant on purpose — only step_update lines carry tool names.
 	let attachmentsInspected = staged.length === 0;
+	let capturedConversationId: string | undefined;
 	const stagedNames = staged.map((rel) => basename(rel));
 	const inspectingOnLine = (line: string): void => {
 		if (!attachmentsInspected && line.includes("view_file") && stagedNames.some((name) => line.includes(name))) {
 			attachmentsInspected = true;
+		}
+		const parsed = parseStreamLine(line);
+		if (parsed.conversationId) {
+			capturedConversationId = parsed.conversationId;
 		}
 		req.onLine?.(line);
 	};
@@ -298,9 +304,7 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		resumed: boolean,
 		turnPrompt: string,
 		// Diagnostics-only label (independent of `resumed`, which is the
-		// unrelated D5/R7 ordinary-continuation flag): true exactly for the
-		// second call() below, triggered by the PRE-EXISTING canResume
-		// mechanism — never inferred from `resumed`.
+		// ordinary-continuation flag): true exactly for the recovery attempt.
 		isRecoveryAttempt: boolean,
 	): Promise<TurnResult> => {
 		// Exclusive attempt identity: callId + 1-based attempt index. Neither
@@ -321,10 +325,10 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 				logPath: attemptLogPath,
 				spawnImpl: tap.spawnImpl,
 				promptViaStdin: deps.promptViaStdin ?? true,
-				// Cancellation drives the engine's bounded termination chain
-				// directly (terminationTrigger "abort", bounded abort hangs),
-				// alongside the tap's own kill path above.
 				signal: req.signal,
+				onInit: (convId) => {
+					capturedConversationId = convId;
+				},
 				// Internal/test seams (config → engine); undefined → engine
 				// termination constants.
 				...(deps.config.terminationGraceMs !== undefined
@@ -465,10 +469,11 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 		const persistAndThrowAbort = async (): Promise<never> => {
 			if (attemptDiagnostics.length > 0) attemptDiagnostics[attemptDiagnostics.length - 1].aborted = true;
 			finalizeDiagnostics();
-			if (result.conversationId) await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
+			const cid = result.conversationId ?? capturedConversationId ?? resumeId;
+			if (cid) await deps.store.bind(req.sessionId, cid, req.hashes);
 			throw abortError();
 		};
-		if (req.signal?.aborted) await persistAndThrowAbort();
+		if (req.signal?.aborted || result.run.detached) await persistAndThrowAbort();
 		/**
 		 * Slice-2/slice-3 boundary (PRD "Rollout, risks, and open decisions"
 		 * and "Small implementation slices" #3): there is no concrete,
@@ -523,15 +528,17 @@ export async function runTurn(deps: TurnDeps, req: TurnRequest): Promise<TurnRes
 			// about, now gated by the explicit facts above instead of reusing
 			// `resumed`.
 			result = await attempt(result.conversationId, true, prompt, true);
-			if (req.signal?.aborted) await persistAndThrowAbort();
+			if (req.signal?.aborted || result.run.detached) await persistAndThrowAbort();
 		}
 		if (result.classification.outcome === "success") {
 			if (result.conversationId) await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
 			return { ...result, logPath: finalizeDiagnostics() };
 		}
-		// v2: drop ONLY the failed binding; without a captured id (defensive),
-		// rebind falls back to dropping the whole session.
-		if (result.resumed) await deps.store.rebind(req.sessionId, result.conversationId);
+		// Dropping the binding is restricted to terminal failures of resumed attempts,
+		// and NEVER done for interrupted turns or aborts so the user can continue the conversation.
+		if (result.resumed && result.classification.reason !== "interrupted") {
+			await deps.store.rebind(req.sessionId, result.conversationId);
+		}
 		throw new TurnError(
 			mapClassification(result.classification, {
 				logPath: finalizeDiagnostics(),

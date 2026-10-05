@@ -123,6 +123,13 @@ alternative. E2E: with it on, pasting an image stages the file and the agent
 answers about it via `view_file`; with it off, pasting an image errors and stages
 nothing.
 
+## Interactive session popup (`open_agy_session`)
+
+The plugin registers the `open_agy_session` tool (alias `agy_open`), allowing the user or assistant to open the active `agy` conversation in an interactive popup:
+- **`tmux display-popup`**: When inside tmux (`$TMUX`), opens a centered floating popup over the current terminal (`-E`, auto-closes on exit).
+- **Desktop terminal**: Falls back to spawning an external terminal emulator window if running in a graphical environment outside tmux.
+- **Manual fallback**: If running headless without a terminal, outputs the verbatim command `agy --conversation <id>` for manual execution.
+
 ## Effort variants
 
 agy encodes the reasoning effort in model ids as a `-high`/`-medium`/`-low`

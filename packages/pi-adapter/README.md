@@ -35,7 +35,8 @@ Full install, safety wall, continuity, and configuration docs: see the
   (new in v0.3); `isolated: true` stays a one-shot.
 - **Command `/agy`** — `status` (config, session binding, thread binding,
   in-flight provider turn; in-flight thread delegations are not shown on
-  the turn line) and `clear` (drops BOTH the session and thread rows).
+  the turn line), `clear` (drops BOTH the session and thread rows), and
+  `open` (opens the active agy session in an interactive tmux popup or terminal).
 - **File config** — `~/.pi/agent/agy-bridge.json` then project
   `.pi/agy-bridge.json`; precedence factory options > project > global >
   env. `askAgy` section: `enabled`, `name`, `label`, `description`,

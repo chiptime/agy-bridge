@@ -398,7 +398,7 @@ import {
   writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "fs";
-import { dirname, join as join3 } from "path";
+import { dirname, join as join4 } from "path";
 import { randomUUID } from "crypto";
 
 // ../engine/src/spawn.ts
@@ -494,6 +494,7 @@ async function runAgyStream(opts) {
       } catch {}
       throw err;
     }
+    opts.onChildSpawned?.(child);
     if (opts.promptViaStdin) {
       child.stdin?.on("error", () => {});
       child.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: opts.prompt } }) + `
@@ -568,9 +569,24 @@ async function runAgyStream(opts) {
         requestTermination("stall");
       }, stallMs);
     };
-    const onAbort = () => requestTermination("abort");
-    if (opts.signal)
-      opts.signal.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () => {
+      if (opts.detachOnAbort) {
+        if (settled)
+          return;
+        timedOut = false;
+        terminationTrigger = "abort";
+        finish({ detached: true });
+      } else {
+        requestTermination("abort");
+      }
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        onAbort();
+      } else {
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
     const onExit = (code) => {
       exitCode = code;
       finish();
@@ -582,7 +598,7 @@ async function runAgyStream(opts) {
       }
       finish();
     };
-    const finish = () => {
+    const finish = (finishOpts) => {
       if (settled)
         return;
       settled = true;
@@ -594,13 +610,27 @@ async function runAgyStream(opts) {
       if (finalTimer)
         clearTimeout(finalTimer);
       opts.signal?.removeEventListener("abort", onAbort);
-      child.off("exit", onExit);
-      child.off("close", onClose);
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      try {
-        closeSync(logFd);
-      } catch {}
+      if (!finishOpts?.detached) {
+        child.off("exit", onExit);
+        child.off("close", onClose);
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        try {
+          closeSync(logFd);
+        } catch {}
+        opts.onChildExit?.();
+      } else {
+        const onChildFinalExit = () => {
+          child.off("exit", onChildFinalExit);
+          child.off("close", onChildFinalExit);
+          try {
+            closeSync(logFd);
+          } catch {}
+          opts.onChildExit?.();
+        };
+        child.once("exit", onChildFinalExit);
+        child.once("close", onChildFinalExit);
+      }
       resolve({
         exitCode,
         timedOut,
@@ -615,7 +645,8 @@ async function runAgyStream(opts) {
         terminationTrigger,
         requestedSignal,
         escalatedSignal,
-        observedSignal
+        observedSignal,
+        detached: finishOpts?.detached
       });
     };
     child.on("error", (err) => {
@@ -632,10 +663,17 @@ async function runAgyStream(opts) {
         eventCount++;
         lastEvent = got.event;
       }
-      if (got.conversationId !== undefined)
+      if (got.conversationId !== undefined) {
         conversationId = got.conversationId;
-      if (got.envelope !== undefined)
+        opts.onInit?.(conversationId);
+      }
+      if (got.envelope !== undefined) {
         envelope = got.envelope;
+        setTimeout(() => {
+          if (!settled)
+            finish();
+        }, 100);
+      }
     });
     child.stderr?.on("data", (chunk) => {
       armStall();
@@ -644,7 +682,7 @@ async function runAgyStream(opts) {
     child.on("exit", onExit);
     child.on("close", onClose);
     if (opts.signal?.aborted)
-      requestTermination("abort");
+      onAbort();
   });
 }
 // ../engine/src/outcomes.ts
@@ -676,8 +714,13 @@ function classifyRun(signal) {
   if (AUTH_RE.test(log))
     return { outcome: "auth_captcha", reason: "auth_or_captcha" };
   if (signal.exitCode !== 0) {
-    if (signal.envelope?.status === "ERROR" && /timeout waiting for response/i.test(signal.envelope.error ?? "")) {
-      return { outcome: "timeout", reason: "agy_print_wait_timeout" };
+    if (signal.envelope?.status === "ERROR") {
+      if (/timeout waiting for response/i.test(signal.envelope.error ?? "")) {
+        return { outcome: "timeout", reason: "agy_print_wait_timeout" };
+      }
+      if (/interrupted/i.test(signal.envelope.error ?? "")) {
+        return { outcome: "task_failure", reason: "interrupted" };
+      }
     }
     if (PRINT_WAIT_TIMEOUT_RE.test(log))
       return { outcome: "timeout", reason: "agy_print_wait_timeout" };
@@ -687,8 +730,13 @@ function classifyRun(signal) {
       return { outcome: "transient_unavailable", reason: "provider_outage" };
     return { outcome: "task_failure", reason: "nonzero_exit" };
   }
-  if (signal.envelope?.status === "ERROR" && PRINT_WAIT_TIMEOUT_RE.test(signal.envelope.error ?? "")) {
-    return { outcome: "timeout", reason: "agy_print_wait_timeout" };
+  if (signal.envelope?.status === "ERROR") {
+    if (PRINT_WAIT_TIMEOUT_RE.test(signal.envelope.error ?? "")) {
+      return { outcome: "timeout", reason: "agy_print_wait_timeout" };
+    }
+    if (/interrupted/i.test(signal.envelope.error ?? "")) {
+      return { outcome: "task_failure", reason: "interrupted" };
+    }
   }
   if (!signal.artifactBytes)
     return { outcome: "artifact_validation_failure", reason: "artifact_missing_or_empty" };
@@ -881,10 +929,10 @@ function parseAgyModelsOutput(stdout) {
       continue;
     const tabIndex = line.indexOf("\t");
     const id = line.slice(0, tabIndex).trim();
-    const name14 = line.slice(tabIndex + 1).trim();
-    if (id === "" || name14 === "")
+    const name = line.slice(tabIndex + 1).trim();
+    if (id === "" || name === "")
       continue;
-    models.push({ id, name: name14 });
+    models.push({ id, name });
   }
   return models;
 }
@@ -1269,13 +1317,109 @@ function promptHasImage(messages) {
 function unsupportedAttachmentsMessage(types) {
   return `unsupported attachment type(s) in the last user turn: ${types.join(", ")} \u2014 the agy image bridge accepts png, jpeg, gif and webp images only; remove the unsupported attachment or describe its content as text`;
 }
+// ../engine/src/interactive-session.ts
+import { spawn as defaultSpawn } from "child_process";
+import { accessSync, constants } from "fs";
+import { join as join3 } from "path";
+function buildAgyResumeCommand(bin, conversationId) {
+  return `${bin} --conversation ${conversationId}`;
+}
+function isExecutableInPath(cmd, env = process.env) {
+  if (cmd.includes("/")) {
+    try {
+      accessSync(cmd, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const pathVal = env.PATH ?? process.env.PATH ?? "";
+  for (const dir of pathVal.split(":")) {
+    if (!dir)
+      continue;
+    try {
+      accessSync(join3(dir, cmd), constants.X_OK);
+      return true;
+    } catch {}
+  }
+  return false;
+}
+function openInteractiveAgySession(options) {
+  const env = options.env ?? process.env;
+  const bin = options.bin ?? env.AGY_BIN ?? "agy";
+  const command = buildAgyResumeCommand(bin, options.conversationId);
+  const spawnFn = options.spawnFn ?? defaultSpawn;
+  const checkCmd = options.isCommandAvailable ?? ((cmd) => isExecutableInPath(cmd, env));
+  if (env.TMUX && checkCmd("tmux")) {
+    const title = ` agy: ${options.conversationId.slice(0, 8)} `;
+    const tmuxArgs = ["display-popup"];
+    if (options.cwd) {
+      tmuxArgs.push("-d", options.cwd);
+    }
+    tmuxArgs.push("-w", "85%", "-h", "85%", "-T", title, "-E", command);
+    try {
+      const child = spawnFn("tmux", tmuxArgs, {
+        cwd: options.cwd,
+        detached: true,
+        stdio: "ignore",
+        env
+      });
+      child?.unref?.();
+      return { success: true, method: "tmux-popup", command };
+    } catch (err) {
+      return {
+        success: false,
+        reason: "spawn_failed",
+        command,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+  const hasDisplay = Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
+  if (hasDisplay) {
+    const candidates = env.TERMINAL ? [env.TERMINAL] : [
+      "x-terminal-emulator",
+      "ghostty",
+      "kitty",
+      "alacritty",
+      "wezterm",
+      "foot",
+      "gnome-terminal",
+      "konsole",
+      "xfce4-terminal",
+      "xterm"
+    ];
+    const term = candidates.find((t) => checkCmd(t));
+    if (term) {
+      const termArgs = term === "gnome-terminal" ? ["--", bin, "--conversation", options.conversationId] : ["-e", bin, "--conversation", options.conversationId];
+      try {
+        const child = spawnFn(term, termArgs, {
+          cwd: options.cwd,
+          detached: true,
+          stdio: "ignore",
+          env
+        });
+        child?.unref?.();
+        return { success: true, method: "terminal-window", terminal: term, command };
+      } catch (err) {
+        return {
+          success: false,
+          reason: "spawn_failed",
+          command,
+          error: err instanceof Error ? err.message : String(err)
+        };
+      }
+    }
+  }
+  return { success: false, reason: "no_display_or_terminal", command };
+}
 // src/messages.ts
-function mapMessages(messages2, opts) {
+function mapMessages(messages, opts) {
   const warnings = [];
-  const systemText = messages2.filter((m) => m.role === "system").map((m) => typeof m.content === "string" ? m.content.trim() : "").filter((s) => s !== "").join(`
+  const systemText = messages.filter((m) => m.role === "system").map((m) => typeof m.content === "string" ? m.content.trim() : "").filter((s) => s !== "").join(`
 
 `);
-  const lastUser = [...messages2].reverse().find((m) => m.role === "user");
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
   let userText = "";
   if (typeof lastUser?.content === "string") {
     userText = lastUser.content;
@@ -1382,7 +1526,7 @@ function openSessionStore(path, options = {}) {
   };
   const persist = (file) => {
     mkdirSync5(dirname(path), { recursive: true });
-    const tmp = join3(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
+    const tmp = join4(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
     writeFileSync3(tmp, `${JSON.stringify(file, null, "\t")}
 `);
     renameSync(tmp, path);
@@ -1480,7 +1624,8 @@ function openSessionStore(path, options = {}) {
       let adopt;
       for (const entry of list) {
         const hashes = Array.isArray(entry.hashes) ? entry.hashes.filter((h) => typeof h === "string") : undefined;
-        if (hashes !== undefined && hashes.length > 0 && hashesArePrefix(hashes, incomingHashes)) {
+        const isPrefix = hashes !== undefined && hashes.length > 0 && (hashesArePrefix(hashes, incomingHashes) || hashes.length > 1 && incomingHashes.length >= hashes.length && hashesArePrefix(hashes.slice(1), incomingHashes.slice(1)));
+        if (isPrefix) {
           if (hashes.length > bestLen) {
             best = entry;
             bestLen = hashes.length;
@@ -1557,27 +1702,27 @@ function openSessionStore(path, options = {}) {
 
 // src/paths.ts
 import { homedir, tmpdir } from "os";
-import { isAbsolute, join as join4 } from "path";
+import { isAbsolute, join as join5 } from "path";
 function resolveStateDir(opts = {}) {
   const root = opts.override ?? xdgStateRoot(opts.env ?? process.env);
-  return join4(root, "agy-bridge");
+  return join5(root, "agy-bridge");
 }
 function xdgStateRoot(env) {
   const xdg = env["XDG_STATE_HOME"];
   if (xdg && isAbsolute(xdg))
     return xdg;
   const home = env["HOME"] || homedir();
-  return join4(home, ".local", "state");
+  return join5(home, ".local", "state");
 }
 function sessionMapPath(opts = {}) {
-  return join4(resolveStateDir(opts), "opencode-sessions.json");
+  return join5(resolveStateDir(opts), "opencode-sessions.json");
 }
 
 // src/language-model.ts
 import { randomUUID as randomUUID3 } from "crypto";
 
 // src/turn.ts
-import { basename, dirname as dirname2, join as join7 } from "path";
+import { basename, dirname as dirname2, join as join8 } from "path";
 
 // src/stream-tap.ts
 import { spawn as spawn3 } from "child_process";
@@ -1637,7 +1782,7 @@ function createTap(onLine, opts = {}) {
 
 // src/workdir.ts
 import { mkdtempSync, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync5 } from "fs";
-import { isAbsolute as isAbsolute2, join as join5 } from "path";
+import { isAbsolute as isAbsolute2, join as join6 } from "path";
 import { tmpdir as tmpdir2 } from "os";
 var SCRATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 function prepareWorkdir(mode, opts) {
@@ -1661,7 +1806,7 @@ function prepareWorkdir(mode, opts) {
     return { dir: worktree, scratch: false };
   }
   const root = opts.scratchRoot ?? opts.tmpdir ?? tmpdir2();
-  return { dir: mkdtempSync(join5(root, "agy-run-")), scratch: true };
+  return { dir: mkdtempSync(join6(root, "agy-run-")), scratch: true };
 }
 function pruneScratch(root, now = new Date) {
   let entries;
@@ -1674,7 +1819,7 @@ function pruneScratch(root, now = new Date) {
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith("agy-run-"))
       continue;
-    const dir = join5(root, entry.name);
+    const dir = join6(root, entry.name);
     let mtime;
     try {
       mtime = statSync5(dir).mtime;
@@ -1686,7 +1831,7 @@ function pruneScratch(root, now = new Date) {
     for (const inner of readdirSync3(dir)) {
       if (inner === "run.log")
         continue;
-      rmSync2(join5(dir, inner), { recursive: true, force: true });
+      rmSync2(join6(dir, inner), { recursive: true, force: true });
     }
     pruned++;
   }
@@ -1766,6 +1911,13 @@ function mapClassification(c, ctx) {
     };
   }
   if (c.outcome === "task_failure") {
+    if (c.reason === "interrupted" || ctx.detail === "interrupted") {
+      return {
+        retryable: false,
+        resume: true,
+        message: withLog(ctx, "agy turn was interrupted internally by agy; send another prompt or 'continue' to resume this conversation")
+      };
+    }
     return {
       retryable: false,
       resume: false,
@@ -1783,7 +1935,7 @@ function mapClassification(c, ctx) {
 import { lstatSync as lstatSync2, readdirSync as readdirSync4, rmSync as rmSync3, mkdirSync as mkdirSync7, writeFileSync as writeFileSync4, renameSync as renameSync2 } from "fs";
 import { randomUUID as randomUUID2 } from "crypto";
 import { tmpdir as tmpdir3 } from "os";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 var DIAGNOSTICS_DIRNAME = ".agy-diagnostics";
 var SUMMARY_FILENAME = "summary.json";
 var MAX_SUMMARY_BYTES = 8 * 1024;
@@ -1796,22 +1948,22 @@ function generateCallId() {
   return randomUUID2();
 }
 function fallbackDiagnosticsDir() {
-  return join6(tmpdir3(), "agy-bridge-diagnostics-fallback");
+  return join7(tmpdir3(), "agy-bridge-diagnostics-fallback");
 }
 function fallbackAttemptLogPathFor(callId, attemptIndex) {
-  return join6(fallbackDiagnosticsDir(), `${callId}-${attemptIndex}.log`);
+  return join7(fallbackDiagnosticsDir(), `${callId}-${attemptIndex}.log`);
 }
 function diagnosticsDirFor(workdir) {
-  return join6(workdir, DIAGNOSTICS_DIRNAME);
+  return join7(workdir, DIAGNOSTICS_DIRNAME);
 }
 function callGroupDirFor(workdir, callId) {
-  return join6(diagnosticsDirFor(workdir), callId);
+  return join7(diagnosticsDirFor(workdir), callId);
 }
 function attemptLogPathFor(workdir, callId, attemptIndex) {
-  return join6(callGroupDirFor(workdir, callId), `attempt-${attemptIndex}.log`);
+  return join7(callGroupDirFor(workdir, callId), `attempt-${attemptIndex}.log`);
 }
 function summaryPathFor(workdir, callId) {
-  return join6(callGroupDirFor(workdir, callId), SUMMARY_FILENAME);
+  return join7(callGroupDirFor(workdir, callId), SUMMARY_FILENAME);
 }
 function resolveAttemptLogPath(workdir, callId, attemptIndex) {
   try {
@@ -1822,7 +1974,7 @@ function resolveAttemptLogPath(workdir, callId, attemptIndex) {
       mkdirSync7(fallbackDiagnosticsDir(), { recursive: true, mode: 448 });
       return fallbackAttemptLogPathFor(callId, attemptIndex);
     } catch {
-      return join6(tmpdir3(), `agy-attempt-${callId}-${attemptIndex}.log`);
+      return join7(tmpdir3(), `agy-attempt-${callId}-${attemptIndex}.log`);
     }
   }
 }
@@ -1892,7 +2044,7 @@ function writeCallSummary(workdir, callId, summary) {
   mkdirSync7(dir, { recursive: true, mode: 448 });
   const { json } = boundedSummaryJson(summary);
   const path = summaryPathFor(workdir, callId);
-  const tmp = join6(dir, `.${SUMMARY_FILENAME}.${process.pid}.tmp`);
+  const tmp = join7(dir, `.${SUMMARY_FILENAME}.${process.pid}.tmp`);
   writeFileSync4(tmp, json, { mode: 384 });
   renameSync2(tmp, path);
   return path;
@@ -1910,8 +2062,8 @@ function listCompletedCallGroups(diagnosticsDir) {
       continue;
     if (!CALL_ID_PATTERN.test(entry.name))
       continue;
-    const dir = join6(diagnosticsDir, entry.name);
-    const summary = join6(dir, SUMMARY_FILENAME);
+    const dir = join7(diagnosticsDir, entry.name);
+    const summary = join7(dir, SUMMARY_FILENAME);
     try {
       const st = lstatSync2(summary);
       if (!st.isFile())
@@ -1998,7 +2150,7 @@ function pruneLooseLogFiles(rootDir, isOwned, opts) {
       continue;
     if (!isOwned(entry.name))
       continue;
-    const path = join6(rootDir, entry.name);
+    const path = join7(rootDir, entry.name);
     let st;
     try {
       st = lstatSync2(path);
@@ -2035,7 +2187,7 @@ function pruneFallbackDiagnostics(rootDir = fallbackDiagnosticsDir(), opts = {})
 }
 var LOOSE_TIER3_PATTERN = new RegExp(`^agy-attempt-${CALL_ID_PATTERN.source.slice(1, -1)}-\\d+\\.log$`, "i");
 function pruneLooseTier3Logs(rootDir = tmpdir3(), opts = {}) {
-  return pruneLooseLogFiles(rootDir, (name14) => LOOSE_TIER3_PATTERN.test(name14), opts);
+  return pruneLooseLogFiles(rootDir, (name) => LOOSE_TIER3_PATTERN.test(name), opts);
 }
 
 // src/turn.ts
@@ -2120,10 +2272,15 @@ async function runTurn(deps, req) {
   }
   const directive = attachmentDirective(staged);
   let attachmentsInspected = staged.length === 0;
+  let capturedConversationId;
   const stagedNames = staged.map((rel) => basename(rel));
   const inspectingOnLine = (line) => {
-    if (!attachmentsInspected && line.includes("view_file") && stagedNames.some((name14) => line.includes(name14))) {
+    if (!attachmentsInspected && line.includes("view_file") && stagedNames.some((name) => line.includes(name))) {
       attachmentsInspected = true;
+    }
+    const parsed = parseStreamLine(line);
+    if (parsed.conversationId) {
+      capturedConversationId = parsed.conversationId;
     }
     req.onLine?.(line);
   };
@@ -2148,6 +2305,9 @@ async function runTurn(deps, req) {
         spawnImpl: tap.spawnImpl,
         promptViaStdin: deps.promptViaStdin ?? true,
         signal: req.signal,
+        onInit: (convId) => {
+          capturedConversationId = convId;
+        },
         ...deps.config.terminationGraceMs !== undefined ? { terminationGraceMs: deps.config.terminationGraceMs } : {},
         ...deps.config.terminationSettleMs !== undefined ? { terminationSettleMs: deps.config.terminationSettleMs } : {}
       });
@@ -2206,7 +2366,7 @@ async function runTurn(deps, req) {
   }
   let conversationLock;
   if (resumeId !== undefined) {
-    const lockDir = join7(resolveStateDir({ override: deps.config.stateDir }), "conversation-locks");
+    const lockDir = join8(resolveStateDir({ override: deps.config.stateDir }), "conversation-locks");
     try {
       conversationLock = await acquireConversationLock(lockDir, resumeId);
     } catch (err) {
@@ -2226,11 +2386,12 @@ async function runTurn(deps, req) {
       if (attemptDiagnostics.length > 0)
         attemptDiagnostics[attemptDiagnostics.length - 1].aborted = true;
       finalizeDiagnostics();
-      if (result.conversationId)
-        await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
+      const cid = result.conversationId ?? capturedConversationId ?? resumeId;
+      if (cid)
+        await deps.store.bind(req.sessionId, cid, req.hashes);
       throw abortError();
     };
-    if (req.signal?.aborted)
+    if (req.signal?.aborted || result.run.detached)
       await persistAndThrowAbort();
     const RECOVERY_RESTRICTED_TO_NEW_CONVERSATIONS = true;
     const recoveryBlockedByPolicy = RECOVERY_RESTRICTED_TO_NEW_CONVERSATIONS && wasOrdinaryContinuation && result.conversationId !== undefined;
@@ -2243,7 +2404,7 @@ async function runTurn(deps, req) {
       recoveryBudgetConsumed = true;
       recoveryAttempted = true;
       result = await attempt(result.conversationId, true, prompt, true);
-      if (req.signal?.aborted)
+      if (req.signal?.aborted || result.run.detached)
         await persistAndThrowAbort();
     }
     if (result.classification.outcome === "success") {
@@ -2251,8 +2412,9 @@ async function runTurn(deps, req) {
         await deps.store.bind(req.sessionId, result.conversationId, req.hashes);
       return { ...result, logPath: finalizeDiagnostics() };
     }
-    if (result.resumed)
+    if (result.resumed && result.classification.reason !== "interrupted") {
       await deps.store.rebind(req.sessionId, result.conversationId);
+    }
     throw new TurnError(mapClassification(result.classification, {
       logPath: finalizeDiagnostics(),
       conversationId: result.conversationId,
@@ -2268,8 +2430,8 @@ async function runTurn(deps, req) {
 
 // src/models.ts
 var DEFAULT_LIMITS = { context: 128000, output: 8192 };
-function model(id, name14, modelArg) {
-  return { id, name: name14, modelArg, limit: { ...DEFAULT_LIMITS }, pool: poolForModel(modelArg ?? "") };
+function model(id, name, modelArg) {
+  return { id, name, modelArg, limit: { ...DEFAULT_LIMITS }, pool: poolForModel(modelArg ?? "") };
 }
 var EFFORT_SUFFIXES = ["high", "medium", "low"];
 function splitEffort(id) {
@@ -2682,7 +2844,7 @@ class AgyLanguageModel {
     if (!deps.config.imageInput && promptHasImage(incoming)) {
       return attachmentErrorStream(IMAGE_INPUT_DISABLED_MESSAGE);
     }
-    let attachments2;
+    let attachments;
     let promptMessages = incoming;
     if (deps.config.imageInput) {
       const lastUser = [...incoming].reverse().find((m) => m?.role === "user");
@@ -2700,7 +2862,7 @@ class AgyLanguageModel {
           return attachmentErrorStream(unsupportedAttachmentsMessage(extracted.unsupported));
         }
         if (extracted.images.length > 0) {
-          attachments2 = extracted.images;
+          attachments = extracted.images;
           promptMessages = incoming.map((m) => m === lastUser ? {
             ...m,
             content: lastUserContent.filter((part) => {
@@ -2756,7 +2918,7 @@ class AgyLanguageModel {
             seedPrompt: diverged ? mapping.prompt : undefined,
             modelArg,
             sessionId,
-            attachments: attachments2,
+            attachments,
             signal: options.abortSignal,
             onLine: (line) => {
               if (!line.includes('"step_update"'))
@@ -2783,7 +2945,7 @@ class AgyLanguageModel {
               });
             }
           });
-          if (attachments2 !== undefined && attachments2.length > 0 && result.stagedAttachments !== undefined && result.stagedAttachments.length > 0 && result.attachmentsInspected !== true) {
+          if (attachments !== undefined && attachments.length > 0 && result.stagedAttachments !== undefined && result.stagedAttachments.length > 0 && result.attachmentsInspected !== true) {
             openReasoning();
             controller.enqueue({ type: "reasoning-delta", id: REASONING_ID, delta: IMAGE_NOT_INSPECTED_NOTICE });
           }
@@ -2900,6 +3062,6 @@ function createAgyProvider(options = {}, testDeps = {}) {
   };
 }
 export {
-  createAgyProvider,
-  AGY_PROVIDER_ID
+  AGY_PROVIDER_ID,
+  createAgyProvider
 };

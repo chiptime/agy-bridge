@@ -19,6 +19,7 @@
  * Anything else — including a bare /agy — prints usage help.
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { openInteractiveAgySession } from "agy-bridge-engine";
 import type { BridgeState } from "./lifecycle";
 import { askThreadKey, piSessionKey, type SessionStore } from "./session-store";
 
@@ -26,6 +27,7 @@ export const AGY_USAGE_LINES: readonly string[] = [
 	"Usage: /agy <subcommand>",
 	"  status — show agy bridge state (config, models, session + thread bindings, in-flight turn)",
 	"  clear  — clear this session's persisted agy bindings (session AND thread rows) and in-memory state",
+	"  open   — open the active agy session in an interactive popup or terminal",
 ];
 
 export interface AgyCommandDeps {
@@ -43,6 +45,8 @@ export interface AgyCommandDeps {
 	imageInput: boolean;
 	/** Wall-clock seam (tests). */
 	now?: () => number;
+	/** Test seam: interactive session opener. */
+	openInteractiveSession?: typeof openInteractiveAgySession;
 }
 
 /** Compact human age: 2.0s → 2.0m → 2.0h. */
@@ -133,6 +137,38 @@ export function createAgyCommand(deps: AgyCommandDeps): AgyCommand {
 								: "no agy binding for this session",
 					"info",
 				);
+			} else if (sub === "open") {
+				const askKey = askThreadKey(key);
+				const entry = await deps.state.lookupBinding(deps.store, key);
+				const threadEntry = entry === undefined ? await deps.state.lookupBinding(deps.store, askKey) : undefined;
+				const active = entry ?? threadEntry;
+				if (active === undefined) {
+					ctx.ui.notify("no active agy conversation for this session", "warning");
+					return;
+				}
+				const turn = deps.state.currentTurn(key);
+				if (turn !== undefined) {
+					ctx.ui.notify("warning: an agy turn is currently in flight for this session", "warning");
+				}
+				const openSession = deps.openInteractiveSession ?? openInteractiveAgySession;
+				const res = openSession({
+					conversationId: active.conversationId,
+					cwd: ctx.cwd,
+					bin: deps.bin,
+				});
+				if (res.success) {
+					ctx.ui.notify(
+						res.method === "tmux-popup"
+							? `opened agy session ${active.conversationId} in tmux popup`
+							: `opened agy session ${active.conversationId} in terminal window (${res.terminal})`,
+						"info",
+					);
+				} else {
+					ctx.ui.notify(
+						`could not open terminal popup automatically (${res.reason}). Run manually:\n  ${res.command}`,
+						"warning",
+					);
+				}
 			} else {
 				ctx.ui.notify(AGY_USAGE_LINES.join("\n"), "info");
 			}

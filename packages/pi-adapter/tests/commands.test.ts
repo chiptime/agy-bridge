@@ -246,3 +246,93 @@ describe("/agy usage", () => {
 		expect(notifications[0]?.message).toContain("models: 3 discovered");
 	});
 });
+
+// --- open --------------------------------------------------------------------------
+
+describe("/agy open", () => {
+	test("warns when no agy conversation is bound to the session", async () => {
+		const { deps, ctx, notifications } = await setup({ sessionId: "sess-empty" });
+		await createAgyCommand(deps).handler("open", ctx);
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]?.message).toBe("no active agy conversation for this session");
+		expect(notifications[0]?.type).toBe("warning");
+	});
+
+	test("opens session conversation in tmux popup when bound", async () => {
+		const { deps, ctx, notifications } = await setup({ sessionId: "sess-1", cwd: "/test/project" });
+		await deps.store.bind("sess-1", "conv-active");
+		let launchedWith: unknown;
+		deps.openInteractiveSession = (opts) => {
+			launchedWith = opts;
+			return {
+				success: true,
+				method: "tmux-popup",
+				command: "agy --conversation conv-active",
+			};
+		};
+
+		await createAgyCommand(deps).handler("open", ctx);
+
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]?.message).toContain("opened agy session conv-active in tmux popup");
+		expect(notifications[0]?.type).toBe("info");
+		expect(launchedWith).toEqual({
+			conversationId: "conv-active",
+			cwd: "/test/project",
+			bin: "/usr/bin/agy",
+		});
+	});
+
+	test("falls back to thread binding when session row is absent", async () => {
+		const { deps, ctx, notifications } = await setup({ sessionId: "sess-thread", cwd: "/test/project" });
+		await deps.store.bind("sess-thread:ask", "conv-thread-only");
+		let openedId: string | undefined;
+		deps.openInteractiveSession = (opts) => {
+			openedId = opts.conversationId;
+			return {
+				success: true,
+				method: "terminal-window",
+				terminal: "x-terminal-emulator",
+				command: `agy --conversation ${opts.conversationId}`,
+			};
+		};
+
+		await createAgyCommand(deps).handler("open", ctx);
+
+		expect(openedId).toBe("conv-thread-only");
+		expect(notifications[0]?.message).toContain("opened agy session conv-thread-only in terminal window");
+		expect(notifications[0]?.type).toBe("info");
+	});
+
+	test("warns if an agy turn is currently in flight", async () => {
+		const { deps, ctx, notifications, state } = await setup({ sessionId: "sess-1" });
+		await deps.store.bind("sess-1", "conv-busy");
+		state.beginTurn("sess-1", Date.now());
+		deps.openInteractiveSession = () => ({
+			success: true,
+			method: "tmux-popup",
+			command: "agy --conversation conv-busy",
+		});
+
+		await createAgyCommand(deps).handler("open", ctx);
+
+		expect(notifications.some((n) => n.message.includes("warning: an agy turn is currently in flight"))).toBe(true);
+		expect(notifications.some((n) => n.message.includes("opened agy session conv-busy in tmux popup"))).toBe(true);
+	});
+
+	test("warns with fallback command when opening terminal popup fails", async () => {
+		const { deps, ctx, notifications } = await setup({ sessionId: "sess-1" });
+		await deps.store.bind("sess-1", "conv-fail");
+		deps.openInteractiveSession = () => ({
+			success: false,
+			reason: "no_display_or_terminal",
+			command: "agy --conversation conv-fail",
+		});
+
+		await createAgyCommand(deps).handler("open", ctx);
+
+		expect(notifications[0]?.type).toBe("warning");
+		expect(notifications[0]?.message).toContain("could not open terminal popup automatically");
+		expect(notifications[0]?.message).toContain("agy --conversation conv-fail");
+	});
+});

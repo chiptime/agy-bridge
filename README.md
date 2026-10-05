@@ -108,8 +108,8 @@ What the extension registers:
   the system prompt.
 - **Command `/agy`** — `status` (config, discovery cache, session binding,
   thread binding, in-flight provider turn; in-flight thread delegations do
-  not appear on the turn line) and `clear` (drop this session's session
-  AND thread rows).
+  not appear on the turn line), `clear` (drop this session's session
+  AND thread rows), and `open` (opens the active agy session in a tmux popup or terminal).
 
 ### Safety wall — read before pointing it at a real repository
 

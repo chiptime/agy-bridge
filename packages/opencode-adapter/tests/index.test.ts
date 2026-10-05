@@ -190,4 +190,55 @@ describe("unit: index — provider.models hook (dynamic discovery registration)"
 			expect(m?.capabilities.attachment).toBe(true);
 		}
 	});
+
+	describe("open_agy_session tool registration and execution", () => {
+		test("server registers open_agy_session and agy_open tools", async () => {
+			const hooks = await agyPlugin.server(pluginInput("/wt"));
+			expect(hooks.tool?.open_agy_session).toBeDefined();
+			expect(hooks.tool?.agy_open).toBeDefined();
+		});
+
+		test("returns guidance when session is not bound to an agy conversation", async () => {
+			const store = {
+				getEntry: async () => undefined,
+			} as unknown as SessionStore;
+			const hooks = await agyPlugin.server(pluginInput("/wt"), { store });
+			const toolDef = hooks.tool!.open_agy_session;
+			const result = await toolDef.execute({}, { sessionID: "sess-1", worktree: "/wt" } as never);
+			expect(result).toBe("No active agy conversation bound for this session yet.");
+		});
+
+		test("launches interactive session with bound conversationId and returns success", async () => {
+			const store = {
+				getEntry: async () => ({ conversationId: "c-123" }),
+			} as unknown as SessionStore;
+			let launchedWith: unknown;
+			const openInteractiveSession = (opts: unknown) => {
+				launchedWith = opts;
+				return { success: true as const, method: "tmux-popup" as const, command: "agy --conversation c-123" };
+			};
+			const hooks = await agyPlugin.server(pluginInput("/wt/project"), { store, openInteractiveSession });
+			const toolDef = hooks.tool!.open_agy_session;
+			const result = await toolDef.execute({}, { sessionID: "sess-1", worktree: "/wt/project" } as never);
+			expect(result).toContain("Opened agy session c-123 in tmux popup.");
+			expect((launchedWith as { conversationId: string }).conversationId).toBe("c-123");
+			expect((launchedWith as { cwd: string }).cwd).toBe("/wt/project");
+		});
+
+		test("returns fallback instruction when opening popup fails", async () => {
+			const store = {
+				getEntry: async () => ({ conversationId: "c-456" }),
+			} as unknown as SessionStore;
+			const openInteractiveSession = () => ({
+				success: false as const,
+				reason: "no_display_or_terminal" as const,
+				command: "agy --conversation c-456",
+			});
+			const hooks = await agyPlugin.server(pluginInput("/wt"), { store, openInteractiveSession });
+			const toolDef = hooks.tool!.open_agy_session;
+			const result = await toolDef.execute({}, { sessionID: "sess-1", worktree: "/wt" } as never);
+			expect(result).toContain("Could not launch interactive terminal automatically");
+			expect(result).toContain("agy --conversation c-456");
+		});
+	});
 });

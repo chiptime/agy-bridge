@@ -219,19 +219,23 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 		);
 	}
 
-	pi.registerCommand(
-		"agy",
-		createAgyCommand({
-			bin: config.agyBin,
-			timeoutMs: config.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
-			stateDir: config.stateDir,
-			store,
-			state,
-			// pi-image-input: /agy status reports the resolved capability.
-			imageInput: config.imageInput,
-			...(deps.now !== undefined ? { now: deps.now } : {}),
-		}),
-	);
+	const agyCommand = createAgyCommand({
+		bin: config.agyBin,
+		timeoutMs: config.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
+		stateDir: config.stateDir,
+		store,
+		state,
+		// pi-image-input: /agy status reports the resolved capability.
+		imageInput: config.imageInput,
+		...(deps.now !== undefined ? { now: deps.now } : {}),
+	});
+
+	pi.registerCommand("agy", agyCommand);
+
+	pi.registerShortcut?.("alt+a" as any, {
+		description: "Open the active agy conversation in an interactive popup",
+		handler: (ctx) => agyCommand.handler("open", ctx as any),
+	});
 
 	const lifecycle = createLifecycle({
 		state,

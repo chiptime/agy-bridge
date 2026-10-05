@@ -75,6 +75,8 @@ export interface SpawnRun {
 	escalatedSignal?: string;
 	/** Signal argument reported by the child's `close` event, when one arrived before settlement. */
 	observedSignal?: string;
+	/** True when the run was detached on cancel, leaving child running in background. */
+	detached?: boolean;
 }
 
 /** Token accounting reported by agy's envelope. */
@@ -244,6 +246,14 @@ export interface StreamSpawnOptions extends SpawnOptions {
 	terminationGraceMs?: number;
 	/** Test/internal seam: settle deadline after SIGKILL without a confirmed death. Default TERMINATION_FINAL_DEADLINE_MS. */
 	terminationSettleMs?: number;
+	/** When true, aborting signal resolves the run immediately without killing child, leaving collector draining to log until exit. */
+	detachOnAbort?: boolean;
+	/** Callback when conversationId is captured from the init event. */
+	onInit?: (conversationId: string) => void;
+	/** Callback when child process is spawned, exposing child instance. */
+	onChildSpawned?: (child: ReturnType<typeof spawn>) => void;
+	/** Callback when child process has finally exited and collector finished writing log. */
+	onChildExit?: () => void;
 }
 
 /**
@@ -296,6 +306,7 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 			}
 			throw err;
 		}
+		opts.onChildSpawned?.(child);
 		if (opts.promptViaStdin) {
 			// Prompt transport: stdin, never argv. ONE NDJSON user line (the
 			// stream-json input contract); the child processes the turn and
@@ -386,8 +397,23 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 				requestTermination('stall');
 			}, stallMs);
 		};
-		const onAbort = () => requestTermination('abort');
-		if (opts.signal) opts.signal.addEventListener('abort', onAbort, { once: true });
+		const onAbort = () => {
+			if (opts.detachOnAbort) {
+				if (settled) return;
+				timedOut = false;
+				terminationTrigger = 'abort';
+				finish({ detached: true });
+			} else {
+				requestTermination('abort');
+			}
+		};
+		if (opts.signal) {
+			if (opts.signal.aborted) {
+				onAbort();
+			} else {
+				opts.signal.addEventListener('abort', onAbort, { once: true });
+			}
+		}
 		const onExit = (code: number | null) => {
 			exitCode = code;
 			finish();
@@ -401,7 +427,7 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 			}
 			finish();
 		};
-		const finish = () => {
+		const finish = (finishOpts?: { detached?: boolean }) => {
 			if (settled) return;
 			settled = true;
 			if (stallTimer) clearTimeout(stallTimer);
@@ -409,16 +435,31 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 			if (graceTimer) clearTimeout(graceTimer);
 			if (finalTimer) clearTimeout(finalTimer);
 			opts.signal?.removeEventListener('abort', onAbort);
-			child.off('exit', onExit);
-			child.off('close', onClose);
-			// Release the stdio pipes: after a kill, grandchildren (e.g. a sleep
-			// the shell spawned) can hold them open and delay 'close' indefinitely.
-			child.stdout?.destroy();
-			child.stderr?.destroy();
-			try {
-				closeSync(logFd);
-			} catch {
-				/* already closed */
+			if (!finishOpts?.detached) {
+				child.off('exit', onExit);
+				child.off('close', onClose);
+				// Release the stdio pipes: after a kill, grandchildren (e.g. a sleep
+				// the shell spawned) can hold them open and delay 'close' indefinitely.
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+				try {
+					closeSync(logFd);
+				} catch {
+					/* already closed */
+				}
+				opts.onChildExit?.();
+			} else {
+				// Detached: collector keeps streaming until child exits
+				const onChildFinalExit = () => {
+					child.off('exit', onChildFinalExit);
+					child.off('close', onChildFinalExit);
+					try {
+						closeSync(logFd);
+					} catch {}
+					opts.onChildExit?.();
+				};
+				child.once('exit', onChildFinalExit);
+				child.once('close', onChildFinalExit);
 			}
 			resolve({
 				exitCode,
@@ -435,6 +476,7 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 				requestedSignal,
 				escalatedSignal,
 				observedSignal,
+				detached: finishOpts?.detached,
 			});
 		};
 		child.on('error', (err: NodeJS.ErrnoException) => {
@@ -450,8 +492,16 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 				eventCount++;
 				lastEvent = got.event;
 			}
-			if (got.conversationId !== undefined) conversationId = got.conversationId;
-			if (got.envelope !== undefined) envelope = got.envelope;
+			if (got.conversationId !== undefined) {
+				conversationId = got.conversationId;
+				opts.onInit?.(conversationId);
+			}
+			if (got.envelope !== undefined) {
+				envelope = got.envelope;
+				setTimeout(() => {
+					if (!settled) finish();
+				}, 100);
+			}
 		});
 		child.stderr?.on('data', (chunk: Buffer) => {
 			armStall();
@@ -462,13 +512,7 @@ export async function runAgyStream(opts: StreamSpawnOptions): Promise<SpawnRun> 
 		// finish()); 'exit' is the reliable signal that the child is gone.
 		child.on('exit', onExit);
 		child.on('close', onClose);
-		// Abort composition: an already-aborted signal must still take down
-		// this fresh child — fire the same requestTermination('abort') path
-		// immediately after spawn. EventTarget never fires listeners added
-		// after abort, and the adapters' taps already own the stale-signal
-		// kill path upstream; killing here keeps engine behavior
-		// self-contained without skipping the spawn.
-		if (opts.signal?.aborted) requestTermination('abort');
+		if (opts.signal?.aborted) onAbort();
 	});
 }
 

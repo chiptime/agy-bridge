@@ -21,11 +21,14 @@
  * cache-first discoverModels pipeline (models-cache.json, 24h TTL) sits in
  * front, and any failure degrades to the static builtin registry.
  */
-import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin";
+import { tool, type Hooks, type Plugin, type PluginModule } from "@opencode-ai/plugin";
+import { openInteractiveAgySession } from "agy-bridge-engine";
 import type { ModelConfig } from "./config";
 import { AGY_PROVIDER_ID } from "./provider";
 import { resolveRegistry, buildModelRecord, type AgyModel } from "./models";
 import { discoverModels } from "./discovery";
+import { openSessionStore, type SessionStore } from "./session-store";
+import { sessionMapPath } from "./paths";
 
 /**
  * Registry-form transport: opencode's npm loader imports the package
@@ -55,6 +58,10 @@ export interface AgyPluginServerOptions {
 	/** Opt-in image attachment bridge (design D2/D8): threads through to
 	 * the advertised model capabilities via buildModelRecord. Default off. */
 	imageInput?: boolean;
+	/** Test/DI seam: session store override. */
+	store?: SessionStore;
+	/** Test/DI seam: interactive session opener override. */
+	openInteractiveSession?: typeof openInteractiveAgySession;
 }
 
 const server: Plugin = async (input, options) => {
@@ -64,6 +71,9 @@ const server: Plugin = async (input, options) => {
 	// in both cases (workdir.ts still validates absolute/existing/root).
 	const worktree = input.worktree !== "/" && input.worktree !== "" ? input.worktree : input.directory;
 	const opts = (options ?? {}) as AgyPluginServerOptions;
+	const store = opts.store ?? openSessionStore(sessionMapPath({ override: opts.stateDir, env: opts.env }));
+	const openSession = opts.openInteractiveSession ?? openInteractiveAgySession;
+
 	// Memoized lazy discovery: nothing spawns at plugin init; the first
 	// provider.models call pays the (cached) round-trip once.
 	let registry: AgyModel[] | null = null;
@@ -78,21 +88,49 @@ const server: Plugin = async (input, options) => {
 		registry = resolveRegistry(opts.models ?? {}, discovered);
 		return registry;
 	};
+
+	const openSessionTool = tool({
+		description: "Open the active agy conversation in an interactive popup (tmux popup or floating terminal)",
+		args: {},
+		async execute(_args, context) {
+			const entry = await store.getEntry(context.sessionID);
+			if (!entry?.conversationId) {
+				return "No active agy conversation bound for this session yet.";
+			}
+			const result = openSession({
+				conversationId: entry.conversationId,
+				cwd: worktree,
+				bin: opts.bin,
+				env: opts.env,
+			});
+			if (result.success) {
+				return result.method === "tmux-popup"
+					? `Opened agy session ${entry.conversationId} in tmux popup.`
+					: `Opened agy session ${entry.conversationId} in terminal window (${result.terminal}).`;
+			}
+			return `Could not launch interactive terminal automatically (${result.reason}). Run manually:\n  ${result.command}`;
+		},
+	});
+
 	const hooks: Hooks = {
-	"chat.params": async (req, output) => {
-		// Live host contract (2026-09-11): opencode invokes chat.params a
-		// SECOND time per turn with null req/output — never throw on it.
-		// output.options may already carry keys from other plugins; we only
-		// ADD our own (merge-in-place, never clobber the rest).
-		if (req?.model?.providerID !== AGY_PROVIDER_ID || !output?.options) return;
-		output.options.sessionId = req.sessionID;
-		output.options.worktree = worktree;
-		output.options.agy = { sessionId: req.sessionID, worktree };
-	},
+		"chat.params": async (req, output) => {
+			// Live host contract (2026-09-11): opencode invokes chat.params a
+			// SECOND time per turn with null req/output — never throw on it.
+			// output.options may already carry keys from other plugins; we only
+			// ADD our own (merge-in-place, never clobber the rest).
+			if (req?.model?.providerID !== AGY_PROVIDER_ID || !output?.options) return;
+			output.options.sessionId = req.sessionID;
+			output.options.worktree = worktree;
+			output.options.agy = { sessionId: req.sessionID, worktree };
+		},
 		provider: {
 			id: AGY_PROVIDER_ID,
 			models: async (provider) =>
 				buildModelRecord(await getRegistry(), provider.id, { imageInput: opts.imageInput }),
+		},
+		tool: {
+			open_agy_session: openSessionTool,
+			agy_open: openSessionTool,
 		},
 	};
 	return hooks;
