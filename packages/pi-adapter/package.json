@@ -1,6 +1,6 @@
 {
   "name": "agy-bridge-pi",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "type": "module",
   "scripts": {
     "build": "bun build extensions/index.ts --outdir dist --target node --external typebox --external '@earendil-works/*'",

@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-07
+
+### Fixed
+- **Model text can no longer trigger the auth gate**: the auth/captcha check
+  ran over the whole combined log, which includes the NDJSON stream (model
+  output and tool results). Words such as "authentication", "401" or
+  "Forbidden" written by the model turned recoverable failures (quota,
+  transient, plain task failure) into `auth_captcha`, the only outcome with no
+  fallback, and told the user to re-authenticate. The gate now matches only the
+  typed envelope error (`status: ERROR`) and non-JSON diagnostic lines
+  (stderr/plain text); NDJSON events and json envelopes are never scanned. A
+  real unauthenticated agy 1.3.0 run (exit 1, `result` event with error
+  "authentication failed or timed out", stderr "Authentication required") is
+  pinned as a test and still classifies as `auth_captcha`. `quota` and
+  `transient` patterns are unchanged (no captured real signatures yet).
+
+## [pi 0.5.1] - 2026-10-07
+
+### Fixed
+- Inherits the engine fix above (scoped auth gate); republished because the
+  engine is bundled into the package.
+
 ## [pi 0.5.0] - 2026-10-07
 
 ### Fixed
