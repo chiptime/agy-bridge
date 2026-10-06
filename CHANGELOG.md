@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (`0.x` = development line).
 
+## [Unreleased]
+
+### Added
+- **In-TUI modal dialog for OpenCode (`/agy-open`, `Alt+A`)**: Added a rich
+  modal dialog rendered over the OpenCode interface via `api.ui.dialog.replace`
+  and `@opentui/solid` components. Triggers via slash command `/agy-open` (aliases
+  `/agy:open`, `/agy`), keybindings `Alt+A` / `Ctrl+Alt+A`, or Ex command
+  `:agy-open`. Provides actions to split adjacent terminal panes (Herdr/Tmux),
+  launch external terminals, view recent transcript turns from `transcript.jsonl`,
+  copy CLI resume command or conversation ID to clipboard, and browse historical
+  sessions.
+- **WSL & host terminal emulator support**: In `packages/engine`, added WSL2
+  detection preferring host terminal emulators (WezTerm, Windows Terminal `wt.exe`)
+  and filtering out broken emulators like `zutty`.
+
 ## [0.5.1] - 2026-09-16
 
 ### Fixed

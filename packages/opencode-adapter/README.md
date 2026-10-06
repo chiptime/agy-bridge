@@ -123,12 +123,51 @@ alternative. E2E: with it on, pasting an image stages the file and the agent
 answers about it via `view_file`; with it off, pasting an image errors and stages
 nothing.
 
-## Interactive session popup (`open_agy_session`)
+## Interactive session management: TUI modal dialog & shortcuts
 
-The plugin registers the `open_agy_session` tool (alias `agy_open`), allowing the user or assistant to open the active `agy` conversation in an interactive popup:
-- **`tmux display-popup`**: When inside tmux (`$TMUX`), opens a centered floating popup over the current terminal (`-E`, auto-closes on exit).
-- **Desktop terminal**: Falls back to spawning an external terminal emulator window if running in a graphical environment outside tmux.
-- **Manual fallback**: If running headless without a terminal, outputs the verbatim command `agy --conversation <id>` for manual execution.
+The adapter provides a rich in-TUI modal dialog directly over OpenCode's interface, allowing you to inspect, manage, and open the connected Antigravity session without consuming LLM tokens.
+
+### Configuration (`tui.json`)
+
+Register the TUI plugin entry in `~/.config/opencode/tui.json`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [
+    "agy-bridge-opencode/tui"
+  ]
+}
+```
+
+*(For local development against this repository, specify the absolute path: `"<path-to-repo>/packages/opencode-adapter/dist/tui.js"`).*
+
+### Keyboard shortcuts & commands
+
+Inside OpenCode, you can open the session modal anytime via:
+
+- **Keyboard shortcuts:** `Alt+A` or `Ctrl+Alt+A`.
+- **Slash command:** `/agy-open` (aliases: `/agy:open`, `/agy`).
+- **Ex command:** `:agy-open` or `:agy`.
+
+### Available actions in the modal window
+
+When triggered, a centered modal dialog (`api.ui.dialog`) appears over the OpenCode screen:
+
+1. **⚡ Split de terminal (Herdr / Tmux):**
+   - In Herdr (`HERDR_ENV=1`): Automatically splits the current pane to the right (`herdr pane split --current --direction right --focus`) and launches `agy --conversation <id>` inside the new pane.
+   - In tmux (`$TMUX`): Runs `tmux split-window -h "agy --conversation <id>"`.
+   - Falls back gracefully to external terminals or CLI instructions if no multiplexer is active.
+2. **🪟 Abrir en ventana externa:** Launches the session in an external terminal window (detects WezTerm, Windows Terminal `wt.exe`, or standard Linux desktop emulators).
+3. **📜 Ver mensajes recientes de la conversación (Transcript):** Opens an in-TUI viewer dialog showing the recent prompts and responses extracted directly from Antigravity's local `transcript.jsonl`, with full message viewing upon selection.
+4. **📋 Copiar comando CLI:** Copies `agy --conversation <id>` directly to the system clipboard (supports OSC 52, `clip.exe` on WSL, `wl-copy`, and `xclip`).
+5. **📋 Copiar Conversation ID:** Copies the UUID of the conversation to clipboard.
+6. **🔄 Ver otras sesiones de agy guardadas:** Allows browsing historical conversations from `opencode-sessions.json` and inspecting or re-linking them.
+7. **Estado sin sesión:** If the current OpenCode session has not spoken to agy yet, the modal opens informing you of the status and offering to browse and link previous conversations.
+
+### LLM tool: `open_agy_session`
+
+In addition to the TUI modal, the plugin registers the `open_agy_session` tool (alias `agy_open`), which allows the assistant or prompt to trigger opening the active agy conversation in an interactive popup.
 
 ## Effort variants
 

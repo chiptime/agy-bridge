@@ -52,6 +52,14 @@ at a non-agy provider. Full details — bare model keys, budgets, divergence
 policy, local `file://` development form — in the
 [adapter README](packages/opencode-adapter/README.md).
 
+### OpenCode TUI modal dialog (`/agy-open`, `Alt+A`)
+
+`agy-bridge-opencode` includes a native TUI plugin that provides an in-editor modal control center over OpenCode without consuming LLM tokens:
+- Add `"agy-bridge-opencode/tui"` to `~/.config/opencode/tui.json` (or your local `dist/tui.js` path).
+- Press **`Alt+A`** (or **`Ctrl+Alt+A`**), or type **`/agy-open`** to open the modal dialog over OpenCode.
+- Actions: open an interactive split terminal (Herdr/Tmux), launch an external terminal window, view recent turn messages from the local `transcript.jsonl`, copy the CLI command or conversation ID to clipboard, or explore saved sessions.
+
+
 ## Install (pi)
 
 Requires pi `>=0.85` and an authenticated `agy`. The extension is published
