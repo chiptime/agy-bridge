@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [pi 0.5.0] - 2026-10-07
+
+### Fixed
+- **Package not installable from npm**: `agy-bridge-pi@0.4.0` declared
+  `agy-bridge-engine` as `workspace:*` (the engine is private and not on npm)
+  and shipped raw `src`, so `npm install` failed with `EUNSUPPORTEDPROTOCOL`.
+  The package now ships a self-contained `dist/index.js` bundle built on
+  `prepack`, with the engine inlined; only `typebox` and the pi host packages
+  remain external peers. `pi.extensions` points at the bundle and `files` ships
+  only `dist` and the README. For development, load the source with
+  `pi -e ./packages/pi-adapter/extensions/index.ts`.
+- **False `auth_captcha` on successful runs**: inherited from the engine fix
+  in 0.6.0 (word-bounded `sign in` pattern).
+- **Unconfirmed terminations are never replayed**: `termination_unconfirmed`
+  maps to a non-retryable, non-resumable error (pi's host auto-retries on the
+  retryable marker, so the mapping must forbid it).
+- **Resume no longer erases evidence**: the shared per-turn `run.log` became
+  per-attempt `attempt-N.log`, so the resume attempt keeps the initial
+  attempt's log.
+
+### Added
+- **`/agy open`**: opens the active agy conversation in an interactive popup or
+  terminal (tmux popup when available).
+- **Conversation lock** guarding resumed conversations, released on every exit
+  path; the abort signal and internal termination seams are forwarded to the
+  engine.
+
 ## [0.6.0] - 2026-10-06
 
 ### Added
@@ -180,8 +207,6 @@ one version.
   no skills-forwarding seam exists or is needed.
 
 ## [Unreleased]
-
-## [0.6.0] - 2026-10-06
 
 Nothing yet.
 

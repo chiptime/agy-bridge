@@ -65,21 +65,25 @@ policy, local `file://` development form — in the
 Requires pi `>=0.85` and an authenticated `agy`. The extension is published
 on npm as [`agy-bridge-pi`](https://www.npmjs.com/package/agy-bridge-pi) —
 `0.3.0` is the first published version (0.1.0 and 0.2.0 were never
-published). The package ships TypeScript source: pi's jiti loader runs it
-directly, there is no build step.
+published). The package ships a self-contained bundle (the engine is inlined
+into `dist/index.js` on `prepack`); only `typebox` and the pi host packages stay
+external as peers.
 
 ```sh
 pi install npm:agy-bridge-pi
 ```
 
-For development against a checkout, load the package straight from the repo
-instead:
+For development against a checkout, load the TypeScript source straight from
+the repo instead (no build step):
 
 ```sh
-bun install                                   # once, at the repo root
-pi -e ./packages/pi-adapter --list-models     # provider "agy" appears
-pi -e ./packages/pi-adapter --model agy/default
+bun install                                                        # once, at the repo root
+pi -e ./packages/pi-adapter/extensions/index.ts --list-models      # provider "agy" appears
+pi -e ./packages/pi-adapter/extensions/index.ts --model agy/default
 ```
+
+`pi -e ./packages/pi-adapter` loads the built bundle instead; run
+`bun run build` in `packages/pi-adapter` first.
 
 What the extension registers:
 

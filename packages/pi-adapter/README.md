@@ -13,10 +13,13 @@ the first published version (0.1.0 and 0.2.0 were never published):
 pi install npm:agy-bridge-pi
 ```
 
-The package ships TypeScript source: pi's jiti loader runs it directly,
-there is no build step. For development against a checkout, load it
-straight from the repo instead (`bun install` once at the repo root, then
-`pi -e ./packages/pi-adapter`).
+The package ships a self-contained bundle (`dist/index.js`, built on
+`prepack`) with the engine inlined; only `typebox` and the pi host packages
+stay external as peers. For development against a checkout, load the TypeScript
+source directly — no build step (`bun install` once at the repo root, then
+`pi -e ./packages/pi-adapter/extensions/index.ts`). Loading the package
+directory (`pi -e ./packages/pi-adapter`) uses the bundle, so run
+`bun run build` in `packages/pi-adapter` first.
 
 Full install, safety wall, continuity, and configuration docs: see the
 [repository README, "Install (pi)"](../../README.md#install-pi).

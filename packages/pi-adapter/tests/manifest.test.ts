@@ -10,9 +10,9 @@ import { join } from "node:path";
 import pkg from "../package.json";
 
 describe("unit: manifest — pi extension packaging contract (R1)", () => {
-	test("package identity: agy-bridge-pi v0.4.0, ESM", () => {
+	test("package identity: agy-bridge-pi v0.5.0, ESM", () => {
 		expect(pkg.name).toBe("agy-bridge-pi");
-		expect(pkg.version).toBe("0.4.0");
+		expect(pkg.version).toBe("0.5.0");
 		expect(pkg.type).toBe("module");
 	});
 
