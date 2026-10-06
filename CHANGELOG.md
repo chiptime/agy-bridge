@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-06
+
 ### Added
 - **In-TUI modal dialog for OpenCode (`/agy-open`, `Alt+A`)**: Added a rich
   modal dialog rendered over the OpenCode interface via `api.ui.dialog.replace`
@@ -178,6 +180,8 @@ one version.
   no skills-forwarding seam exists or is needed.
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-10-06
 
 Nothing yet.
 
