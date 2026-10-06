@@ -433,6 +433,56 @@ describe("unit: outcomes — classify run signals", () => {
 		).toEqual({ outcome: "success", reason: "ok" });
 	});
 
+	test("R1: seam success accepts exitCode null (stream finished on envelope) even when the response text contains auth-like substrings", () => {
+		// Regression: the stream runner settles ~100ms after the envelope, before
+		// the exit event, so exitCode is null. The response said "assigning",
+		// which the old /sign.?in/ AUTH_RE read as a login wall.
+		expect(
+			classifyRun({
+				exitCode: null,
+				log: "adding a key before assigning models",
+				expectArtifact: false,
+				envelope: {
+					status: "SUCCESS",
+					response: "declare the key before assigning models",
+				},
+			}),
+		).toEqual({ outcome: "success", reason: "ok" });
+	});
+
+	test("R1: exitCode null seam success never overrides stall or timeout kills", () => {
+		const envelope = { status: "SUCCESS" as const, response: "partial" };
+		expect(
+			classifyRun({ exitCode: null, stalled: true, expectArtifact: false, envelope }),
+		).toEqual({ outcome: "timeout", reason: "stall_detected" });
+		expect(
+			classifyRun({ exitCode: null, timedOut: true, expectArtifact: false, envelope }),
+		).toEqual({ outcome: "timeout", reason: "timeout" });
+	});
+
+	test("exitCode null without expectArtifact:false never counts as success", () => {
+		expect(
+			classifyRun({
+				exitCode: null,
+				log: "",
+				envelope: { status: "SUCCESS", response: "answer" },
+			}).outcome,
+		).not.toBe("success");
+	});
+
+	test("AUTH_RE does not match auth-like substrings inside ordinary words", () => {
+		for (const word of ["assigning", "designing", "resigning", "consigning"]) {
+			const got = classifyRun({ exitCode: 1, log: `error while ${word} models` });
+			expect(got.outcome).toBe("task_failure");
+		}
+	});
+
+	test("AUTH_RE still matches real sign-in prompts", () => {
+		for (const log of ["please sign in to continue", "Sign-In required", "signin failed"]) {
+			expect(classifyRun({ exitCode: 1, log }).outcome).toBe("auth_captcha");
+		}
+	});
+
 	test("R1: expectArtifact=true behaves like omitted — artifact-backed success only", () => {
 		expect(
 			classifyRun({

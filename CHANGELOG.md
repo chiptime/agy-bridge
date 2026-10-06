@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detection preferring host terminal emulators (WezTerm, Windows Terminal `wt.exe`)
   and filtering out broken emulators like `zutty`.
 
+### Fixed
+- **False `auth_captcha` on successful runs**: the auth gate regex matched
+  `sign.?in` inside ordinary words such as "assigning" or "designing", so a
+  delivered response mentioning them was reported as "agy needs
+  re-authentication". The pattern now requires a word-bounded
+  `sign in` / `sign-in` / `signin`. Additionally, artifact-less hosts
+  (`expectArtifact: false`) now accept a `SUCCESS` envelope with a non-empty
+  response when `exitCode` is `null` (the stream runner settles on the
+  envelope before the child's exit event) instead of falling through to the
+  log-pattern gates. Stall, timeout and unconfirmed-termination rules still
+  take precedence.
+
 ## [0.5.1] - 2026-09-16
 
 ### Fixed

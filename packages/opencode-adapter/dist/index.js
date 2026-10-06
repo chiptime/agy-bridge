@@ -12619,7 +12619,7 @@ async function runAgyStream(opts) {
   });
 }
 // ../engine/src/outcomes.ts
-var AUTH_RE = /captcha|sign.?in|log.?in required|unauthenticated|forbidden|\b401\b|invalid credentials|authentication/i;
+var AUTH_RE = /captcha|\bsign[\s._-]?in\b|log.?in required|unauthenticated|forbidden|\b401\b|invalid credentials|authentication/i;
 var QUOTA_RE = /quota|rate.?limit|\b429\b|resource.?exhausted|too many requests/i;
 var TRANSIENT_RE = /unavailable|outage|overloaded|connection\s+(?:refused|reset|failed)|network\s+error|\b5\d\d\b|internal error|server error/i;
 var PRINT_WAIT_TIMEOUT_RE = /timeout waiting for response/i;
@@ -12638,7 +12638,10 @@ function classifyRun(signal) {
   if (signal.timedOut || signal.exitCode === 124)
     return { outcome: "timeout", reason: "timeout" };
   const artifactLessSuccess = signal.expectArtifact === false && signal.envelope?.status === "SUCCESS" && (signal.envelope.response ?? "").trim() !== "";
-  if (signal.exitCode === 0 && (signal.artifactBytes || artifactLessSuccess)) {
+  if (signal.exitCode === 0 && signal.artifactBytes) {
+    return { outcome: "success", reason: "ok" };
+  }
+  if ((signal.exitCode === 0 || signal.exitCode === null) && artifactLessSuccess) {
     return { outcome: "success", reason: "ok" };
   }
   if (/\[agy\] print timeout after \S+ with turn in progress/i.test(log)) {

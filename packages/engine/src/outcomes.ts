@@ -22,7 +22,8 @@
  *    only runs that miss this rule (failed runs). expectArtifact:false (R1)
  *    swaps the success evidence to a SUCCESS envelope with a non-empty
  *    response, for hosts that consume the streamed response instead of a
- *    file artifact
+ *    file artifact; there exitCode may also be null because the stream runner
+ *    settles on the envelope before the child's exit event
  * 6. AUTH_RE matches log          → auth_captcha (auth_or_captcha)
  * 7. failed run AND envelope.status === 'ERROR' with the print-wait timeout
  *    signature in envelope.error → timeout (agy_print_wait_timeout) — the
@@ -89,7 +90,7 @@ export interface Classification {
 	outcome: Outcome;
 	reason: string;
 }
-const AUTH_RE = /captcha|sign.?in|log.?in required|unauthenticated|forbidden|\b401\b|invalid credentials|authentication/i;
+const AUTH_RE = /captcha|\bsign[\s._-]?in\b|log.?in required|unauthenticated|forbidden|\b401\b|invalid credentials|authentication/i;
 const QUOTA_RE = /quota|rate.?limit|\b429\b|resource.?exhausted|too many requests/i;
 const TRANSIENT_RE = /unavailable|outage|overloaded|connection\s+(?:refused|reset|failed)|network\s+error|\b5\d\d\b|internal error|server error/i;
 const PRINT_WAIT_TIMEOUT_RE = /timeout waiting for response/i;
@@ -139,7 +140,14 @@ export function classifyRun(signal: RunSignal): Classification {
 		signal.expectArtifact === false &&
 		signal.envelope?.status === 'SUCCESS' &&
 		(signal.envelope.response ?? '').trim() !== '';
-	if (signal.exitCode === 0 && (signal.artifactBytes || artifactLessSuccess)) {
+	if (signal.exitCode === 0 && signal.artifactBytes) {
+		return { outcome: 'success', reason: 'ok' };
+	}
+	// The stream runner settles shortly after the typed envelope arrives, before
+	// the child's exit event, so exitCode is null on a delivered response. A
+	// SUCCESS envelope with a non-empty response is authoritative there; the
+	// stall/timeout/termination rules above already claimed any killed run.
+	if ((signal.exitCode === 0 || signal.exitCode === null) && artifactLessSuccess) {
 		return { outcome: 'success', reason: 'ok' };
 	}
 	// Mid-turn print-wait cut (live 2026-09-09): agy exits 0, reports status
