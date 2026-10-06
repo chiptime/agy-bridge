@@ -15,7 +15,7 @@
     },
     "packages/opencode-adapter": {
       "name": "agy-bridge-opencode",
-      "version": "0.5.1",
+      "version": "0.6.0",
       "devDependencies": {
         "@ai-sdk/provider": "3.0.8",
         "@opencode-ai/plugin": "1.18.30",
@@ -34,12 +34,10 @@
     "packages/pi-adapter": {
       "name": "agy-bridge-pi",
       "version": "0.4.0",
-      "dependencies": {
-        "agy-bridge-engine": "workspace:*",
-      },
       "devDependencies": {
         "@earendil-works/pi-coding-agent": "^0.85",
         "@types/bun": "latest",
+        "agy-bridge-engine": "workspace:*",
         "typescript": "^7.0.2",
       },
       "peerDependencies": {

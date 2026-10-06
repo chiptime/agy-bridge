@@ -1,8 +1,8 @@
 /**
  * Contract test for the package manifest (spec R1): pi discovers the
- * extension through `pi.extensions` pointing at TypeScript source loaded
- * by jiti — no build step — with `*` peer ranges on the pi host packages
- * so any 0.x host can load us, and the engine linked via the workspace.
+ * extension through `pi.extensions` pointing at the bundle built into
+ * dist/ (the engine is inlined, so the published package is self-contained),
+ * with `*` peer ranges on the pi host packages so any 0.x host can load us.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -16,8 +16,8 @@ describe("unit: manifest — pi extension packaging contract (R1)", () => {
 		expect(pkg.type).toBe("module");
 	});
 
-	test("pi.extensions points at the TS factory (jiti loads source, no build)", () => {
-		expect(pkg.pi?.extensions).toEqual(["./extensions/index.ts"]);
+	test("pi.extensions points at the bundled factory in dist/", () => {
+		expect(pkg.pi?.extensions).toEqual(["./dist/index.js"]);
 	});
 
 	test("every pi host peer is a wildcard range", () => {
@@ -35,10 +35,15 @@ describe("unit: manifest — pi extension packaging contract (R1)", () => {
 		expect(pkg.devDependencies?.typescript).toBeDefined();
 	});
 
-	test("engine rides the workspace; shipped files are source, not build output", () => {
-		expect(pkg.dependencies).toEqual({ "agy-bridge-engine": "workspace:*" });
-		// `src` must ship: the entry imports ../src/* at runtime (smoke.test.ts guards this).
-		expect(pkg.files).toEqual(["extensions", "src", "README.md"]);
+	test("engine is bundled, never a runtime dependency; only the bundle ships", () => {
+		// npm cannot resolve `workspace:*` for consumers (EUNSUPPORTEDPROTOCOL),
+		// so the engine is inlined into dist/ and kept as a dev-only workspace link.
+		expect(pkg).not.toHaveProperty("dependencies");
+		expect(pkg.devDependencies?.["agy-bridge-engine"]).toBe("workspace:*");
+		expect(pkg.files).toEqual(["dist", "README.md"]);
+		// prepack guarantees `npm publish` ships a fresh bundle (dist/ is gitignored).
+		expect(pkg.scripts?.prepack).toBe("bun run build");
+		expect(pkg.scripts?.build).toContain("--external typebox");
 	});
 
 	test("tsconfig follows the house contract: strict, noEmit, source roots", () => {

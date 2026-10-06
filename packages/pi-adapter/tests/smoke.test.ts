@@ -198,10 +198,44 @@ describe("smoke: extensions/index.ts loaded like pi (R1, R2)", () => {
 		expect(existsSync(fake.marker)).toBe(false);
 	});
 
-	test("package.json#files covers every directory the entry imports at runtime", () => {
+	test("source entry only reaches directories that exist in the package (dev checkout guard)", () => {
 		const roots = runtimeImportRoots(ENTRY);
 		expect(roots.has("extensions")).toBe(true);
 		expect(roots.has("src")).toBe(true);
-		for (const dir of roots) expect(pkg.files).toContain(dir);
+	});
+});
+
+describe("smoke: published npm surface is self-contained (engine bundled)", () => {
+	const DIST_ENTRY = join(PACKAGE_ROOT, "dist", "index.js");
+	// Bare specifiers the bundle may still import at runtime: Node builtins
+	// plus the host-provided peers declared in package.json.
+	const peers = Object.keys(pkg.peerDependencies ?? {});
+
+	beforeAll(() => {
+		const built = Bun.spawnSync(["bun", "run", "build"], { cwd: PACKAGE_ROOT, stdout: "pipe", stderr: "pipe" });
+		if (built.exitCode !== 0) throw new Error(`build failed: ${built.stderr.toString()}`);
+	});
+
+	test("the manifest entry is the bundle and ships inside package.json#files", () => {
+		expect(pkg.pi.extensions).toEqual(["./dist/index.js"]);
+		expect(pkg.files).toContain("dist");
+		expect(existsSync(DIST_ENTRY)).toBe(true);
+	});
+
+	test("the bundle has no runtime import outside node builtins and declared peers", () => {
+		const bundle = readFileSync(DIST_ENTRY, "utf8");
+		const specs = [...bundle.matchAll(/^(?:import|export)\s[^"']*?from\s+["']([^"']+)["']/gm)].map((m) => m[1]!);
+		expect(specs.length).toBeGreaterThan(0);
+		for (const spec of specs) {
+			const ok = spec.startsWith("node:") || peers.some((p) => spec === p || spec.startsWith(`${p}/`));
+			expect({ spec, ok }).toEqual({ spec, ok: true });
+		}
+		expect(bundle).not.toContain("agy-bridge-engine");
+	});
+
+	test("the bundle loads and exposes the factory pi expects", async () => {
+		const mod = (await import(pathToFileURL(DIST_ENTRY).href)) as { default: unknown; createAgyExtension: unknown };
+		expect(typeof mod.default).toBe("function");
+		expect(typeof mod.createAgyExtension).toBe("function");
 	});
 });

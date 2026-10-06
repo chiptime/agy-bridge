@@ -3,10 +3,12 @@
   "version": "0.4.0",
   "type": "module",
   "scripts": {
+    "build": "bun build extensions/index.ts --outdir dist --target node --external typebox --external '@earendil-works/*'",
+    "prepack": "bun run build",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
-    "extensions": ["./extensions/index.ts"]
+    "extensions": ["./dist/index.js"]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -14,17 +16,14 @@
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
-  "dependencies": {
-    "agy-bridge-engine": "workspace:*"
-  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.85",
     "@types/bun": "latest",
+    "agy-bridge-engine": "workspace:*",
     "typescript": "^7.0.2"
   },
   "files": [
-    "extensions",
-    "src",
+    "dist",
     "README.md"
   ],
   "license": "MIT",
