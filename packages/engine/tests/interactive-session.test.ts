@@ -69,6 +69,7 @@ describe("unit: openInteractiveAgySession", () => {
 				DISPLAY: ":0",
 			},
 			isCommandAvailable: (cmd) => cmd === "x-terminal-emulator",
+			isTerminalBroken: () => false,
 			spawnFn: (cmd, args) => {
 				spawned.push({ cmd, args });
 				return { unref: () => (unrefCalled = true) };
@@ -85,6 +86,101 @@ describe("unit: openInteractiveAgySession", () => {
 		expect(spawned[0]?.cmd).toBe("x-terminal-emulator");
 		expect(spawned[0]?.args).toEqual(["-e", "agy", "--conversation", "conv-xyz"]);
 		expect(unrefCalled).toBe(true);
+	});
+
+	test("in WSL detects WezTerm when TERM_PROGRAM is WezTerm", () => {
+		const spawned: { cmd: string; args: string[] }[] = [];
+
+		const result = openInteractiveAgySession({
+			conversationId: "conv-wez",
+			cwd: "/home/user/code",
+			env: {
+				WSL_DISTRO_NAME: "Ubuntu",
+				TERM_PROGRAM: "WezTerm",
+			},
+			isCommandAvailable: (cmd) => cmd === "wezterm",
+			spawnFn: (cmd, args) => {
+				spawned.push({ cmd, args });
+				return { unref: () => {} };
+			},
+		});
+
+		expect(result).toEqual({
+			success: true,
+			method: "terminal-window",
+			terminal: "wezterm",
+			command: "agy --conversation conv-wez",
+		});
+		expect(spawned[0]?.cmd).toBe("wezterm");
+		expect(spawned[0]?.args).toEqual([
+			"start",
+			"--cwd",
+			"/home/user/code",
+			"--",
+			"wsl.exe",
+			"-d",
+			"Ubuntu",
+			"-e",
+			"agy",
+			"--conversation",
+			"conv-wez",
+		]);
+	});
+
+	test("in WSL detects wt.exe when available", () => {
+		const spawned: { cmd: string; args: string[] }[] = [];
+
+		const result = openInteractiveAgySession({
+			conversationId: "conv-wt",
+			cwd: "/home/user/code",
+			env: {
+				WSL_DISTRO_NAME: "Ubuntu",
+			},
+			isCommandAvailable: (cmd) => cmd === "wt.exe",
+			spawnFn: (cmd, args) => {
+				spawned.push({ cmd, args });
+				return { unref: () => {} };
+			},
+		});
+
+		expect(result).toEqual({
+			success: true,
+			method: "terminal-window",
+			terminal: "wt.exe",
+			command: "agy --conversation conv-wt",
+		});
+		expect(spawned[0]?.cmd).toBe("wt.exe");
+		expect(spawned[0]?.args).toEqual([
+			"-d",
+			"/home/user/code",
+			"wsl.exe",
+			"-d",
+			"Ubuntu",
+			"-e",
+			"agy",
+			"--conversation",
+			"conv-wt",
+		]);
+	});
+
+	test("skips broken terminal emulators like zutty and falls back to next available", () => {
+		const spawned: { cmd: string; args: string[] }[] = [];
+
+		const result = openInteractiveAgySession({
+			conversationId: "conv-xyz",
+			env: {
+				DISPLAY: ":0",
+			},
+			isCommandAvailable: (cmd) => cmd === "x-terminal-emulator" || cmd === "xterm",
+			isTerminalBroken: (cmd) => cmd === "x-terminal-emulator",
+			spawnFn: (cmd, args) => {
+				spawned.push({ cmd, args });
+				return {};
+			},
+		});
+
+		expect(result.success).toBe(true);
+		expect(spawned[0]?.cmd).toBe("xterm");
 	});
 
 	test("prioritizes TERMINAL env variable when set", () => {

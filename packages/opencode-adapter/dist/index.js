@@ -12329,7 +12329,7 @@ function date4(params) {
 
 // ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/classic/external.js
 config(en_default());
-// ../../node_modules/.bun/@opencode-ai+plugin@1.18.30/node_modules/@opencode-ai/plugin/dist/tool.js
+// ../../node_modules/.bun/@opencode-ai+plugin@1.18.30+755e81d9a5805087/node_modules/@opencode-ai/plugin/dist/tool.js
 function tool(input) {
   return input;
 }
@@ -13252,7 +13252,7 @@ function unsupportedAttachmentsMessage(types) {
 }
 // ../engine/src/interactive-session.ts
 import { spawn as defaultSpawn } from "child_process";
-import { accessSync, constants } from "fs";
+import { accessSync, constants, realpathSync } from "fs";
 import { join as join3 } from "path";
 function buildAgyResumeCommand(bin, conversationId) {
   return `${bin} --conversation ${conversationId}`;
@@ -13277,12 +13277,27 @@ function isExecutableInPath(cmd, env = process.env) {
   }
   return false;
 }
+function isWsl(env = process.env) {
+  return Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
+}
+function isBrokenTerminal(term) {
+  if (term.includes("zutty"))
+    return true;
+  try {
+    const target = term.includes("/") ? term : `/usr/bin/${term}`;
+    const real = realpathSync(target);
+    if (real.includes("zutty"))
+      return true;
+  } catch {}
+  return false;
+}
 function openInteractiveAgySession(options) {
   const env = options.env ?? process.env;
   const bin = options.bin ?? env.AGY_BIN ?? "agy";
   const command = buildAgyResumeCommand(bin, options.conversationId);
   const spawnFn = options.spawnFn ?? defaultSpawn;
   const checkCmd = options.isCommandAvailable ?? ((cmd) => isExecutableInPath(cmd, env));
+  const checkBroken = options.isTerminalBroken ?? isBrokenTerminal;
   if (env.TMUX && checkCmd("tmux")) {
     const title = ` agy: ${options.conversationId.slice(0, 8)} `;
     const tmuxArgs = ["display-popup"];
@@ -13308,10 +13323,70 @@ function openInteractiveAgySession(options) {
       };
     }
   }
+  if (isWsl(env)) {
+    const distro = env.WSL_DISTRO_NAME ?? "Ubuntu";
+    const weztermCandidates = [
+      "/mnt/c/Program Files/WezTerm/wezterm-gui.exe",
+      "/mnt/c/Program Files/WezTerm/wezterm.exe",
+      "wezterm-gui.exe",
+      "wezterm.exe",
+      "wezterm"
+    ];
+    const weztermBin = (env.TERM_PROGRAM === "WezTerm" ? weztermCandidates : []).find((c) => checkCmd(c)) ?? weztermCandidates.find((c) => checkCmd(c));
+    if (weztermBin) {
+      const weztermArgs = ["start"];
+      if (options.cwd) {
+        weztermArgs.push("--cwd", options.cwd);
+      }
+      weztermArgs.push("--", "wsl.exe", "-d", distro, "-e", bin, "--conversation", options.conversationId);
+      try {
+        const child = spawnFn(weztermBin, weztermArgs, {
+          cwd: options.cwd,
+          detached: true,
+          stdio: "ignore",
+          env
+        });
+        child?.unref?.();
+        return { success: true, method: "terminal-window", terminal: "wezterm", command };
+      } catch (err) {
+        return {
+          success: false,
+          reason: "spawn_failed",
+          command,
+          error: err instanceof Error ? err.message : String(err)
+        };
+      }
+    }
+    const wtCandidates = [
+      "wt.exe",
+      "/mnt/c/Users/Bruno/AppData/Local/Microsoft/WindowsApps/wt.exe"
+    ];
+    const wtBin = wtCandidates.find((c) => checkCmd(c));
+    if (wtBin) {
+      const wtArgs = options.cwd ? ["-d", options.cwd] : [];
+      wtArgs.push("wsl.exe", "-d", distro, "-e", bin, "--conversation", options.conversationId);
+      try {
+        const child = spawnFn(wtBin, wtArgs, {
+          cwd: options.cwd,
+          detached: true,
+          stdio: "ignore",
+          env
+        });
+        child?.unref?.();
+        return { success: true, method: "terminal-window", terminal: "wt.exe", command };
+      } catch (err) {
+        return {
+          success: false,
+          reason: "spawn_failed",
+          command,
+          error: err instanceof Error ? err.message : String(err)
+        };
+      }
+    }
+  }
   const hasDisplay = Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
   if (hasDisplay) {
     const candidates = env.TERMINAL ? [env.TERMINAL] : [
-      "x-terminal-emulator",
       "ghostty",
       "kitty",
       "alacritty",
@@ -13320,9 +13395,10 @@ function openInteractiveAgySession(options) {
       "gnome-terminal",
       "konsole",
       "xfce4-terminal",
-      "xterm"
+      "xterm",
+      "x-terminal-emulator"
     ];
-    const term = candidates.find((t) => checkCmd(t));
+    const term = candidates.find((t) => checkCmd(t) && !checkBroken(t));
     if (term) {
       const termArgs = term === "gnome-terminal" ? ["--", bin, "--conversation", options.conversationId] : ["-e", bin, "--conversation", options.conversationId];
       try {

@@ -3,7 +3,7 @@
   "version": "0.5.1",
   "type": "module",
   "scripts": {
-    "build": "bun build src/index.ts src/provider.ts src/tui.ts --outdir dist --target bun"
+    "build": "bun build src/index.ts src/provider.ts src/tui.ts --outdir dist --target bun --external @opentui/solid --external solid-js"
   },
   "exports": {
     ".": {
@@ -28,9 +28,11 @@
     "@ai-sdk/provider": "3.0.8",
     "@opencode-ai/plugin": "1.18.30",
     "@opencode-ai/sdk": "1.18.30",
+    "@opentui/solid": "^0.5.14",
     "@types/bun": "latest",
-    "typescript": "^7.0.2",
-    "agy-bridge-engine": "workspace:*"
+    "agy-bridge-engine": "workspace:*",
+    "solid-js": "^1.9.15",
+    "typescript": "^7.0.2"
   },
   "files": [
     "dist",
