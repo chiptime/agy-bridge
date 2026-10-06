@@ -24,7 +24,9 @@
  *    response, for hosts that consume the streamed response instead of a
  *    file artifact; there exitCode may also be null because the stream runner
  *    settles on the envelope before the child's exit event
- * 6. AUTH_RE matches log          → auth_captcha (auth_or_captcha)
+ * 6. AUTH_RE matches the typed envelope error (status ERROR) or a non-JSON
+ *    diagnostic log line          → auth_captcha (auth_or_captcha); NDJSON
+ *    events and json envelopes (model text, tool output) are never scanned
  * 7. failed run AND envelope.status === 'ERROR' with the print-wait timeout
  *    signature in envelope.error → timeout (agy_print_wait_timeout) — the
  *    typed JSON envelope is the FIRST failed-run signal, ahead of the
@@ -94,6 +96,40 @@ const AUTH_RE = /captcha|\bsign[\s._-]?in\b|log.?in required|unauthenticated|for
 const QUOTA_RE = /quota|rate.?limit|\b429\b|resource.?exhausted|too many requests/i;
 const TRANSIENT_RE = /unavailable|outage|overloaded|connection\s+(?:refused|reset|failed)|network\s+error|\b5\d\d\b|internal error|server error/i;
 const PRINT_WAIT_TIMEOUT_RE = /timeout waiting for response/i;
+/**
+ * Log lines that are agy's own diagnostics (stderr, plain text): everything
+ * except complete JSON objects. NDJSON stream events and json envelopes carry
+ * model-generated text and tool output, which routinely mention words like
+ * "authentication", "401" or "Forbidden" without any auth failure.
+ */
+function diagnosticLog(log: string): string {
+	return log
+		.split('\n')
+		.filter((line) => {
+			const t = line.trim();
+			if (!t.startsWith('{') || !t.endsWith('}')) return true;
+			try {
+				const parsed: unknown = JSON.parse(t);
+				return typeof parsed !== 'object' || parsed === null || Array.isArray(parsed);
+			} catch {
+				return true;
+			}
+		})
+		.join('\n');
+}
+
+/**
+ * Auth/captcha evidence from trusted sources only: the typed envelope error
+ * (agy's own message) and non-JSON diagnostic lines. Real agy 1.3.0 without
+ * credentials: exit 1, a `result` event with status ERROR and error
+ * "authentication failed or timed out", and stderr "Authentication required.
+ * Please visit the URL to log in" — both sources match.
+ */
+function isAuthFailure(signal: RunSignal): boolean {
+	if (signal.envelope?.status === 'ERROR' && AUTH_RE.test(signal.envelope.error ?? '')) return true;
+	return AUTH_RE.test(diagnosticLog(signal.log ?? ''));
+}
+
 /** Fallback to the native executor is allowed ONLY for approved unavailability. */
 export function isFallbackAllowed(outcome: Outcome): boolean {
 	return outcome === 'quota_unavailable' || outcome === 'transient_unavailable' || outcome === 'timeout';
@@ -158,7 +194,7 @@ export function classifyRun(signal: RunSignal): Classification {
 	if (/\[agy\] print timeout after \S+ with turn in progress/i.test(log)) {
 		return { outcome: 'timeout', reason: 'agy_print_wait_timeout' };
 	}
-	if (AUTH_RE.test(log)) return { outcome: 'auth_captcha', reason: 'auth_or_captcha' };
+	if (isAuthFailure(signal)) return { outcome: 'auth_captcha', reason: 'auth_or_captcha' };
 	if (signal.exitCode !== 0) {
 		// The typed JSON envelope (--output-format json) is the first failed-run
 		// signal: its ERROR status with agy's own print-wait deadline signature is
