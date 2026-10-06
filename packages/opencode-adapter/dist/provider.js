@@ -690,6 +690,26 @@ var AUTH_RE = /captcha|\bsign[\s._-]?in\b|log.?in required|unauthenticated|forbi
 var QUOTA_RE = /quota|rate.?limit|\b429\b|resource.?exhausted|too many requests/i;
 var TRANSIENT_RE = /unavailable|outage|overloaded|connection\s+(?:refused|reset|failed)|network\s+error|\b5\d\d\b|internal error|server error/i;
 var PRINT_WAIT_TIMEOUT_RE = /timeout waiting for response/i;
+function diagnosticLog(log) {
+  return log.split(`
+`).filter((line) => {
+    const t = line.trim();
+    if (!t.startsWith("{") || !t.endsWith("}"))
+      return true;
+    try {
+      const parsed = JSON.parse(t);
+      return typeof parsed !== "object" || parsed === null || Array.isArray(parsed);
+    } catch {
+      return true;
+    }
+  }).join(`
+`);
+}
+function isAuthFailure(signal) {
+  if (signal.envelope?.status === "ERROR" && AUTH_RE.test(signal.envelope.error ?? ""))
+    return true;
+  return AUTH_RE.test(diagnosticLog(signal.log ?? ""));
+}
 function classifyRun(signal) {
   const log = signal.log ?? "";
   if (signal.spawnError === "ENOENT")
@@ -714,7 +734,7 @@ function classifyRun(signal) {
   if (/\[agy\] print timeout after \S+ with turn in progress/i.test(log)) {
     return { outcome: "timeout", reason: "agy_print_wait_timeout" };
   }
-  if (AUTH_RE.test(log))
+  if (isAuthFailure(signal))
     return { outcome: "auth_captcha", reason: "auth_or_captcha" };
   if (signal.exitCode !== 0) {
     if (signal.envelope?.status === "ERROR") {
