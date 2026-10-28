@@ -40,6 +40,10 @@ Full install, safety wall, continuity, and configuration docs: see the
   in-flight provider turn; in-flight thread delegations are not shown on
   the turn line), `clear` (drops BOTH the session and thread rows), and
   `open` (opens the active agy session in an interactive tmux popup or terminal).
+- **Tool `agy_cleanup_preview`** — always available, independently of `AskAgy`.
+  Optional `ttlDays` defaults to 7. Reports conversation candidates, protections,
+  and estimated bytes without deleting or changing MCP configuration.
+  See [result fields and safety boundaries](../../docs/cleanup-preview.md).
 - **File config** — `~/.pi/agent/agy-bridge.json` then project
   `.pi/agy-bridge.json`; precedence factory options > project > global >
   env. `askAgy` section: `enabled`, `name`, `label`, `description`,

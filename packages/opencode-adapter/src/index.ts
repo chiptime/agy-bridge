@@ -22,7 +22,8 @@
  * front, and any failure degrades to the static builtin registry.
  */
 import { tool, type Hooks, type Plugin, type PluginModule } from "@opencode-ai/plugin";
-import { openInteractiveAgySession } from "agy-bridge-engine";
+import { dirname } from "node:path";
+import { CLEANUP_PREVIEW_DESCRIPTION, openInteractiveAgySession, parseCleanupPreviewParameters, previewCleanup } from "agy-bridge-engine";
 import type { ModelConfig } from "./config";
 import { AGY_PROVIDER_ID } from "./provider";
 import { resolveRegistry, buildModelRecord, type AgyModel } from "./models";
@@ -62,6 +63,8 @@ export interface AgyPluginServerOptions {
 	store?: SessionStore;
 	/** Test/DI seam: interactive session opener override. */
 	openInteractiveSession?: typeof openInteractiveAgySession;
+	/** Test/DI seam: read-only cleanup inventory; never called at plugin load. */
+	cleanupPreview?: typeof previewCleanup;
 }
 
 const server: Plugin = async (input, options) => {
@@ -131,6 +134,17 @@ const server: Plugin = async (input, options) => {
 		tool: {
 			open_agy_session: openSessionTool,
 			agy_open: openSessionTool,
+			agy_cleanup_preview: tool({
+				description: CLEANUP_PREVIEW_DESCRIPTION,
+				args: {
+					ttlDays: tool.schema.number().int().min(0).max(36500).optional().describe("Retention window in days (default: 7). Preview only."),
+				},
+				async execute(args) {
+					const params = parseCleanupPreviewParameters(args);
+					const stateDir = dirname(sessionMapPath({ override: opts.stateDir, env: opts.env }));
+					return JSON.stringify(await (opts.cleanupPreview ?? previewCleanup)({ ...params, stateDir }), null, 2);
+				},
+			}),
 		},
 	};
 	return hooks;
