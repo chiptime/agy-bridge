@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "callId": "ece2848d-515a-4a6d-83dd-95506ea9d8cf",
+  "bridgeVersion": "unknown",
+  "recoveryDisposition": "not-attempted",
+  "attempts": [
+    {
+      "attemptIndex": 1,
+      "logPath": "/home/bruno/Code/personal/agy-bridge/.agy-diagnostics/ece2848d-515a-4a6d-83dd-95506ea9d8cf/attempt-1.log",
+      "mode": "initial",
+      "resumed": false,
+      "idAvailable": true,
+      "timeoutMsEffective": 1230000,
+      "stallMsEffective": 600000,
+      "wallElapsedMs": 5169,
+      "exitCode": null,
+      "signal": "unknown",
+      "timedOut": false,
+      "stalled": false,
+      "aborted": false,
+      "classificationOutcome": "success",
+      "classificationReason": "ok"
+    }
+  ],
+  "createdAt": "2026-11-05T17:05:18.015Z",
+  "completedAt": "2026-11-05T17:05:23.185Z",
+  "truncated": false
+}

@@ -1,0 +1,41 @@
+{
+  "name": "agy-bridge-opencode-v2",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/index.ts src/provider.ts src/tui.ts --outdir dist --target bun --external @opencode/plugin --external @opentui/core --external @opentui/solid --external solid-js"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./provider": {
+      "types": "./src/provider.ts",
+      "default": "./dist/provider.js"
+    },
+    "./tui": {
+      "types": "./src/tui.ts",
+      "default": "./dist/tui.js"
+    }
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@opencode/plugin": "^2.2.5"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.2.5",
+    "@types/bun": "1.4.2",
+    "agy-bridge-engine": "workspace:*",
+    "typescript": "^7.0.2"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chiptime/agy-bridge.git"
+  }
+}
