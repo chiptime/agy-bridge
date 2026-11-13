@@ -266,7 +266,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 			maxTokens: 65_536,
 		});
 		expect(models[0].cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-		expect(calls.tools).toHaveLength(0); // v0.2 R3 behavior change: AskAgy is opt-in
+		expect(calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]); // AskAgy remains opt-in
 		expect(calls.commands).toHaveLength(1);
 		expect(calls.commands[0].name).toBe("agy");
 		expect(calls.commands[0].description).toBeTruthy();
@@ -423,7 +423,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		const reIds = (env.calls.providers[1].config.models ?? []).map((m) => m.id);
 		expect(reIds).toContain("reload-model");
 		expect(reIds).not.toContain("other-model");
-		expect(env.calls.tools).toHaveLength(0); // v0.2 R3: no AskAgy by default, and reload must not register one either
+		expect(env.calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]); // reload must not duplicate tools or enable AskAgy
 		expect(env.calls.commands).toHaveLength(1);
 		expect(env.calls.handlers["session_start"]).toHaveLength(1);
 		expect(env.calls.handlers["session_shutdown"]).toHaveLength(1);
@@ -442,7 +442,7 @@ describe("integration: extensions/index — factory glue (R1, R2, R3)", () => {
 		await env.load();
 		await env.calls.handlers["session_start"][0]({ type: "session_start", reason: "reload" } as never); // must not reject
 		expect(env.calls.providers).toHaveLength(1); // keeps the load-time registry
-		expect(env.calls.tools).toHaveLength(0); // v0.2 R3: no AskAgy by default
+		expect(env.calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]); // AskAgy remains off
 		expect(env.runner.callCount()).toBe(2);
 	});
 
@@ -643,7 +643,7 @@ describe("integration: extensions/index — conditional AskAgy registration + st
 	test("R3: askAgy section ABSENT → NO AskAgy and exactly ONE one-time notice on the first session_start", async () => {
 		const { calls, load } = await factoryEnv();
 		await load();
-		expect(calls.tools).toHaveLength(0);
+		expect(calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]);
 		const notes: string[] = [];
 		await calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
 		expect(notes).toHaveLength(1);
@@ -657,7 +657,7 @@ describe("integration: extensions/index — conditional AskAgy registration + st
 	test("R3: the notice surfaces file-config warnings (the S1 file.warnings path)", async () => {
 		const { calls, load } = await fileFactoryEnv({ global: "{oops" });
 		await load();
-		expect(calls.tools).toHaveLength(0);
+		expect(calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]);
 		const notes: string[] = [];
 		await calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
 		expect(notes).toHaveLength(1);
@@ -665,10 +665,10 @@ describe("integration: extensions/index — conditional AskAgy registration + st
 		expect(notes[0]).toContain("malformed");
 	});
 
-	test("R3: enabled:false → no tool and NO notice (explicit opt-out is silent)", async () => {
+	test("R3: enabled:false → no AskAgy and NO notice (explicit opt-out is silent)", async () => {
 		const { calls, load } = await factoryEnv({ options: { askAgy: { enabled: false } } });
 		await load();
-		expect(calls.tools).toHaveLength(0);
+		expect(calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]);
 		const notes: string[] = [];
 		await calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
 		expect(notes).toHaveLength(0);
@@ -677,14 +677,14 @@ describe("integration: extensions/index — conditional AskAgy registration + st
 	test("R3: enabled:true → AskAgy registered exactly once (explicit options or project file layer)", async () => {
 		const explicit = await factoryEnv({ options: { askAgy: { enabled: true } } });
 		await explicit.load();
-		expect(explicit.calls.tools).toHaveLength(1);
+		expect(explicit.calls.tools).toHaveLength(2);
 		expect(explicit.calls.tools[0].name).toBe("AskAgy");
 		const notes: string[] = [];
 		await explicit.calls.handlers["session_start"][0]({ type: "session_start", reason: "startup" } as never, startCtx(notes));
 		expect(notes).toHaveLength(0); // registered → no notice
 		const fromFile = await fileFactoryEnv({ project: JSON.stringify({ askAgy: { enabled: true } }) });
 		await fromFile.load();
-		expect(fromFile.calls.tools).toHaveLength(1);
+		expect(fromFile.calls.tools).toHaveLength(2);
 		expect(fromFile.calls.tools[0].name).toBe("AskAgy");
 		// Schema shape through the factory (formerly pinned by the smoke test,
 		// whose plain invocation registers no tool under R3). v0.2 R5 adds the

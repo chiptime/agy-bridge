@@ -156,8 +156,8 @@ describe("smoke: extensions/index.ts loaded like pi (R1, R2)", () => {
 		expect(typeof calls.providers[0]!.config.streamSimple).toBe("function");
 
 		// v0.2 R3 behavior change: AskAgy is opt-in — a plain invocation
-		// (no askAgy config) registers NO tool and arms the one-time notice.
-		expect(calls.tools).toEqual([]);
+		// (no askAgy config) registers only the read-only preview and arms the notice.
+		expect(calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]);
 
 		expect(calls.commands.map((c) => c.name)).toEqual(["agy"]);
 		expect(calls.commands[0]!.description).toContain("agy bridge");
@@ -175,7 +175,7 @@ describe("smoke: extensions/index.ts loaded like pi (R1, R2)", () => {
 		const { pi, calls } = stubPi();
 		await (loaded.factory as Factory)(pi);
 		expect(calls.providers.map((p) => p.name)).toEqual(["agy"]);
-		expect(calls.tools).toEqual([]); // v0.2 R3: no AskAgy without opt-in
+		expect(calls.tools.map((tool) => tool.name)).toEqual(["agy_cleanup_preview"]); // no AskAgy without opt-in
 		expect(calls.commands.map((c) => c.name)).toEqual(["agy"]);
 		expect(calls.handlers["session_start"]).toHaveLength(1);
 		expect(calls.handlers["session_shutdown"]).toHaveLength(1);

@@ -86,6 +86,13 @@ entry file are imported directly:
   then uses the session directory instead, and the filesystem root itself
   is always rejected with a typed config error.
 
+## Read-only cleanup preview
+
+The plugin exposes `agy_cleanup_preview` with optional `ttlDays` (default: 7).
+It reports conversation candidates, bindings/locks and other protections, estimated
+bytes, and incomplete evidence. It has no apply/delete mode and does not change
+MCP configuration. See [result fields and safety boundaries](../../docs/cleanup-preview.md).
+
 ## Image input (opt-in)
 
 The agy CLI ingests text only, but its agent can inspect on-disk images via

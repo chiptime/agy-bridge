@@ -25,8 +25,9 @@
 import type { spawn } from "node:child_process";
 import type { Api } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { listAgyModels, type AgyModelsRunner } from "agy-bridge-engine";
+import { listAgyModels, type AgyModelsRunner, type previewCleanup } from "agy-bridge-engine";
 import { createAskAgyTool } from "../src/ask-tool";
+import { createCleanupPreviewTool } from "../src/cleanup-tool";
 import { createAgyCommand } from "../src/commands";
 import { resolveConfig, type PiAdapterOptions } from "../src/config";
 import { createDebugLogger } from "../src/debug";
@@ -60,6 +61,8 @@ export interface AgyExtensionDeps {
 	fileConfig?: { cwd?: string; agentDir?: string };
 	/** Skills-catalog passthrough for AskAgy (v0.2 R4 tests; pi exposes no skills API yet). */
 	skillsCatalog?: () => string | undefined;
+	/** Test/DI seam: optional read-only cleanup inventory, lazy until invocation. */
+	cleanupPreview?: typeof previewCleanup;
 }
 
 /**
@@ -218,6 +221,8 @@ export async function createAgyExtension(pi: ExtensionAPI, deps: AgyExtensionDep
 			}),
 		);
 	}
+
+	pi.registerTool(createCleanupPreviewTool({ stateDir: config.stateDir, preview: deps.cleanupPreview }));
 
 	const agyCommand = createAgyCommand({
 		bin: config.agyBin,
