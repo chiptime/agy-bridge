@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-23
+
+### Added
+- **Read-only conversation cleanup preview (`agy_cleanup_preview`)**: inventories
+  stale Antigravity conversations with protection checks (active bindings,
+  locks, recent activity), estimated bytes, and incomplete-evidence reporting
+  (read-only, no delete/apply mode).
+- **`-xhigh` effort variant collapse**: `EFFORT_SUFFIXES` now includes `xhigh`
+  (`xhigh > high > medium > low`), collapsing `-xhigh` models (such as
+  `gemini-4-neon-xhigh` and `gemini-4-hydrogen-xhigh`) into their base model's
+  `variants` map and preferring `xhigh` as the collapsed base fallback.
+
+## [pi 0.6.0] - 2026-11-23
+
+### Added
+- **Read-only conversation cleanup preview (`agy_cleanup_preview`)**: exposed as
+  a read-only pi tool backed by the shared engine inventory.
+- **`-xhigh` effort variant collapse**: `EFFORT_SUFFIXES` now includes `xhigh`
+  and maps discovered `-xhigh` tiers onto `thinkingLevelMap.xhigh`.
+
 ## [0.6.1] - 2026-10-07
 
 ### Fixed
