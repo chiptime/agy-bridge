@@ -3,7 +3,7 @@
  * BARE model ids agy reports — pi namespaces them under the provider id, so
  * "default" surfaces as "agy/default" in the picker. Our default entry is
  * FIRST and carries no --model argument; discovered ids that encode effort
- * as a -high/-medium/-low suffix COLLAPSE into their base model, which is
+ * as a -xhigh/-high/-medium/-low suffix COLLAPSE into their base model, which is
  * registered with reasoning:true and a thinkingLevelMap whose VALUES are
  * the full agy ids passed as --model at turn time (pi passes the requested
  * ThinkingLevel to the custom streamSimple, which resolves the map). Ids
@@ -41,7 +41,7 @@ export interface DiscoveredEntry {
 }
 
 /** Effort suffixes agy ids encode (design #4); pi's other levels route to null. */
-const EFFORT_SUFFIXES = ["high", "medium", "low"] as const;
+const EFFORT_SUFFIXES = ["xhigh", "high", "medium", "low"] as const;
 type Effort = (typeof EFFORT_SUFFIXES)[number];
 
 function splitEffort(id: string): { base: string; effort: Effort } | null {
@@ -113,7 +113,7 @@ function baseRegistry(discovered?: readonly DiscoveredEntry[]): PiAgyModel[] {
 			low: efforts.low ?? null,
 			medium: efforts.medium ?? null,
 			high: efforts.high ?? null,
-			xhigh: null,
+			xhigh: efforts.xhigh ?? null,
 			max: null,
 		};
 	}

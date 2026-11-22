@@ -8,7 +8,7 @@
  * poolForModel so the quota gate (D7) and the registry agree.
  *
  * Effort-variant collapse: agy ids encode the reasoning effort as a
- * -high/-medium/-low suffix (verified live via `agy models`). Those suffixed
+ * -xhigh/-high/-medium/-low suffix (verified live via `agy models`). Those suffixed
  * ids COLLAPSE into their base model, which carries a `variants` payload
  * whose VALUES are the full agy ids passed as --model at turn time
  * (opencode 1.18.30 ModelV2.variants + session model.variant). Flat suffixed
@@ -17,7 +17,7 @@
  * resolveModel's unknown-suffix passthrough, so legacy pinned configs and
  * existing sessions holding e.g. agy/gemini-3.8-flash-high keep working.
  * A collapsed base has NO exact bare agy id to spawn, so its modelArg
- * defaults to the HIGHEST discovered effort (high > medium > low) — that is
+ * defaults to the HIGHEST discovered effort (xhigh > high > medium > low) — that is
  * also the documented fallback for unknown or absent variants.
  */
 import { poolForModel, type Pool } from "agy-bridge-engine";
@@ -55,7 +55,7 @@ function model(id: string, name: string, modelArg?: string): AgyModel {
 }
 
 /** Effort suffixes agy ids encode; order is ALSO the fallback priority. */
-const EFFORT_SUFFIXES = ["high", "medium", "low"] as const;
+const EFFORT_SUFFIXES = ["xhigh", "high", "medium", "low"] as const;
 type Effort = (typeof EFFORT_SUFFIXES)[number];
 
 /** Split a trailing effort suffix off an agy id; null when none applies. */
@@ -138,7 +138,7 @@ function baseRegistry(discovered?: readonly DiscoveredEntry[]): AgyModel[] {
 	for (const [baseId, efforts] of effortsByBase) {
 		const base = byId.get(baseId);
 		if (!base) continue;
-		const fallback = efforts.high ?? efforts.medium ?? efforts.low;
+		const fallback = EFFORT_SUFFIXES.map((e) => efforts[e]).find((v) => v !== undefined);
 		if (fallback !== undefined) base.modelArg = fallback;
 		base.pool = poolForModel(base.modelArg ?? "");
 		const variants: Record<string, AgyVariantPayload> = {};
@@ -197,7 +197,7 @@ function applyConfig(
 			// fall back to its HIGHEST discovered effort, never to the bare id
 			// (which does not exist in agy — spawning it would fail).
 			const fallbackArg =
-				variants?.["high"]?.agyModelId ??
+				EFFORT_SUFFIXES.map((e) => variants?.[e]?.agyModelId).find((v) => typeof v === "string") ??
 				Object.values(variants ?? {}).find((v) => typeof v?.agyModelId === "string")?.agyModelId;
 			const extended = model(fullId, cfg?.name ?? normalize(id), fallbackArg ?? normalize(id));
 			if (cfg?.limit !== undefined) extended.limit = { ...cfg.limit };

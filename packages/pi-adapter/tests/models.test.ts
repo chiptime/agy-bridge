@@ -102,6 +102,26 @@ describe("unit: models — effort-suffix collapse into thinkingLevelMap (R2)", (
 		const registry = resolveRegistry({}, [{ id: "-high", name: "Weird" }]);
 		expect(registry[1]).toMatchObject({ id: "-high", reasoning: false });
 	});
+
+	test("xhigh suffix collapses into thinkingLevelMap.xhigh alongside high/medium/low", () => {
+		const registry = resolveRegistry({}, [
+			{ id: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+			{ id: "gemini-4-neon-xhigh", name: "Gemini 4 Neon (XHigh)" },
+			{ id: "gemini-4-neon-medium", name: "Gemini 4 Neon (Medium)" },
+			{ id: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
+		]);
+		expect(registry.map((m) => m.id)).toEqual(["default", "gemini-4-neon"]);
+		expect(registry[1].reasoning).toBe(true);
+		expect(registry[1].thinkingLevelMap).toEqual({
+			off: null,
+			minimal: null,
+			low: "gemini-4-neon-low",
+			medium: "gemini-4-neon-medium",
+			high: "gemini-4-neon-high",
+			xhigh: "gemini-4-neon-xhigh",
+			max: null,
+		});
+	});
 });
 
 describe("unit: models — fallback catalog when discovery fails (R2)", () => {

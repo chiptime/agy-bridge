@@ -508,6 +508,210 @@ __export(exports_core2, {
   version: () => version
 });
 
+// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/core/util.js
+var exports_util = {};
+__export(exports_util, {
+  BIGINT_FORMAT_RANGES: () => BIGINT_FORMAT_RANGES,
+  Class: () => Class,
+  NUMBER_FORMAT_RANGES: () => NUMBER_FORMAT_RANGES,
+  aborted: () => aborted,
+  allowsEval: () => allowsEval,
+  assert: () => assert,
+  assertEqual: () => assertEqual,
+  assertIs: () => assertIs,
+  assertNever: () => assertNever,
+  assertNotEqual: () => assertNotEqual,
+  assignProp: () => assignProp,
+  base64ToUint8Array: () => base64ToUint8Array,
+  base64urlToUint8Array: () => base64urlToUint8Array,
+  cached: () => cached,
+  captureStackTrace: () => captureStackTrace,
+  cleanEnum: () => cleanEnum,
+  cleanRegex: () => cleanRegex,
+  clone: () => clone,
+  cloneDef: () => cloneDef,
+  createTransparentProxy: () => createTransparentProxy,
+  defineLazy: () => defineLazy,
+  esc: () => esc,
+  escapeRegex: () => escapeRegex,
+  extend: () => extend,
+  finalizeIssue: () => finalizeIssue,
+  floatSafeRemainder: () => floatSafeRemainder,
+  getElementAtPath: () => getElementAtPath,
+  getEnumValues: () => getEnumValues,
+  getLengthableOrigin: () => getLengthableOrigin,
+  getParsedType: () => getParsedType,
+  getSizableOrigin: () => getSizableOrigin,
+  hexToUint8Array: () => hexToUint8Array,
+  isObject: () => isObject,
+  isPlainObject: () => isPlainObject,
+  issue: () => issue,
+  joinValues: () => joinValues,
+  jsonStringifyReplacer: () => jsonStringifyReplacer,
+  merge: () => merge,
+  mergeDefs: () => mergeDefs,
+  normalizeParams: () => normalizeParams,
+  nullish: () => nullish,
+  numKeys: () => numKeys,
+  objectClone: () => objectClone,
+  omit: () => omit,
+  optionalKeys: () => optionalKeys,
+  partial: () => partial,
+  pick: () => pick,
+  prefixIssues: () => prefixIssues,
+  primitiveTypes: () => primitiveTypes,
+  promiseAllObject: () => promiseAllObject,
+  propertyKeyTypes: () => propertyKeyTypes,
+  randomString: () => randomString,
+  required: () => required,
+  safeExtend: () => safeExtend,
+  shallowClone: () => shallowClone,
+  stringifyPrimitive: () => stringifyPrimitive,
+  uint8ArrayToBase64: () => uint8ArrayToBase64,
+  uint8ArrayToBase64url: () => uint8ArrayToBase64url,
+  uint8ArrayToHex: () => uint8ArrayToHex,
+  unwrapMessage: () => unwrapMessage
+});
+
+// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/core/regexes.js
+var exports_regexes = {};
+__export(exports_regexes, {
+  base64: () => base64,
+  base64url: () => base64url,
+  bigint: () => bigint,
+  boolean: () => boolean,
+  browserEmail: () => browserEmail,
+  cidrv4: () => cidrv4,
+  cidrv6: () => cidrv6,
+  cuid: () => cuid,
+  cuid2: () => cuid2,
+  date: () => date,
+  datetime: () => datetime,
+  domain: () => domain,
+  duration: () => duration,
+  e164: () => e164,
+  email: () => email,
+  emoji: () => emoji,
+  extendedDuration: () => extendedDuration,
+  guid: () => guid,
+  hex: () => hex,
+  hostname: () => hostname,
+  html5Email: () => html5Email,
+  idnEmail: () => idnEmail,
+  integer: () => integer,
+  ipv4: () => ipv4,
+  ipv6: () => ipv6,
+  ksuid: () => ksuid,
+  lowercase: () => lowercase,
+  md5_base64: () => md5_base64,
+  md5_base64url: () => md5_base64url,
+  md5_hex: () => md5_hex,
+  nanoid: () => nanoid,
+  null: () => _null,
+  number: () => number,
+  rfc5322Email: () => rfc5322Email,
+  sha1_base64: () => sha1_base64,
+  sha1_base64url: () => sha1_base64url,
+  sha1_hex: () => sha1_hex,
+  sha256_base64: () => sha256_base64,
+  sha256_base64url: () => sha256_base64url,
+  sha256_hex: () => sha256_hex,
+  sha384_base64: () => sha384_base64,
+  sha384_base64url: () => sha384_base64url,
+  sha384_hex: () => sha384_hex,
+  sha512_base64: () => sha512_base64,
+  sha512_base64url: () => sha512_base64url,
+  sha512_hex: () => sha512_hex,
+  string: () => string,
+  time: () => time,
+  ulid: () => ulid,
+  undefined: () => _undefined,
+  unicodeEmail: () => unicodeEmail,
+  uppercase: () => uppercase,
+  uuid: () => uuid,
+  uuid4: () => uuid4,
+  uuid6: () => uuid6,
+  uuid7: () => uuid7,
+  xid: () => xid
+});
+
+// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/locales/index.js
+var exports_locales = {};
+__export(exports_locales, {
+  ar: () => ar_default,
+  az: () => az_default,
+  be: () => be_default,
+  ca: () => ca_default,
+  cs: () => cs_default,
+  da: () => da_default,
+  de: () => de_default,
+  en: () => en_default,
+  eo: () => eo_default,
+  es: () => es_default,
+  fa: () => fa_default,
+  fi: () => fi_default,
+  fr: () => fr_default,
+  frCA: () => fr_CA_default,
+  he: () => he_default,
+  hu: () => hu_default,
+  id: () => id_default,
+  is: () => is_default,
+  it: () => it_default,
+  ja: () => ja_default,
+  ka: () => ka_default,
+  kh: () => kh_default,
+  km: () => km_default,
+  ko: () => ko_default,
+  lt: () => lt_default,
+  mk: () => mk_default,
+  ms: () => ms_default,
+  nl: () => nl_default,
+  no: () => no_default,
+  ota: () => ota_default,
+  pl: () => pl_default,
+  ps: () => ps_default,
+  pt: () => pt_default,
+  ru: () => ru_default,
+  sl: () => sl_default,
+  sv: () => sv_default,
+  ta: () => ta_default,
+  th: () => th_default,
+  tr: () => tr_default,
+  ua: () => ua_default,
+  uk: () => uk_default,
+  ur: () => ur_default,
+  vi: () => vi_default,
+  yo: () => yo_default,
+  zhCN: () => zh_CN_default,
+  zhTW: () => zh_TW_default
+});
+
+// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/core/json-schema.js
+var exports_json_schema = {};
+
+// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/classic/iso.js
+var exports_iso = {};
+__export(exports_iso, {
+  ZodISODate: () => ZodISODate,
+  ZodISODateTime: () => ZodISODateTime,
+  ZodISODuration: () => ZodISODuration,
+  ZodISOTime: () => ZodISOTime,
+  date: () => date2,
+  datetime: () => datetime2,
+  duration: () => duration2,
+  time: () => time2
+});
+
+// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/classic/coerce.js
+var exports_coerce = {};
+__export(exports_coerce, {
+  bigint: () => bigint3,
+  boolean: () => boolean3,
+  date: () => date4,
+  number: () => number3,
+  string: () => string3
+});
+
 // ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/core/core.js
 var NEVER = Object.freeze({
   status: "aborted"
@@ -576,69 +780,6 @@ function config(newConfig) {
   return globalConfig;
 }
 // ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/core/util.js
-var exports_util = {};
-__export(exports_util, {
-  BIGINT_FORMAT_RANGES: () => BIGINT_FORMAT_RANGES,
-  Class: () => Class,
-  NUMBER_FORMAT_RANGES: () => NUMBER_FORMAT_RANGES,
-  aborted: () => aborted,
-  allowsEval: () => allowsEval,
-  assert: () => assert,
-  assertEqual: () => assertEqual,
-  assertIs: () => assertIs,
-  assertNever: () => assertNever,
-  assertNotEqual: () => assertNotEqual,
-  assignProp: () => assignProp,
-  base64ToUint8Array: () => base64ToUint8Array,
-  base64urlToUint8Array: () => base64urlToUint8Array,
-  cached: () => cached,
-  captureStackTrace: () => captureStackTrace,
-  cleanEnum: () => cleanEnum,
-  cleanRegex: () => cleanRegex,
-  clone: () => clone,
-  cloneDef: () => cloneDef,
-  createTransparentProxy: () => createTransparentProxy,
-  defineLazy: () => defineLazy,
-  esc: () => esc,
-  escapeRegex: () => escapeRegex,
-  extend: () => extend,
-  finalizeIssue: () => finalizeIssue,
-  floatSafeRemainder: () => floatSafeRemainder,
-  getElementAtPath: () => getElementAtPath,
-  getEnumValues: () => getEnumValues,
-  getLengthableOrigin: () => getLengthableOrigin,
-  getParsedType: () => getParsedType,
-  getSizableOrigin: () => getSizableOrigin,
-  hexToUint8Array: () => hexToUint8Array,
-  isObject: () => isObject,
-  isPlainObject: () => isPlainObject,
-  issue: () => issue,
-  joinValues: () => joinValues,
-  jsonStringifyReplacer: () => jsonStringifyReplacer,
-  merge: () => merge,
-  mergeDefs: () => mergeDefs,
-  normalizeParams: () => normalizeParams,
-  nullish: () => nullish,
-  numKeys: () => numKeys,
-  objectClone: () => objectClone,
-  omit: () => omit,
-  optionalKeys: () => optionalKeys,
-  partial: () => partial,
-  pick: () => pick,
-  prefixIssues: () => prefixIssues,
-  primitiveTypes: () => primitiveTypes,
-  promiseAllObject: () => promiseAllObject,
-  propertyKeyTypes: () => propertyKeyTypes,
-  randomString: () => randomString,
-  required: () => required,
-  safeExtend: () => safeExtend,
-  shallowClone: () => shallowClone,
-  stringifyPrimitive: () => stringifyPrimitive,
-  uint8ArrayToBase64: () => uint8ArrayToBase64,
-  uint8ArrayToBase64url: () => uint8ArrayToBase64url,
-  uint8ArrayToHex: () => uint8ArrayToHex,
-  unwrapMessage: () => unwrapMessage
-});
 function assertEqual(val) {
   return val;
 }
@@ -1435,66 +1576,6 @@ var _safeDecodeAsync = (_Err) => async (schema, value, _ctx) => {
 };
 var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError);
 // ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/core/regexes.js
-var exports_regexes = {};
-__export(exports_regexes, {
-  base64: () => base64,
-  base64url: () => base64url,
-  bigint: () => bigint,
-  boolean: () => boolean,
-  browserEmail: () => browserEmail,
-  cidrv4: () => cidrv4,
-  cidrv6: () => cidrv6,
-  cuid: () => cuid,
-  cuid2: () => cuid2,
-  date: () => date,
-  datetime: () => datetime,
-  domain: () => domain,
-  duration: () => duration,
-  e164: () => e164,
-  email: () => email,
-  emoji: () => emoji,
-  extendedDuration: () => extendedDuration,
-  guid: () => guid,
-  hex: () => hex,
-  hostname: () => hostname,
-  html5Email: () => html5Email,
-  idnEmail: () => idnEmail,
-  integer: () => integer,
-  ipv4: () => ipv4,
-  ipv6: () => ipv6,
-  ksuid: () => ksuid,
-  lowercase: () => lowercase,
-  md5_base64: () => md5_base64,
-  md5_base64url: () => md5_base64url,
-  md5_hex: () => md5_hex,
-  nanoid: () => nanoid,
-  null: () => _null,
-  number: () => number,
-  rfc5322Email: () => rfc5322Email,
-  sha1_base64: () => sha1_base64,
-  sha1_base64url: () => sha1_base64url,
-  sha1_hex: () => sha1_hex,
-  sha256_base64: () => sha256_base64,
-  sha256_base64url: () => sha256_base64url,
-  sha256_hex: () => sha256_hex,
-  sha384_base64: () => sha384_base64,
-  sha384_base64url: () => sha384_base64url,
-  sha384_hex: () => sha384_hex,
-  sha512_base64: () => sha512_base64,
-  sha512_base64url: () => sha512_base64url,
-  sha512_hex: () => sha512_hex,
-  string: () => string,
-  time: () => time,
-  ulid: () => ulid,
-  undefined: () => _undefined,
-  unicodeEmail: () => unicodeEmail,
-  uppercase: () => uppercase,
-  uuid: () => uuid,
-  uuid4: () => uuid4,
-  uuid6: () => uuid6,
-  uuid7: () => uuid7,
-  xid: () => xid
-});
 var cuid = /^[cC][^\s-]{8,}$/;
 var cuid2 = /^[0-9a-z]+$/;
 var ulid = /^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$/;
@@ -3995,57 +4076,6 @@ function handleRefineResult(result, payload, input, inst) {
     payload.issues.push(issue(_iss));
   }
 }
-// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/locales/index.js
-var exports_locales = {};
-__export(exports_locales, {
-  ar: () => ar_default,
-  az: () => az_default,
-  be: () => be_default,
-  ca: () => ca_default,
-  cs: () => cs_default,
-  da: () => da_default,
-  de: () => de_default,
-  en: () => en_default,
-  eo: () => eo_default,
-  es: () => es_default,
-  fa: () => fa_default,
-  fi: () => fi_default,
-  fr: () => fr_default,
-  frCA: () => fr_CA_default,
-  he: () => he_default,
-  hu: () => hu_default,
-  id: () => id_default,
-  is: () => is_default,
-  it: () => it_default,
-  ja: () => ja_default,
-  ka: () => ka_default,
-  kh: () => kh_default,
-  km: () => km_default,
-  ko: () => ko_default,
-  lt: () => lt_default,
-  mk: () => mk_default,
-  ms: () => ms_default,
-  nl: () => nl_default,
-  no: () => no_default,
-  ota: () => ota_default,
-  pl: () => pl_default,
-  ps: () => ps_default,
-  pt: () => pt_default,
-  ru: () => ru_default,
-  sl: () => sl_default,
-  sv: () => sv_default,
-  ta: () => ta_default,
-  th: () => th_default,
-  tr: () => tr_default,
-  ua: () => ua_default,
-  uk: () => uk_default,
-  ur: () => ur_default,
-  vi: () => vi_default,
-  yo: () => yo_default,
-  zhCN: () => zh_CN_default,
-  zhTW: () => zh_TW_default
-});
-
 // ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/locales/ar.js
 var error = () => {
   const Sizable = {
@@ -11211,20 +11241,7 @@ function isTransforming(_schema, _ctx) {
   }
   throw new Error(`Unknown schema type: ${def.type}`);
 }
-// ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/core/json-schema.js
-var exports_json_schema = {};
 // ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/classic/iso.js
-var exports_iso = {};
-__export(exports_iso, {
-  ZodISODate: () => ZodISODate,
-  ZodISODateTime: () => ZodISODateTime,
-  ZodISODuration: () => ZodISODuration,
-  ZodISOTime: () => ZodISOTime,
-  date: () => date2,
-  datetime: () => datetime2,
-  duration: () => duration2,
-  time: () => time2
-});
 var ZodISODateTime = /* @__PURE__ */ $constructor("ZodISODateTime", (inst, def) => {
   $ZodISODateTime.init(inst, def);
   ZodStringFormat.init(inst, def);
@@ -12303,14 +12320,6 @@ function getErrorMap() {
 var ZodFirstPartyTypeKind;
 (function(ZodFirstPartyTypeKind) {})(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
 // ../../node_modules/.bun/zod@4.1.8/node_modules/zod/v4/classic/coerce.js
-var exports_coerce = {};
-__export(exports_coerce, {
-  bigint: () => bigint3,
-  boolean: () => boolean3,
-  date: () => date4,
-  number: () => number3,
-  string: () => string3
-});
 function string3(params) {
   return _coercedString(ZodString, params);
 }
@@ -12334,6 +12343,9 @@ function tool(input) {
   return input;
 }
 tool.schema = exports_external;
+// src/index.ts
+import { dirname as dirname4 } from "path";
+
 // ../engine/src/spawn.ts
 import { mkdirSync, readdirSync, statSync, openSync, closeSync, appendFileSync } from "fs";
 import { spawn } from "child_process";
@@ -13445,6 +13457,330 @@ function openInteractiveAgySession(options) {
   }
   return { success: false, reason: "no_display_or_terminal", command };
 }
+// ../engine/src/cleanup-preview.ts
+import { createHash as createHash4 } from "crypto";
+import { closeSync as closeSync3, constants as constants2, fstatSync, lstatSync as lstatSync2, mkdtempSync, openSync as openSync3, opendirSync, readSync, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "fs";
+import { homedir, tmpdir } from "os";
+import { isAbsolute, join as join4 } from "path";
+var CLEANUP_PREVIEW_DESCRIPTION = "Inspect Antigravity conversation cleanup candidates without deleting anything. Reports structured subagent evidence, retained bridge bindings, activity/lock protections, estimated bytes, and missing evidence. Advisory snapshot only, never authorization to delete. No apply option; MCP configuration is excluded.";
+var UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+var DAY = 86400000;
+var MAX_ENTRIES = 500;
+var MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024;
+var IDLE_STATUSES = new Set(["IDLE", "DONE", "COMPLETED", "CASCADE_RUN_STATUS_IDLE", "CASCADE_RUN_STATUS_DONE", "CASCADE_RUN_STATUS_COMPLETED"]);
+function validateTtl(value) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > 36500) {
+    throw new Error("ttlDays must be an integer from 0 to 36500");
+  }
+}
+function parseSummaryTime(value) {
+  if (typeof value !== "string")
+    return NaN;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match)
+    return NaN;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > monthDays[month - 1] || hour > 23 || minute > 59 || second > 59 || Number(match[8] ?? 0) > 23 || Number(match[9] ?? 0) > 59)
+    return NaN;
+  return Date.parse(value);
+}
+function parseCleanupPreviewParameters(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("Cleanup preview parameters must be an object");
+  for (const key of Object.keys(input)) {
+    if (key !== "ttlDays")
+      throw new Error(`Unsupported cleanup preview parameter: ${key}`);
+  }
+  const ttlDays = input.ttlDays;
+  if (ttlDays === undefined)
+    return {};
+  validateTtl(ttlDays);
+  return { ttlDays };
+}
+function stat(path) {
+  try {
+    return lstatSync2(path);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return;
+    throw error;
+  }
+}
+function plainDirectory(path) {
+  const info = stat(path);
+  if (info && (!info.isDirectory() || info.isSymbolicLink()))
+    throw new Error("unsafe_directory");
+}
+function readBounded(path, maxBytes) {
+  if (stat(path)?.isSymbolicLink())
+    throw new Error("unsafe_file");
+  const fd = openSync3(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > maxBytes)
+      throw new Error("file_limit");
+    const buffer = Buffer.alloc(before.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null);
+      if (!count)
+        break;
+      length += count;
+    }
+    const bytes = buffer.subarray(0, length);
+    const after = fstatSync(fd);
+    if (bytes.length !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs)
+      throw new Error("file_changed");
+    return bytes;
+  } finally {
+    closeSync3(fd);
+  }
+}
+function stamp(path) {
+  const info = stat(path);
+  if (!info)
+    return "missing";
+  if (!info.isFile() || info.isSymbolicLink())
+    throw new Error("unsafe_file");
+  return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs].join(":");
+}
+async function openNativeSnapshot(path) {
+  const moduleName = process.versions.bun ? "bun:sqlite" : "node:sqlite";
+  const native = await import(moduleName);
+  if (process.versions.bun) {
+    const db = new native.Database(path, { readonly: true, create: false });
+    return { all: (sql) => db.query(sql).all(), close: () => db.close(true) };
+  }
+  const db = new native.DatabaseSync(path, { readOnly: true });
+  return { all: (sql) => db.prepare(sql).all(), close: () => db.close() };
+}
+async function readSummaries(base, open, warnings) {
+  let scratch;
+  let db;
+  try {
+    plainDirectory(base);
+    const source = join4(base, "conversation_summaries.db");
+    if (!stat(source)) {
+      warnings.push("summary_database_missing");
+      return;
+    }
+    if (stat(`${source}-journal`))
+      throw new Error("journal_present");
+    const paths = [source, `${source}-wal`];
+    const before = paths.map(stamp);
+    const copies = paths.map((path, index) => before[index] === "missing" ? undefined : readBounded(path, MAX_SNAPSHOT_BYTES));
+    if (copies.reduce((sum, bytes) => sum + (bytes?.length ?? 0), 0) > MAX_SNAPSHOT_BYTES)
+      throw new Error("snapshot_limit");
+    if (paths.some((path, index) => stamp(path) !== before[index]) || stat(`${source}-journal`))
+      throw new Error("snapshot_changed");
+    scratch = mkdtempSync(join4(tmpdir(), "agy-cleanup-preview-"));
+    const snapshot = join4(scratch, "summaries.db");
+    writeFileSync3(snapshot, copies[0], { flag: "wx", mode: 384 });
+    if (copies[1])
+      writeFileSync3(`${snapshot}-wal`, copies[1], { flag: "wx", mode: 384 });
+    db = await open(snapshot);
+    const rows = db.all(`SELECT conversation_id AS conversationId,
+			parent_conversation_id AS parentConversationId, last_modified_time AS modifiedAt,
+			status, not_fully_idle AS notFullyIdle FROM conversation_summaries
+			ORDER BY conversation_id LIMIT ${MAX_ENTRIES + 1}`);
+    if (rows.length > MAX_ENTRIES)
+      warnings.push("inventory_truncated");
+    if (!rows.every((row) => row !== null && typeof row === "object" && UUID.test(String(row.conversationId))))
+      throw new Error("invalid_summary");
+    return rows.slice(0, MAX_ENTRIES);
+  } catch {
+    warnings.push("summary_metadata_unavailable");
+    return;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      warnings.push("snapshot_close_failed");
+    }
+    if (scratch) {
+      try {
+        rmSync2(scratch, { recursive: true, force: true });
+      } catch {
+        warnings.push("snapshot_cleanup_failed");
+      }
+    }
+  }
+}
+function readBindings(stateDir, warnings) {
+  const ids = new Set;
+  let known = true;
+  for (const name of ["opencode-sessions.json", "pi-sessions.json"]) {
+    try {
+      plainDirectory(stateDir);
+      const path = join4(stateDir, name);
+      if (stat(`${path}.lock`))
+        throw new Error("store_locked");
+      if (!stat(path))
+        continue;
+      const data = JSON.parse(readBounded(path, 4194304).toString("utf8"));
+      if (!data || data.version !== 1 && !(name === "opencode-sessions.json" && data.version === 2) || !data.sessions || typeof data.sessions !== "object" || Array.isArray(data.sessions))
+        throw new Error("unknown_store");
+      for (const value of Object.values(data.sessions)) {
+        const entries = data.version === 2 ? value : [value];
+        if (!Array.isArray(entries))
+          throw new Error("invalid_entries");
+        for (const entry of entries) {
+          if (!entry || typeof entry.conversationId !== "string" || !UUID.test(entry.conversationId))
+            throw new Error("invalid_binding");
+          ids.add(entry.conversationId);
+        }
+      }
+      if (stat(`${path}.lock`))
+        throw new Error("store_changed");
+    } catch {
+      known = false;
+      warnings.push("binding_state_unavailable");
+    }
+  }
+  return { ids, known };
+}
+function filesystemIds(base, warnings) {
+  const ids = new Set;
+  for (const name of ["brain", "conversations"]) {
+    try {
+      const root = join4(base, name);
+      plainDirectory(root);
+      if (!stat(root))
+        continue;
+      const dir = opendirSync(root);
+      try {
+        let entry;
+        while (entry = dir.readSync()) {
+          const id = name === "conversations" ? entry.name.replace(/\.db(?:-wal|-shm)?$/, "") : entry.name;
+          if (UUID.test(id))
+            ids.add(id);
+          if (ids.size > MAX_ENTRIES) {
+            warnings.push("inventory_truncated");
+            break;
+          }
+        }
+      } finally {
+        dir.closeSync();
+      }
+    } catch {
+      warnings.push("filesystem_inventory_unavailable");
+    }
+  }
+  return ids;
+}
+function sizeOf(path, budget) {
+  const info = stat(path);
+  if (!info)
+    return 0;
+  if (--budget.remaining < 0 || info.isSymbolicLink())
+    throw new Error("size_unavailable");
+  if (info.isFile())
+    return info.size;
+  if (!info.isDirectory())
+    throw new Error("size_unavailable");
+  let total = 0;
+  const dir = opendirSync(path);
+  try {
+    let entry;
+    while (entry = dir.readSync())
+      total += sizeOf(join4(path, entry.name), budget);
+  } finally {
+    dir.closeSync();
+  }
+  return total;
+}
+async function previewCleanup(options = {}) {
+  const allowed = new Set(["homeDir", "stateDir", "ttlDays", "now", "openSnapshot"]);
+  for (const key of Object.keys(options))
+    if (!allowed.has(key))
+      throw new Error(`Unsupported cleanup preview option: ${key}`);
+  const ttlDays = options.ttlDays ?? 7;
+  validateTtl(ttlDays);
+  const home = options.homeDir ?? homedir();
+  const stateDir = options.stateDir ?? join4(process.env.XDG_STATE_HOME ?? join4(home, ".local", "state"), "agy-bridge");
+  if (!isAbsolute(home) || !isAbsolute(stateDir))
+    throw new Error("Cleanup preview roots must be absolute");
+  const now = (options.now ?? Date.now)();
+  if (!Number.isFinite(now))
+    throw new Error("Invalid cleanup preview clock");
+  const warnings = [];
+  const base = join4(home, ".gemini", "antigravity-cli");
+  try {
+    plainDirectory(join4(home, ".gemini"));
+    plainDirectory(base);
+  } catch {
+    return { readOnly: true, ttlDays, complete: false, warnings: ["unsafe_source_directory"], entries: [], totals: { inspected: 0, candidates: 0, protected: 0, estimatedCandidateBytes: 0 }, note: "Advisory snapshot only; no deletion is implemented or authorized." };
+  }
+  const summaries = await readSummaries(base, options.openSnapshot ?? openNativeSnapshot, warnings);
+  const bindings = readBindings(stateDir, warnings);
+  const ids = filesystemIds(base, warnings);
+  const byId = new Map(summaries?.map((row) => [row.conversationId, row]));
+  for (const id of byId.keys())
+    ids.add(id);
+  if (ids.size > MAX_ENTRIES)
+    warnings.push("inventory_truncated");
+  const budget = { remaining: 1e4 };
+  const entries = [];
+  for (const conversationId of [...ids].sort().slice(0, MAX_ENTRIES)) {
+    const row = byId.get(conversationId);
+    const protectionReasons = [];
+    const evidence = [];
+    const parent = row?.parentConversationId;
+    const native = typeof parent === "string" && UUID.test(parent) && parent !== conversationId;
+    if (native)
+      evidence.push("structured_parent");
+    if (!row)
+      protectionReasons.push("metadata_unavailable");
+    if (!bindings.known)
+      protectionReasons.push("unknown_binding_state");
+    if (bindings.ids.has(conversationId))
+      protectionReasons.push("bridge_binding");
+    try {
+      const lockDir = join4(stateDir, "conversation-locks");
+      plainDirectory(lockDir);
+      const hash = createHash4("sha256").update(conversationId).digest("hex");
+      if (stat(join4(lockDir, `${hash}.lock`)))
+        protectionReasons.push("conversation_lock");
+    } catch {
+      protectionReasons.push("unknown_lock_state");
+      warnings.push("lock_state_unavailable");
+    }
+    if (row?.notFullyIdle === 1 || row?.status === "ACTIVE" || row?.status === "CASCADE_RUN_STATUS_RUNNING")
+      protectionReasons.push("active");
+    else if (row && (row.notFullyIdle !== 0 || !IDLE_STATUSES.has(String(row.status))))
+      protectionReasons.push("unknown_activity");
+    const time = parseSummaryTime(row?.modifiedAt);
+    const modifiedAt = Number.isFinite(time) ? new Date(time).toISOString() : null;
+    if (!Number.isFinite(time) || time <= 0 || time > now)
+      protectionReasons.push("unknown_date");
+    else if (time > now - ttlDays * DAY)
+      protectionReasons.push("within_retention");
+    let estimatedBytes = null;
+    try {
+      plainDirectory(join4(base, "brain"));
+      plainDirectory(join4(base, "conversations"));
+      estimatedBytes = sizeOf(join4(base, "brain", conversationId), budget);
+      for (const ext of [".db", ".db-wal", ".db-shm"])
+        estimatedBytes += sizeOf(join4(base, "conversations", `${conversationId}${ext}`), budget);
+    } catch {
+      estimatedBytes = null;
+      protectionReasons.push("filesystem_unavailable");
+      warnings.push("size_estimate_unavailable");
+    }
+    entries.push({ conversationId, category: native ? "native_subagent" : "unclassified", disposition: protectionReasons.length ? "protected" : native ? "candidate" : "unclassified", evidence, protectionReasons, modifiedAt, estimatedBytes });
+  }
+  return {
+    readOnly: true,
+    ttlDays,
+    complete: warnings.length === 0,
+    warnings: [...new Set(warnings)],
+    entries,
+    totals: { inspected: entries.length, candidates: entries.filter((e) => e.disposition === "candidate").length, protected: entries.filter((e) => e.disposition === "protected").length, estimatedCandidateBytes: entries.reduce((sum, e) => sum + (e.disposition === "candidate" ? e.estimatedBytes ?? 0 : 0), 0) },
+    note: "Advisory snapshot only; no deletion is implemented or authorized. Missing evidence is protected. MCP configuration and transcript content are not inspected."
+  };
+}
 // ../../node_modules/.bun/@ai-sdk+provider@3.0.8/node_modules/@ai-sdk/provider/dist/index.mjs
 var marker = "vercel.ai.error";
 var symbol2 = Symbol.for(marker);
@@ -13834,17 +14170,17 @@ function resolveConfig(options = {}) {
 
 // src/session-store.ts
 import {
-  closeSync as closeSync3,
+  closeSync as closeSync4,
   mkdirSync as mkdirSync5,
-  openSync as openSync3,
+  openSync as openSync4,
   readFileSync as readFileSync4,
   renameSync,
   statSync as statSync4,
   unlinkSync as unlinkSync2,
-  writeFileSync as writeFileSync3,
+  writeFileSync as writeFileSync4,
   writeSync as writeSync2
 } from "fs";
-import { dirname, join as join4 } from "path";
+import { dirname, join as join5 } from "path";
 import { randomUUID } from "crypto";
 
 // src/messages.ts
@@ -13960,8 +14296,8 @@ function openSessionStore(path, options = {}) {
   };
   const persist = (file) => {
     mkdirSync5(dirname(path), { recursive: true });
-    const tmp = join4(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
-    writeFileSync3(tmp, `${JSON.stringify(file, null, "\t")}
+    const tmp = join5(dirname(path), `.${Math.random().toString(36).slice(2)}-${process.pid}-${randomUUID()}.tmp`);
+    writeFileSync4(tmp, `${JSON.stringify(file, null, "\t")}
 `);
     renameSync(tmp, path);
   };
@@ -13987,7 +14323,7 @@ function openSessionStore(path, options = {}) {
   };
   const latest = (list) => list.reduce((best, e) => !best || (e.updatedAt ?? "") >= (best.updatedAt ?? "") ? e : best, undefined);
   const releaseLock = (fd) => {
-    closeSync3(fd);
+    closeSync4(fd);
     try {
       unlinkSync2(lockPath);
     } catch (err) {
@@ -14001,7 +14337,7 @@ function openSessionStore(path, options = {}) {
       mkdirSync5(dirname(path), { recursive: true });
       let fd;
       try {
-        fd = openSync3(lockPath, "wx");
+        fd = openSync4(lockPath, "wx");
       } catch (err) {
         if (err?.code !== "EEXIST")
           throw err;
@@ -14135,28 +14471,28 @@ function openSessionStore(path, options = {}) {
 }
 
 // src/paths.ts
-import { homedir, tmpdir } from "os";
-import { isAbsolute, join as join5 } from "path";
+import { homedir as homedir2, tmpdir as tmpdir2 } from "os";
+import { isAbsolute as isAbsolute2, join as join6 } from "path";
 function resolveStateDir(opts = {}) {
   const root = opts.override ?? xdgStateRoot(opts.env ?? process.env);
-  return join5(root, "agy-bridge");
+  return join6(root, "agy-bridge");
 }
 function xdgStateRoot(env) {
   const xdg = env["XDG_STATE_HOME"];
-  if (xdg && isAbsolute(xdg))
+  if (xdg && isAbsolute2(xdg))
     return xdg;
-  const home = env["HOME"] || homedir();
-  return join5(home, ".local", "state");
+  const home = env["HOME"] || homedir2();
+  return join6(home, ".local", "state");
 }
 function sessionMapPath(opts = {}) {
-  return join5(resolveStateDir(opts), "opencode-sessions.json");
+  return join6(resolveStateDir(opts), "opencode-sessions.json");
 }
 
 // src/language-model.ts
 import { randomUUID as randomUUID3 } from "crypto";
 
 // src/turn.ts
-import { basename, dirname as dirname2, join as join8 } from "path";
+import { basename, dirname as dirname2, join as join9 } from "path";
 
 // src/stream-tap.ts
 import { spawn as spawn3 } from "child_process";
@@ -14215,14 +14551,14 @@ function createTap(onLine, opts = {}) {
 }
 
 // src/workdir.ts
-import { mkdtempSync, readdirSync as readdirSync3, rmSync as rmSync2, statSync as statSync5 } from "fs";
-import { isAbsolute as isAbsolute2, join as join6 } from "path";
-import { tmpdir as tmpdir2 } from "os";
+import { mkdtempSync as mkdtempSync2, readdirSync as readdirSync3, rmSync as rmSync3, statSync as statSync5 } from "fs";
+import { isAbsolute as isAbsolute3, join as join7 } from "path";
+import { tmpdir as tmpdir3 } from "os";
 var SCRATCH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 function prepareWorkdir(mode, opts) {
   if (mode === "session") {
     const worktree = opts.worktree;
-    if (worktree === undefined || !isAbsolute2(worktree)) {
+    if (worktree === undefined || !isAbsolute3(worktree)) {
       throw new AgyConfigError("worktree", `session workdirMode requires an absolute worktree, got "${String(worktree)}"`);
     }
     if (worktree === "/") {
@@ -14239,8 +14575,8 @@ function prepareWorkdir(mode, opts) {
     }
     return { dir: worktree, scratch: false };
   }
-  const root = opts.scratchRoot ?? opts.tmpdir ?? tmpdir2();
-  return { dir: mkdtempSync(join6(root, "agy-run-")), scratch: true };
+  const root = opts.scratchRoot ?? opts.tmpdir ?? tmpdir3();
+  return { dir: mkdtempSync2(join7(root, "agy-run-")), scratch: true };
 }
 function pruneScratch(root, now = new Date) {
   let entries;
@@ -14253,7 +14589,7 @@ function pruneScratch(root, now = new Date) {
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith("agy-run-"))
       continue;
-    const dir = join6(root, entry.name);
+    const dir = join7(root, entry.name);
     let mtime;
     try {
       mtime = statSync5(dir).mtime;
@@ -14265,7 +14601,7 @@ function pruneScratch(root, now = new Date) {
     for (const inner of readdirSync3(dir)) {
       if (inner === "run.log")
         continue;
-      rmSync2(join6(dir, inner), { recursive: true, force: true });
+      rmSync3(join7(dir, inner), { recursive: true, force: true });
     }
     pruned++;
   }
@@ -14366,10 +14702,10 @@ function mapClassification(c, ctx) {
 }
 
 // src/diagnostics.ts
-import { lstatSync as lstatSync2, readdirSync as readdirSync4, rmSync as rmSync3, mkdirSync as mkdirSync7, writeFileSync as writeFileSync4, renameSync as renameSync2 } from "fs";
+import { lstatSync as lstatSync3, readdirSync as readdirSync4, rmSync as rmSync4, mkdirSync as mkdirSync7, writeFileSync as writeFileSync5, renameSync as renameSync2 } from "fs";
 import { randomUUID as randomUUID2 } from "crypto";
-import { tmpdir as tmpdir3 } from "os";
-import { join as join7 } from "path";
+import { tmpdir as tmpdir4 } from "os";
+import { join as join8 } from "path";
 var DIAGNOSTICS_DIRNAME = ".agy-diagnostics";
 var SUMMARY_FILENAME = "summary.json";
 var MAX_SUMMARY_BYTES = 8 * 1024;
@@ -14382,22 +14718,22 @@ function generateCallId() {
   return randomUUID2();
 }
 function fallbackDiagnosticsDir() {
-  return join7(tmpdir3(), "agy-bridge-diagnostics-fallback");
+  return join8(tmpdir4(), "agy-bridge-diagnostics-fallback");
 }
 function fallbackAttemptLogPathFor(callId, attemptIndex) {
-  return join7(fallbackDiagnosticsDir(), `${callId}-${attemptIndex}.log`);
+  return join8(fallbackDiagnosticsDir(), `${callId}-${attemptIndex}.log`);
 }
 function diagnosticsDirFor(workdir) {
-  return join7(workdir, DIAGNOSTICS_DIRNAME);
+  return join8(workdir, DIAGNOSTICS_DIRNAME);
 }
 function callGroupDirFor(workdir, callId) {
-  return join7(diagnosticsDirFor(workdir), callId);
+  return join8(diagnosticsDirFor(workdir), callId);
 }
 function attemptLogPathFor(workdir, callId, attemptIndex) {
-  return join7(callGroupDirFor(workdir, callId), `attempt-${attemptIndex}.log`);
+  return join8(callGroupDirFor(workdir, callId), `attempt-${attemptIndex}.log`);
 }
 function summaryPathFor(workdir, callId) {
-  return join7(callGroupDirFor(workdir, callId), SUMMARY_FILENAME);
+  return join8(callGroupDirFor(workdir, callId), SUMMARY_FILENAME);
 }
 function resolveAttemptLogPath(workdir, callId, attemptIndex) {
   try {
@@ -14408,7 +14744,7 @@ function resolveAttemptLogPath(workdir, callId, attemptIndex) {
       mkdirSync7(fallbackDiagnosticsDir(), { recursive: true, mode: 448 });
       return fallbackAttemptLogPathFor(callId, attemptIndex);
     } catch {
-      return join7(tmpdir3(), `agy-attempt-${callId}-${attemptIndex}.log`);
+      return join8(tmpdir4(), `agy-attempt-${callId}-${attemptIndex}.log`);
     }
   }
 }
@@ -14478,8 +14814,8 @@ function writeCallSummary(workdir, callId, summary) {
   mkdirSync7(dir, { recursive: true, mode: 448 });
   const { json } = boundedSummaryJson(summary);
   const path = summaryPathFor(workdir, callId);
-  const tmp = join7(dir, `.${SUMMARY_FILENAME}.${process.pid}.tmp`);
-  writeFileSync4(tmp, json, { mode: 384 });
+  const tmp = join8(dir, `.${SUMMARY_FILENAME}.${process.pid}.tmp`);
+  writeFileSync5(tmp, json, { mode: 384 });
   renameSync2(tmp, path);
   return path;
 }
@@ -14496,10 +14832,10 @@ function listCompletedCallGroups(diagnosticsDir) {
       continue;
     if (!CALL_ID_PATTERN.test(entry.name))
       continue;
-    const dir = join7(diagnosticsDir, entry.name);
-    const summary = join7(dir, SUMMARY_FILENAME);
+    const dir = join8(diagnosticsDir, entry.name);
+    const summary = join8(dir, SUMMARY_FILENAME);
     try {
-      const st = lstatSync2(summary);
+      const st = lstatSync3(summary);
       if (!st.isFile())
         continue;
       groups.push({ dir, mtimeMs: st.mtimeMs });
@@ -14511,7 +14847,7 @@ function listCompletedCallGroups(diagnosticsDir) {
 }
 function removeCallGroup(dir) {
   try {
-    rmSync3(dir, { recursive: true, force: true });
+    rmSync4(dir, { recursive: true, force: true });
     return true;
   } catch {
     return false;
@@ -14543,7 +14879,7 @@ function pruneDiagnosticsUnder(diagnosticsDir, opts = {}) {
   try {
     let rootStat;
     try {
-      rootStat = lstatSync2(diagnosticsDir);
+      rootStat = lstatSync3(diagnosticsDir);
     } catch {
       return 0;
     }
@@ -14562,7 +14898,7 @@ function pruneDiagnosticsUnder(diagnosticsDir, opts = {}) {
 function pruneLooseLogFiles(rootDir, isOwned, opts) {
   let rootStat;
   try {
-    rootStat = lstatSync2(rootDir);
+    rootStat = lstatSync3(rootDir);
   } catch {
     return 0;
   }
@@ -14584,16 +14920,16 @@ function pruneLooseLogFiles(rootDir, isOwned, opts) {
       continue;
     if (!isOwned(entry.name))
       continue;
-    const path = join7(rootDir, entry.name);
+    const path = join8(rootDir, entry.name);
     let st;
     try {
-      st = lstatSync2(path);
+      st = lstatSync3(path);
     } catch {
       continue;
     }
     if (nowMs - st.mtimeMs > maxAgeMs) {
       try {
-        rmSync3(path, { force: true });
+        rmSync4(path, { force: true });
         pruned++;
       } catch {
         continue;
@@ -14607,7 +14943,7 @@ function pruneLooseLogFiles(rootDir, isOwned, opts) {
     const excess = survivors.length - maxEntries;
     for (let i = 0;i < excess; i++) {
       try {
-        rmSync3(survivors[i].path, { force: true });
+        rmSync4(survivors[i].path, { force: true });
         pruned++;
       } catch {
         continue;
@@ -14620,7 +14956,7 @@ function pruneFallbackDiagnostics(rootDir = fallbackDiagnosticsDir(), opts = {})
   return pruneLooseLogFiles(rootDir, () => true, opts);
 }
 var LOOSE_TIER3_PATTERN = new RegExp(`^agy-attempt-${CALL_ID_PATTERN.source.slice(1, -1)}-\\d+\\.log$`, "i");
-function pruneLooseTier3Logs(rootDir = tmpdir3(), opts = {}) {
+function pruneLooseTier3Logs(rootDir = tmpdir4(), opts = {}) {
   return pruneLooseLogFiles(rootDir, (name) => LOOSE_TIER3_PATTERN.test(name), opts);
 }
 
@@ -14800,7 +15136,7 @@ async function runTurn(deps, req) {
   }
   let conversationLock;
   if (resumeId !== undefined) {
-    const lockDir = join8(resolveStateDir({ override: deps.config.stateDir }), "conversation-locks");
+    const lockDir = join9(resolveStateDir({ override: deps.config.stateDir }), "conversation-locks");
     try {
       conversationLock = await acquireConversationLock(lockDir, resumeId);
     } catch (err) {
@@ -14867,7 +15203,7 @@ var DEFAULT_LIMITS = { context: 128000, output: 8192 };
 function model(id, name, modelArg) {
   return { id, name, modelArg, limit: { ...DEFAULT_LIMITS }, pool: poolForModel(modelArg ?? "") };
 }
-var EFFORT_SUFFIXES = ["high", "medium", "low"];
+var EFFORT_SUFFIXES = ["xhigh", "high", "medium", "low"];
 function splitEffort(id) {
   for (const effort of EFFORT_SUFFIXES) {
     const suffix = `-${effort}`;
@@ -14917,7 +15253,7 @@ function baseRegistry(discovered) {
     const base = byId.get(baseId);
     if (!base)
       continue;
-    const fallback = efforts.high ?? efforts.medium ?? efforts.low;
+    const fallback = EFFORT_SUFFIXES.map((e) => efforts[e]).find((v) => v !== undefined);
     if (fallback !== undefined)
       base.modelArg = fallback;
     base.pool = poolForModel(base.modelArg ?? "");
@@ -14951,7 +15287,7 @@ function applyConfig(base, user) {
     } else {
       const fullId = `agy/${normalize(id)}`;
       const variants = cfg?.variants;
-      const fallbackArg = variants?.["high"]?.agyModelId ?? Object.values(variants ?? {}).find((v) => typeof v?.agyModelId === "string")?.agyModelId;
+      const fallbackArg = EFFORT_SUFFIXES.map((e) => variants?.[e]?.agyModelId).find((v) => typeof v === "string") ?? Object.values(variants ?? {}).find((v) => typeof v?.agyModelId === "string")?.agyModelId;
       const extended = model(fullId, cfg?.name ?? normalize(id), fallbackArg ?? normalize(id));
       if (cfg?.limit !== undefined)
         extended.limit = { ...cfg.limit };
@@ -15497,12 +15833,12 @@ function createAgyProvider(options = {}, testDeps = {}) {
 }
 
 // src/models-cache.ts
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "fs";
-import { join as join9, dirname as dirname3 } from "path";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync5, writeFileSync as writeFileSync6 } from "fs";
+import { join as join10, dirname as dirname3 } from "path";
 var MODELS_CACHE_VERSION = 1;
 var MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 function modelsCachePath(opts = {}) {
-  return join9(resolveStateDir({ override: opts.override }), "models-cache.json");
+  return join10(resolveStateDir({ override: opts.override }), "models-cache.json");
 }
 function parseModelsCache(raw) {
   let parsed;
@@ -15553,7 +15889,7 @@ function writeModelsCache(path, models, now) {
   };
   try {
     mkdirSync8(dirname3(path), { recursive: true });
-    writeFileSync5(path, `${JSON.stringify(cache, null, "\t")}
+    writeFileSync6(path, `${JSON.stringify(cache, null, "\t")}
 `);
   } catch {}
 }
@@ -15636,7 +15972,18 @@ var server = async (input, options) => {
     },
     tool: {
       open_agy_session: openSessionTool,
-      agy_open: openSessionTool
+      agy_open: openSessionTool,
+      agy_cleanup_preview: tool({
+        description: CLEANUP_PREVIEW_DESCRIPTION,
+        args: {
+          ttlDays: tool.schema.number().int().min(0).max(36500).optional().describe("Retention window in days (default: 7). Preview only.")
+        },
+        async execute(args) {
+          const params = parseCleanupPreviewParameters(args);
+          const stateDir = dirname4(sessionMapPath({ override: opts.stateDir, env: opts.env }));
+          return JSON.stringify(await (opts.cleanupPreview ?? previewCleanup)({ ...params, stateDir }), null, 2);
+        }
+      })
     }
   };
   return hooks;

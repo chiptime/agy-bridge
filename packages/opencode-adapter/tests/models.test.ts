@@ -332,6 +332,24 @@ describe("unit: models — effort-variant collapse (suffixed ids → base entrie
 		});
 		expect(record["claude-sonnet-4-6"].variants).toBeUndefined();
 	});
+
+	test("xhigh suffix collapses into variants.xhigh and ranks above high as collapsed base fallback", () => {
+		const reg = resolveRegistry({}, [
+			{ id: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+			{ id: "gemini-4-neon-xhigh", name: "Gemini 4 Neon (XHigh)" },
+			{ id: "gemini-4-neon-medium", name: "Gemini 4 Neon (Medium)" },
+			{ id: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
+		]);
+		expect(reg.map((m) => m.id)).toEqual(["agy/default", "agy/gemini-4-neon"]);
+		const neon = reg[1];
+		expect(neon.modelArg).toBe("gemini-4-neon-xhigh");
+		expect(neon.variants).toEqual({
+			high: { agyModelId: "gemini-4-neon-high" },
+			xhigh: { agyModelId: "gemini-4-neon-xhigh" },
+			medium: { agyModelId: "gemini-4-neon-medium" },
+			low: { agyModelId: "gemini-4-neon-low" },
+		});
+	});
 });
 
 describe("unit: models — imageInput capability gating (spec image-input R1, design D2)", () => {
